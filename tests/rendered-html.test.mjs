@@ -30,6 +30,9 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
     readFile(new URL("../drizzle/0003_clammy_rick_jones.sql", import.meta.url), "utf8"),
   ]);
   assert.match(app, /题库书架/);
+  assert.match(app, /resolveBankFit/);
+  assert.match(app, /精选标准/);
+  assert.match(app, /取消/);
   assert.match(app, /buildDailyPlan/);
   assert.match(app, /错题、超时与没把握/);
   assert.match(app, /不确定（即使答对也会复习）/);
@@ -125,13 +128,13 @@ test("the differentiated daily prescription records confidence, balances banks a
     readFile(new URL("../drizzle/0005_free_silk_fever.sql", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /今日训练处方/);
+  assert.match(app, /今日日练/);
   assert.match(app, /nextDailyStep/);
   assert.match(app, /timeZone: "Asia\/Shanghai"/);
   assert.match(app, /真会/);
   assert.match(app, /有点犹豫/);
   assert.match(app, /蒙对了/);
-  assert.match(app, /明日训练处方/);
+  assert.match(app, /明日安排/);
   assert.match(route, /takeBalanced/);
   assert.match(route, /questionFingerprint/);
   assert.match(route, /reviewAtAfterChinaDays/);
@@ -149,7 +152,9 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /考试雷达 · 目标日历/);
+  assert.match(app, /公考雷达 · 报考工作台/);
+  assert.match(app, /职位表发布/);
+  assert.match(app, /报考筛选/);
   assert.match(app, /报名提醒已工作/);
   assert.match(app, /公告发布/);
   assert.match(app, /准考证打印/);
@@ -166,6 +171,7 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
   assert.match(route, /行政执法专项/);
   assert.match(route, /事业单位职测/);
   assert.match(css, /retention-strip/);
+  assert.match(css, /radar-feature-grid/);
   assert.match(css, /calendar-event/);
   assert.match(css, /micro-grid/);
 });
@@ -246,6 +252,9 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /时政电台/);
   assert.match(hub, /申论晨读/);
   assert.match(hub, /错题语音朗读/);
+  assert.match(hub, /audio-category-board/);
+  assert.match(hub, /categoryMeta/);
+  assert.match(hub, /音频精选分类/);
   assert.match(hub, /请先暂停十秒/);
   assert.match(hub, /0\.75/);
   assert.match(hub, /1\.5/);

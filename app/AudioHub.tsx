@@ -21,6 +21,12 @@ const filterOptions: Array<{ id: Filter; label: string }> = [
   { id: "wrong", label: "错题听练" },
 ];
 
+const categoryMeta: Record<AudioCategory, { label: string; title: string; empty: string }> = {
+  current: { label: "时政", title: "时政电台", empty: "月度热点、重要会议和新法解读会在这里更新。" },
+  essay: { label: "申论", title: "申论晨读", empty: "人民日报评论拆解、规范表达和分主题金句会在这里更新。" },
+  wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，真实错题会自动生成听练内容。" },
+};
+
 function splitForSpeech(text: string) {
   const sentences = text.split(/(?<=[。！？；])/).filter(Boolean);
   const chunks: string[] = [];
@@ -87,6 +93,11 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     () => filter === "all" ? tracks : tracks.filter((track) => track.category === filter),
     [filter, tracks],
   );
+  const tracksByCategory = useMemo(() => ({
+    current: tracks.filter((track) => track.category === "current"),
+    essay: tracks.filter((track) => track.category === "essay"),
+    wrong: tracks.filter((track) => track.category === "wrong"),
+  }), [tracks]);
   const selectedTrack = visibleTracks.find((track) => track.id === selectedId) ?? visibleTracks[0];
 
   useEffect(() => {
@@ -336,27 +347,48 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         {filterOptions.map((option) => <button key={option.id} className={filter === option.id ? "active" : ""} onClick={() => changeFilter(option.id)}>{option.label}</button>)}
       </div>
 
-      <section className="audio-list" aria-label="音频节目列表">
-        {visibleTracks.length === 0 ? (
-          filter === "wrong" ? (
-            <div className="audio-empty"><span>错</span><div><h3>完成行测后再来听</h3><p>系统会把真实错题的题干、答案和解析生成 AI 听练内容。</p></div></div>
-          ) : (
-            <div className="audio-empty"><span>新</span><div><h3>本栏目内容准备中</h3><p>新的时政与申论音频会按内容计划陆续更新。</p></div></div>
-          )
-        ) : visibleTracks.map((track) => {
-          const selected = selectedTrack?.id === track.id;
-          const cached = cachedIds.includes(track.id);
-          return (
-            <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
-              <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
-              <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
-                <span>{track.kicker}{track.audioUrl ? " · 真人/固定音频" : " · AI合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
-              </button>
-              <button className={`cache-button ${cached ? "cached" : ""}`} onClick={() => void cacheTrack(track)} aria-label={`离线缓冲${track.title}`}>{cached ? "✓ 已缓冲" : "↓ 离线"}</button>
-            </article>
-          );
-        })}
-      </section>
+      {filter === "all" ? (
+        <section className="audio-category-board" aria-label="音频精选分类">
+          {(["current", "essay", "wrong"] as AudioCategory[]).map((category) => {
+            const categoryTracks = tracksByCategory[category];
+            const meta = categoryMeta[category];
+            return (
+              <article className={`audio-category-card ${category}`} key={category}>
+                <header><span>{meta.label}</span><div><h3>{meta.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 可倍速/循环/离线缓冲` : meta.empty}</p></div></header>
+                <div>
+                  {categoryTracks.slice(0, 2).map((track) => {
+                    const selected = selectedTrack?.id === track.id;
+                    return <button className={selected ? "selected" : ""} data-track-id={track.id} onClick={selectTrackFromButton} key={track.id}><b>{track.title}</b><small>{track.kicker} · {track.duration}</small></button>;
+                  })}
+                  {!categoryTracks.length && <small className="category-empty">{meta.empty}</small>}
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      ) : (
+        <section className="audio-list" aria-label="音频节目列表">
+          {visibleTracks.length === 0 ? (
+            filter === "wrong" ? (
+              <div className="audio-empty"><span>错</span><div><h3>完成行测后再来听</h3><p>系统会把真实错题的题干、答案和解析生成 AI 听练内容。</p></div></div>
+            ) : (
+              <div className="audio-empty"><span>新</span><div><h3>本栏目内容准备中</h3><p>新的时政与申论音频会按内容计划陆续更新。</p></div></div>
+            )
+          ) : visibleTracks.map((track) => {
+            const selected = selectedTrack?.id === track.id;
+            const cached = cachedIds.includes(track.id);
+            return (
+              <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
+                <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
+                <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
+                  <span>{track.kicker}{track.audioUrl ? " · 真人/固定音频" : " · AI合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
+                </button>
+                <button className={`cache-button ${cached ? "cached" : ""}`} onClick={() => void cacheTrack(track)} aria-label={`离线缓冲${track.title}`}>{cached ? "✓ 已缓冲" : "↓ 离线"}</button>
+              </article>
+            );
+          })}
+        </section>
+      )}
 
       {selectedTrack ? (
         <section className="audio-player" aria-label="播放控制器">

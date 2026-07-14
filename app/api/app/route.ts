@@ -20,13 +20,16 @@ const EVENT_NAMES = new Set([
   "paywall_view",
   "paywall_action",
   "practice_answer",
+  "practice_confidence",
   "practice_batch",
+  "plan_override",
   "bank_toggle",
   "profile_save",
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
 const allowedWrongReasons = new Set(["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足", "蒙对了"]);
+const allowedConfidence = new Set(["confident", "hesitant", "guessed"]);
 
 type UserRow = {
   id: string;
@@ -77,11 +80,14 @@ type QuestionProgressRow = {
   correct_count: number;
   wrong_count: number;
   uncertain_count: number;
+  review_stage: number;
   next_review_at: string | null;
   favorite: number;
   wrong_reason: string;
   last_answered_at: string | null;
 };
+
+type QuestionCandidate = { question: ResolvedQuestion; progress?: QuestionProgressRow };
 
 type ResolvedQuestion = {
   id: string;
@@ -96,6 +102,9 @@ type ResolvedQuestion = {
   difficulty: string;
   bankCode: string;
   bankName: string;
+  scopeLabel: string;
+  reviewedAt: string | null;
+  targetCode: string | null;
 };
 
 type ExamTargetProfile = {
@@ -134,6 +143,12 @@ function chinaDateKey(date = new Date()) {
     month: "2-digit",
     day: "2-digit",
   }).format(date);
+}
+
+function reviewAtAfterChinaDays(days: number) {
+  const target = new Date(`${chinaDateKey()}T05:00:00+08:00`);
+  target.setUTCDate(target.getUTCDate() + Math.max(1, days));
+  return target.toISOString();
 }
 
 function targetSecondsFor(question: Pick<ResolvedQuestion, "module" | "knowledge">) {
@@ -343,6 +358,9 @@ function starterQuestionList(): ResolvedQuestion[] {
     difficulty: "中等",
     bankCode: STARTER_BANK_CODE,
     bankName: "公考日练·行测基础",
+    scopeLabel: "国省共通基础",
+    reviewedAt: "2026-07-14",
+    targetCode: null,
   })));
 }
 
@@ -375,6 +393,8 @@ function publicQuestion(question: ResolvedQuestion, progress?: QuestionProgressR
     difficulty: question.difficulty,
     bankCode: question.bankCode,
     bankName: question.bankName,
+    scopeLabel: question.scopeLabel,
+    reviewedAt: question.reviewedAt,
     state: progress?.state ?? "new",
     due,
     favorite: Boolean(progress?.favorite),
@@ -388,6 +408,44 @@ function priorityFor(progress?: QuestionProgressRow) {
   if (!progress) return 2;
   if (progress.state === "learning") return 3;
   return 4;
+}
+
+function questionFingerprint(question: ResolvedQuestion) {
+  const compact = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[\s，。；：、,.!?！？:;"'“”‘’（）()【】\[\]]+/g, "");
+  return `${compact(question.stem)}|${question.options.map(compact).join("|")}`;
+}
+
+function takeBalanced(
+  items: QuestionCandidate[],
+  count: number,
+  selectedItems: QuestionCandidate[],
+  bankCycle: string[],
+) {
+  const selectedIds = new Set(selectedItems.map((item) => item.question.id));
+  const grouped = new Map<string, QuestionCandidate[]>();
+  for (const item of items) {
+    if (selectedIds.has(item.question.id)) continue;
+    const queue = grouped.get(item.question.bankCode) ?? [];
+    queue.push(item);
+    grouped.set(item.question.bankCode, queue);
+  }
+  const cycle = bankCycle.length ? bankCycle : Array.from(grouped.keys());
+  let remaining = Math.max(0, count);
+  while (remaining > 0) {
+    let addedThisRound = 0;
+    for (const bankCode of cycle) {
+      if (remaining <= 0) break;
+      const queue = grouped.get(bankCode);
+      while (queue?.length && selectedIds.has(queue[0].question.id)) queue.shift();
+      const next = queue?.shift();
+      if (!next) continue;
+      selectedItems.push(next);
+      selectedIds.add(next.question.id);
+      remaining -= 1;
+      addedThisRound += 1;
+    }
+    if (!addedThisRound) break;
+  }
 }
 
 async function selectedBankCodes(userId: string) {
@@ -459,6 +517,12 @@ function bankMatchesTargets(bank: { exam_type: string; province?: string | null 
 
 function displayExamType(value: string) {
   return value === "national" ? "国考" : value === "provincial" ? "省考" : "专项";
+}
+
+function questionScopeLabel(examType: string, province: unknown) {
+  if (examType === "national") return "国考题源";
+  if (examType === "provincial") return `${normalizeProvince(province) || "省考"}省考题源`;
+  return "通用专项";
 }
 
 function normalizeProvince(value: unknown) {
@@ -553,10 +617,14 @@ async function loadStudyInsights(userId: string) {
   const selectedBanks = (await selectedBankCodes(userId)).slice(0, 32);
   const [summary, modules, states, recent] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
-      COALESCE(AVG(duration_ms), 0) AS avg_duration FROM practice_attempts WHERE user_id = ?`).bind(userId)
-      .first<{ total: number; correct: number; avg_duration: number }>(),
+      COALESCE(AVG(duration_ms), 0) AS avg_duration,
+      COALESCE(SUM(CASE WHEN confidence IN ('hesitant', 'guessed') OR uncertain = 1 THEN 1 ELSE 0 END), 0) AS uncertain_total,
+      COALESCE(SUM(overtime), 0) AS overtime_total
+      FROM practice_attempts WHERE user_id = ?`).bind(userId)
+      .first<{ total: number; correct: number; avg_duration: number; uncertain_total: number; overtime_total: number }>(),
     db.prepare(`SELECT module, COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(AVG(duration_ms), 0) AS avg_duration FROM practice_attempts WHERE user_id = ?
+        AND answered_at >= datetime('now', '-14 days')
       GROUP BY module ORDER BY total DESC LIMIT 8`).bind(userId)
       .all<{ module: string; total: number; correct: number; avg_duration: number }>(),
     db.prepare(`SELECT state, COUNT(*) AS total FROM user_question_progress WHERE user_id = ? GROUP BY state`)
@@ -592,23 +660,44 @@ async function loadStudyInsights(userId: string) {
       WHERE uqp.user_id = ? AND datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP
         AND (${dueScopes.join(" OR ")})`).bind(...dueBindings).first<{ total: number }>().then((row) => Number(row?.total ?? 0))
     : 0;
+  const tomorrowDueCount = dueScopes.length
+    ? await db.prepare(`SELECT COUNT(*) AS total FROM user_question_progress uqp
+      WHERE uqp.user_id = ?
+        AND datetime(uqp.next_review_at) <= datetime('now', '+8 hours', 'start of day', '+2 days', '-8 hours')
+        AND (${dueScopes.join(" OR ")})`).bind(...dueBindings).first<{ total: number }>().then((row) => Number(row?.total ?? 0))
+    : 0;
+  const moduleInsights = modules.results.map((row) => ({
+    module: row.module,
+    total: Number(row.total),
+    accuracy: Number(row.total) ? Math.round((Number(row.correct) / Number(row.total)) * 100) : 0,
+    avgSeconds: Math.round(Number(row.avg_duration) / 1000),
+  }));
+  const focusCandidates = moduleInsights.filter((item) => item.total >= 3);
+  const focusModule = [...(focusCandidates.length ? focusCandidates : moduleInsights)]
+    .sort((a, b) => a.accuracy - b.accuracy || b.avgSeconds - a.avgSeconds)[0] ?? null;
+  const focusQuestionCount = focusModule ? 5 : 0;
+  const estimatedMinutes = Math.max(5, Math.ceil(tomorrowDueCount * 1.2 + focusQuestionCount * 1.2));
   return {
     total,
     accuracy: total ? Math.round((correct / total) * 100) : 0,
     avgSeconds: total ? Math.round(Number(summary?.avg_duration ?? 0) / 1000) : 0,
+    uncertainCount: Number(summary?.uncertain_total ?? 0),
+    overtimeCount: Number(summary?.overtime_total ?? 0),
     dueCount,
     stateCounts: {
       learning: stateMap.learning ?? 0,
       weak: stateMap.weak ?? 0,
       mastered: stateMap.mastered ?? 0,
     },
-    modules: modules.results.map((row) => ({
-      module: row.module,
-      total: Number(row.total),
-      accuracy: Number(row.total) ? Math.round((Number(row.correct) / Number(row.total)) * 100) : 0,
-      avgSeconds: Math.round(Number(row.avg_duration) / 1000),
-    })),
+    modules: moduleInsights,
     recent: recent.results.map((row) => ({ day: row.day, total: Number(row.total), accuracy: Number(row.total) ? Math.round((Number(row.correct) / Number(row.total)) * 100) : 0 })),
+    tomorrowPlan: {
+      dueCount: tomorrowDueCount,
+      focusModule: focusModule?.module ?? null,
+      focusQuestionCount,
+      estimatedMinutes,
+      taskText: `${tomorrowDueCount ? `先回炉${tomorrowDueCount}道到期题` : "先完成到期检查"}${focusModule ? `，再练${focusQuestionCount}道${focusModule.module}` : "，再按主攻题库补充新题"}，预计${estimatedMinutes}分钟。`,
+    },
   };
 }
 
@@ -851,8 +940,9 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
   const placeholders = bankCodes.map(() => "?").join(",");
   const rows = await getD1().prepare(`WITH candidates AS (
       SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json,
-        q.answer, q.explanation, q.technique, q.difficulty, q.source, qb.bank_code, qb.name AS bank_name,
-        uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.next_review_at,
+        q.answer, q.explanation, q.technique, q.difficulty, q.source, q.updated_at,
+        qb.bank_code, qb.name AS bank_name, qb.exam_type AS bank_exam_type, qb.province AS bank_province,
+        uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.review_stage, uqp.next_review_at,
         uqp.favorite, uqp.wrong_reason, uqp.last_answered_at, qbi.sort_order,
         CASE WHEN datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP THEN 0 WHEN uqp.state = 'weak' THEN 1
           WHEN uqp.question_code IS NULL THEN 2 WHEN uqp.state = 'learning' THEN 3 ELSE 4 END AS priority_rank
@@ -880,6 +970,7 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
       correct_count: Number(row.correct_count ?? 0),
       wrong_count: Number(row.wrong_count ?? 0),
       uncertain_count: Number(row.uncertain_count ?? 0),
+      review_stage: Number(row.review_stage ?? 0),
       next_review_at: row.next_review_at ? String(row.next_review_at) : null,
       favorite: Number(row.favorite ?? 0),
       wrong_reason: String(row.wrong_reason ?? ""),
@@ -899,6 +990,13 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
         difficulty: String(row.difficulty ?? "中等"),
         bankCode: String(row.bank_code),
         bankName: String(row.bank_name),
+        scopeLabel: questionScopeLabel(String(row.bank_exam_type), row.bank_province),
+        reviewedAt: row.updated_at ? String(row.updated_at) : null,
+        targetCode: String(row.bank_exam_type) === "national"
+          ? "national"
+          : String(row.bank_exam_type) === "provincial"
+            ? `province:${normalizeProvince(row.bank_province)}`
+            : null,
       },
       progress,
     };
@@ -916,6 +1014,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     bankCodes.unshift(primaryBankCode);
   }
   const mode = payload.mode === "review" ? "review" : "mixed";
+  const focusModule = trimmed(payload.focusModule, 40);
   const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
   const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
   const requestedLimit = Math.max(1, Math.min(active ? 20 : 5, Math.floor(Number(payload.limit)) || 10));
@@ -924,7 +1023,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     : [];
   const starter = starterQuestionList();
   const starterRows = bankCodes.includes(STARTER_BANK_CODE)
-    ? await getD1().prepare(`SELECT question_code, state, correct_count, wrong_count, uncertain_count,
+    ? await getD1().prepare(`SELECT question_code, state, correct_count, wrong_count, uncertain_count, review_stage,
       next_review_at, favorite, wrong_reason, last_answered_at FROM user_question_progress
       WHERE user_id = ? AND question_code IN (${starter.map(() => "?").join(",")})`)
       .bind(userId, ...starter.map((question) => question.id)).all<QuestionProgressRow>()
@@ -934,39 +1033,82 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     ? starter.map((question) => ({ question, progress: starterMap.get(question.id) }))
     : [];
   candidates.push(...await dbQuestionCandidates(userId, bankCodes.filter((code) => code !== STARTER_BANK_CODE)));
-  const unique = Array.from(new Map(candidates.map((item) => [item.question.id, item])).values());
   const bankOrder = new Map(bankCodes.map((code, index) => [code, index]));
-  const sorted = [...unique].sort((a, b) => priorityFor(a.progress) - priorityFor(b.progress)
+  const allSorted = [...candidates].sort((a, b) => priorityFor(a.progress) - priorityFor(b.progress)
     || Number(bankOrder.get(a.question.bankCode) ?? 99) - Number(bankOrder.get(b.question.bankCode) ?? 99)
     || (a.progress?.last_answered_at ?? "").localeCompare(b.progress?.last_answered_at ?? ""));
 
+  const fingerprintBanks = new Map<string, Set<string>>();
+  for (const item of allSorted) {
+    const fingerprint = questionFingerprint(item.question);
+    const banks = fingerprintBanks.get(fingerprint) ?? new Set<string>();
+    banks.add(item.question.bankCode);
+    fingerprintBanks.set(fingerprint, banks);
+  }
+  const contentMap = new Map<string, QuestionCandidate>();
+  for (const item of allSorted) {
+    const fingerprint = questionFingerprint(item.question);
+    if (!contentMap.has(fingerprint)) contentMap.set(fingerprint, item);
+  }
+  const sorted = Array.from(contentMap.entries()).map(([fingerprint, item]) => ({
+    ...item,
+    question: {
+      ...item.question,
+      scopeLabel: (fingerprintBanks.get(fingerprint)?.size ?? 0) > 1 ? "跨库共通题" : item.question.scopeLabel,
+    },
+  }));
+
+  const profile = await loadExamProfile(userId);
+  const urgentTargets = new Set(profile.targets.filter((target) => {
+    if (!target.examDate) return false;
+    const days = Math.ceil((Date.parse(`${target.examDate}T23:59:59+08:00`) - Date.now()) / 86_400_000);
+    return Number.isFinite(days) && days >= 0 && days <= 30;
+  }).map((target) => target.code));
+  const targetByBank = new Map(candidates.map((item) => [item.question.bankCode, item.question.targetCode]));
+  const urgentBankCodes = new Set(bankCodes.filter((code) => {
+    const targetCode = targetByBank.get(code);
+    return Boolean(targetCode && urgentTargets.has(targetCode));
+  }));
+  const otherBankCodes = bankCodes.filter((code) => code !== primaryBankCode);
+  const bankCycle = primaryBankCode ? [primaryBankCode, ...otherBankCodes, primaryBankCode] : [...bankCodes];
+  for (const code of otherBankCodes) if (urgentBankCodes.has(code)) bankCycle.push(code);
+
   let chosen: typeof sorted;
   if (resumeQuestionCodes.length) {
-    const candidateMap = new Map(sorted.map((item) => [item.question.id, item]));
+    const candidateMap = new Map(allSorted.map((item) => [item.question.id, item]));
     chosen = resumeQuestionCodes.map((code) => candidateMap.get(code)).filter((item): item is (typeof sorted)[number] => Boolean(item));
   } else if (mode === "review") {
-    chosen = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
+    chosen = [];
+    const due = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
+    takeBalanced(due, requestedLimit, chosen, bankCycle);
   } else {
     const due = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
-    const weak = sorted.filter((item) => item.progress?.state === "weak" && !due.includes(item));
     const fresh = sorted.filter((item) => !item.progress);
+    const focusFresh = focusModule ? fresh.filter((item) => item.question.module === focusModule) : fresh;
     const selectedItems: typeof sorted = [];
-    const add = (items: typeof sorted, count: number) => {
-      for (const item of items) {
-        if (selectedItems.length >= requestedLimit || count <= 0) break;
-        if (!selectedItems.includes(item)) {
-          selectedItems.push(item);
-          count -= 1;
-        }
-      }
-    };
-    add(due, Math.ceil(requestedLimit * 0.6));
-    add(weak, Math.ceil(requestedLimit * 0.2));
-    add(fresh, requestedLimit - selectedItems.length);
-    add(sorted, requestedLimit - selectedItems.length);
+    takeBalanced(due, Math.ceil(requestedLimit * 0.6), selectedItems, bankCycle);
+    takeBalanced(focusFresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
+    takeBalanced(fresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
+    takeBalanced(due, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     chosen = selectedItems;
   }
-  const questions = chosen.slice(0, requestedLimit).map((item) => publicQuestion(item.question, item.progress));
+  const questions = chosen.slice(0, requestedLimit).map((item) => {
+    const question = publicQuestion(item.question, item.progress);
+    const planReason = question.due
+      ? item.progress?.state === "weak" ? "错题到期" : "记忆到期"
+      : item.question.bankCode === primaryBankCode
+        ? "主攻考试"
+        : urgentBankCodes.has(item.question.bankCode)
+          ? "临近考试"
+          : "兼顾题库";
+    return { ...question, planReason };
+  });
+  const byBank = Array.from(questions.reduce((map, question) => {
+    const current = map.get(question.bankCode) ?? { bankCode: question.bankCode, bankName: question.bankName, count: 0 };
+    current.count += 1;
+    map.set(question.bankCode, current);
+    return map;
+  }, new Map<string, { bankCode: string; bankName: string; count: number }>()).values());
   return json({
     questions,
     mode,
@@ -974,8 +1116,11 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     access: active ? "premium" : "preview",
     composition: {
       due: questions.filter((item) => item.due).length,
-      weak: questions.filter((item) => item.state === "weak" && !item.due).length,
+      weak: questions.filter((item) => item.state === "weak").length,
       new: questions.filter((item) => item.state === "new").length,
+      primary: questions.filter((item) => item.bankCode === primaryBankCode).length,
+      other: questions.filter((item) => item.bankCode !== primaryBankCode).length,
+      byBank,
     },
   });
 }
@@ -984,7 +1129,8 @@ async function resolveQuestion(questionCode: string, bankCode: string) {
   const starter = starterQuestionList().find((question) => question.id === questionCode && bankCode === STARTER_BANK_CODE);
   if (starter) return starter;
   const row = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json, q.answer,
-    q.explanation, q.technique, q.difficulty, q.source, qb.bank_code, qb.name AS bank_name
+    q.explanation, q.technique, q.difficulty, q.source, q.updated_at, qb.bank_code, qb.name AS bank_name,
+    qb.exam_type AS bank_exam_type, qb.province AS bank_province
     FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
     JOIN question_banks qb ON qb.id = qbi.bank_id
     WHERE q.question_code = ? AND qb.bank_code = ? AND q.status = 'active' AND qb.status = 'published' LIMIT 1`)
@@ -995,6 +1141,13 @@ async function resolveQuestion(questionCode: string, bankCode: string) {
     answer: answerIndex(row.answer ? String(row.answer) : null), explanation: String(row.explanation ?? ""),
     knowledge: String(row.sub_type ?? row.module), technique: String(row.technique ?? ""), source: String(row.source ?? "题库导入"),
     difficulty: String(row.difficulty ?? "中等"), bankCode: String(row.bank_code), bankName: String(row.bank_name),
+    scopeLabel: questionScopeLabel(String(row.bank_exam_type), row.bank_province),
+    reviewedAt: row.updated_at ? String(row.updated_at) : null,
+    targetCode: String(row.bank_exam_type) === "national"
+      ? "national"
+      : String(row.bank_exam_type) === "provincial"
+        ? `province:${normalizeProvince(row.bank_province)}`
+        : null,
   } satisfies ResolvedQuestion;
 }
 
@@ -1007,11 +1160,11 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const question = await resolveQuestion(questionCode, bankCode);
   if (!question || selectedAnswer < 0 || selectedAnswer >= question.options.length || question.answer < 0) return json({ error: "题目或答案无效" }, 400);
   const db = getD1();
-  const previous = await db.prepare(`SELECT state, correct_count, wrong_count, uncertain_count, review_count,
+  const previous = await db.prepare(`SELECT state, correct_count, wrong_count, uncertain_count, review_count, review_stage,
     next_review_at, last_answered_at
     FROM user_question_progress WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
     .first<{ state: string; correct_count: number; wrong_count: number; uncertain_count: number; review_count: number;
-      next_review_at: string | null; last_answered_at: string | null }>();
+      review_stage: number; next_review_at: string | null; last_answered_at: string | null }>();
   const correct = selectedAnswer === question.answer;
   const targetSeconds = targetSecondsFor(question);
   const overtime = durationMs > targetSeconds * 1000;
@@ -1019,31 +1172,32 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const isDue = Boolean(previous?.next_review_at && Date.parse(previous.next_review_at) <= Date.now());
   const correctCount = Number(previous?.correct_count ?? 0) + (correct ? 1 : 0);
   const wrongCount = Number(previous?.wrong_count ?? 0) + (correct ? 0 : 1);
-  const uncertainCount = Number(previous?.uncertain_count ?? 0) + (uncertain || overtime ? 1 : 0);
-  const state = needsReview
-    ? "weak"
-    : previous?.state === "mastered"
-      ? "mastered"
-      : previous?.state === "learning" && isDue
-        ? "mastered"
-        : "learning";
-  const reviewDays = state === "mastered" ? (previous?.state === "mastered" ? 14 : 7) : state === "learning" ? 3 : 1;
-  const nextReviewAt = new Date(Date.now() + reviewDays * 86_400_000).toISOString();
-  await db.batch([
+  const uncertainCount = Number(previous?.uncertain_count ?? 0) + (uncertain ? 1 : 0);
+  const previousStage = Math.max(0, Math.min(4, Number(previous?.review_stage ?? 0)));
+  const reviewStage = needsReview
+    ? 0
+    : previous
+      ? isDue ? Math.min(4, previousStage + 1) : Math.max(1, previousStage)
+      : 1;
+  const reviewDays = [1, 3, 7, 14, 30][reviewStage];
+  const state = needsReview ? "weak" : reviewStage >= 2 ? "mastered" : "learning";
+  const nextReviewAt = reviewAtAfterChinaDays(reviewDays);
+  const results = await db.batch([
     db.prepare(`INSERT INTO user_question_progress
       (user_id, question_code, state, correct_count, wrong_count, uncertain_count, last_answer, last_correct,
-       last_duration_ms, last_answered_at, next_review_at, review_count, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, CURRENT_TIMESTAMP)
+       last_duration_ms, last_answered_at, next_review_at, review_count, review_stage, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(user_id, question_code) DO UPDATE SET state = excluded.state, correct_count = excluded.correct_count,
       wrong_count = excluded.wrong_count, uncertain_count = excluded.uncertain_count, last_answer = excluded.last_answer,
       last_correct = excluded.last_correct, last_duration_ms = excluded.last_duration_ms,
       last_answered_at = CURRENT_TIMESTAMP, next_review_at = excluded.next_review_at,
-      review_count = excluded.review_count, updated_at = CURRENT_TIMESTAMP`)
+      review_count = excluded.review_count, review_stage = excluded.review_stage, updated_at = CURRENT_TIMESTAMP`)
       .bind(userId, questionCode, state, correctCount, wrongCount, uncertainCount, selectedAnswer, correct ? 1 : 0,
-        durationMs, nextReviewAt, Number(previous?.review_count ?? 0) + (isDue ? 1 : 0)),
+        durationMs, nextReviewAt, Number(previous?.review_count ?? 0) + (isDue ? 1 : 0), reviewStage),
     db.prepare(`INSERT INTO practice_attempts
-      (user_id, question_code, bank_code, module, is_correct, uncertain, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(userId, questionCode, bankCode, question.module, correct ? 1 : 0, uncertain || overtime ? 1 : 0, durationMs),
+      (user_id, question_code, bank_code, module, is_correct, uncertain, confidence, wrong_reason, overtime, duration_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`).bind(userId, questionCode, bankCode, question.module,
+        correct ? 1 : 0, uncertain ? 1 : 0, uncertain ? "hesitant" : "confident", overtime ? 1 : 0, durationMs),
   ]);
   return json({
     ok: true,
@@ -1053,6 +1207,10 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     technique: question.technique,
     state,
     nextReviewAt,
+    reviewDays,
+    reviewStage,
+    needsReview,
+    attemptId: Number(results[1]?.meta?.last_row_id ?? 0),
     overtime,
     targetSeconds,
   });
@@ -1062,6 +1220,7 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
   const questionCode = trimmed(payload.questionCode, 80);
   if (!questionCode) return json({ error: "题目编号不能为空" }, 400);
   const db = getD1();
+  const attemptId = Math.max(0, Math.floor(Number(payload.attemptId)) || 0);
   await db.prepare(`INSERT OR IGNORE INTO user_question_progress (user_id, question_code, state)
     VALUES (?, ?, 'learning')`).bind(userId, questionCode).run();
   if (typeof payload.favorite === "boolean") {
@@ -1072,8 +1231,35 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
     const reason = allowedWrongReasons.has(payload.wrongReason) ? payload.wrongReason : "";
     await db.prepare("UPDATE user_question_progress SET wrong_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND question_code = ?")
       .bind(reason, userId, questionCode).run();
+    if (attemptId) await db.prepare(`UPDATE practice_attempts SET wrong_reason = ?
+      WHERE id = ? AND user_id = ? AND question_code = ?`).bind(reason, attemptId, userId, questionCode).run();
   }
-  return json({ ok: true });
+  let nextReviewAt: string | null = null;
+  let state: string | null = null;
+  if (typeof payload.confidence === "string") {
+    const confidence = allowedConfidence.has(payload.confidence) ? payload.confidence : "";
+    if (!confidence) return json({ error: "掌握状态无效" }, 400);
+    const attempt = attemptId
+      ? await db.prepare(`SELECT uncertain FROM practice_attempts
+        WHERE id = ? AND user_id = ? AND question_code = ?`).bind(attemptId, userId, questionCode).first<{ uncertain: number }>()
+      : null;
+    if (attemptId) await db.prepare(`UPDATE practice_attempts SET confidence = ?, uncertain = ?
+      WHERE id = ? AND user_id = ? AND question_code = ?`)
+      .bind(confidence, confidence === "confident" ? Number(attempt?.uncertain ?? 0) : 1, attemptId, userId, questionCode).run();
+    if (confidence !== "confident") {
+      nextReviewAt = reviewAtAfterChinaDays(1);
+      const increment = attempt && !attempt.uncertain ? 1 : 0;
+      await db.prepare(`UPDATE user_question_progress SET state = 'weak', review_stage = 0,
+        uncertain_count = uncertain_count + ?, next_review_at = ?,
+        wrong_reason = CASE WHEN ? = 'guessed' THEN '蒙对了' ELSE wrong_reason END,
+        updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND question_code = ?`)
+        .bind(increment, nextReviewAt, confidence, userId, questionCode).run();
+      state = "weak";
+    }
+  }
+  const current = await db.prepare(`SELECT state, next_review_at FROM user_question_progress
+    WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode).first<{ state: string; next_review_at: string | null }>();
+  return json({ ok: true, state: state ?? current?.state ?? "learning", nextReviewAt: nextReviewAt ?? current?.next_review_at ?? null });
 }
 
 async function bindInvite(userId: string, payload: Record<string, unknown>) {
@@ -1382,6 +1568,8 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   const questionModule = trimmed(item.module, 40);
   const stem = trimmed(item.stem, 12_000);
   const prompt = trimmed(item.prompt, 2_000);
+  const explanation = trimmed(item.explanation, 8_000);
+  const source = trimmed(item.source, 120);
   const options = Array.isArray(item.options) ? item.options.map((value) => trimmed(value, 2_000)).filter(Boolean).slice(0, 8) : [];
   const scoringPoints = Array.isArray(item.scoringPoints) ? item.scoringPoints.map((value) => trimmed(value, 500)).filter(Boolean).slice(0, 30) : [];
   const answer = trimmed(item.answer, 8).toUpperCase() || null;
@@ -1389,6 +1577,8 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   if (!new Set(["行测", "申论"]).has(subject)) return { error: "科目只能是行测或申论" };
   if (!questionModule) return { error: "模块不能为空" };
   if (!stem) return { error: "题干/材料不能为空" };
+  if (!source) return { error: "来源不能为空，请填写考试、年份或原创说明" };
+  if (!explanation) return { error: "解析/参考答案不能为空" };
   if (subject === "行测" && (options.length < 2 || !answer || !/^[A-H]$/.test(answer))) return { error: "行测题必须填写至少2个选项及A—H正确答案" };
   if (subject === "申论" && !prompt) return { error: "申论题必须填写申论任务" };
   const wordValue = Number(item.wordLimit);
@@ -1401,15 +1591,28 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
     stem,
     options,
     answer,
-    explanation: trimmed(item.explanation, 8_000),
+    explanation,
     technique: trimmed(item.technique, 4_000),
     material: trimmed(item.material, 12_000),
     prompt,
     wordLimit,
     scoringPoints,
     difficulty: new Set(["简单", "中等", "较难"]).has(String(item.difficulty)) ? String(item.difficulty) : "中等",
-    source: trimmed(item.source, 120),
+    source,
   } };
+}
+
+function importedQuestionIdentityMatches(row: Record<string, unknown>, item: ImportedQuestion) {
+  const normalize = (value: unknown) => String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ");
+  const existingOptions = parseOptions(String(row.options_json ?? "[]")).map(normalize);
+  const incomingOptions = (item.options ?? []).map(normalize);
+  return normalize(row.subject) === normalize(item.subject)
+    && normalize(row.module) === normalize(item.module)
+    && normalize(row.sub_type) === normalize(item.subType)
+    && normalize(row.stem) === normalize(item.stem)
+    && JSON.stringify(existingOptions) === JSON.stringify(incomingOptions)
+    && normalize(row.answer).toUpperCase() === normalize(item.answer).toUpperCase()
+    && normalize(row.prompt) === normalize(item.prompt);
 }
 
 async function adminImportQuestionBatch(payload: Record<string, unknown>) {
@@ -1431,18 +1634,23 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
   let accepted = valid;
   if (valid.length) {
     const placeholders = valid.map(() => "?").join(",");
-    const conflicts = await db.prepare(`SELECT DISTINCT q.question_code, qb.name AS bank_name
+    const existingRows = await db.prepare(`SELECT q.question_code, q.subject, q.module, q.sub_type, q.stem,
+      q.options_json, q.answer, q.prompt, COUNT(DISTINCT qb.id) AS bank_count,
+      MAX(CASE WHEN qb.id = ? THEN 1 ELSE 0 END) AS in_current_bank,
+      GROUP_CONCAT(DISTINCT qb.name) AS bank_names
       FROM questions q
-      JOIN question_bank_items qbi ON qbi.question_id = q.id
-      JOIN question_banks qb ON qb.id = qbi.bank_id
-      WHERE q.question_code IN (${placeholders}) AND qb.id != ?`)
-      .bind(...valid.map((item) => item.question.questionCode), bankId)
-      .all<{ question_code: string; bank_name: string }>();
-    const conflictMap = new Map(conflicts.results.map((item) => [item.question_code, item.bank_name]));
+      LEFT JOIN question_bank_items qbi ON qbi.question_id = q.id
+      LEFT JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE q.question_code IN (${placeholders}) GROUP BY q.id`)
+      .bind(bankId, ...valid.map((item) => item.question.questionCode))
+      .all<Record<string, unknown>>();
+    const existingMap = new Map(existingRows.results.map((item) => [String(item.question_code), item]));
     accepted = valid.filter((item) => {
-      const bankName = conflictMap.get(item.question.questionCode);
-      if (!bankName) return true;
-      errors.push({ row: item.row, message: `题目编号已属于“${bankName}”，不同省份题库必须使用独立编号` });
+      const existing = existingMap.get(item.question.questionCode);
+      if (!existing) return true;
+      if (Number(existing.in_current_bank) === 1 && Number(existing.bank_count) === 1) return true;
+      if (importedQuestionIdentityMatches(existing, item.question)) return true;
+      errors.push({ row: item.row, message: `题目编号已用于“${String(existing.bank_names ?? "其他题库")}”且核心内容不一致；共通题可复用编号，但题干、选项和答案必须一致` });
       return false;
     });
   }

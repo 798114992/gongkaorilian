@@ -89,7 +89,7 @@ const templateRows = [
     字数限制: "",
     采分点: "",
     难度: "中等",
-    来源: "原创/真题年份",
+    来源: "2026年国考行政执法卷（示例）",
   },
   {
     题目编号: "GD-SL-2027-0001",
@@ -108,7 +108,7 @@ const templateRows = [
     字数限制: 150,
     采分点: "问题一|问题二|问题三",
     难度: "中等",
-    来源: "原创/真题年份",
+    来源: "公考日练原创微练（示例）",
   },
 ];
 
@@ -156,6 +156,8 @@ function validateRow(row: CanonicalQuestion, index: number): RowIssue[] {
   if (!new Set(["行测", "申论"]).has(row.subject)) issues.push({ row: line, message: "科目只能填写行测或申论" });
   if (!row.module) issues.push({ row: line, message: "模块不能为空" });
   if (!row.stem) issues.push({ row: line, message: "题干/材料不能为空" });
+  if (!row.source) issues.push({ row: line, message: "来源不能为空，请填写考试、年份或原创说明" });
+  if (!row.explanation) issues.push({ row: line, message: "解析/参考答案不能为空" });
   if (row.subject === "行测" && (row.options.length < 2 || !row.answer || !/^[A-H]$/.test(row.answer))) issues.push({ row: line, message: "行测题缺少选项或正确答案" });
   if (row.subject === "申论" && !row.prompt) issues.push({ row: line, message: "申论题缺少申论任务" });
   return issues;
@@ -301,7 +303,7 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   return (
     <>
       <section className="admin-panel bank-config-panel">
-        <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2><small>省考必须按省份单独建库，例如“广东省考行测”和“江苏省考行测”不能合并。</small></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
+        <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2><small>省考按省份独立建库；国省共通题可复用同一题目编号，系统会跨库去重。</small></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
         <div className="form-grid bank-form-grid">
           <label>题库编码<input value={bankForm.bankCode} onChange={(event) => setBankForm({ ...bankForm, bankCode: event.target.value.toUpperCase() })} placeholder="如 GD-XC-2027" /></label>
           <label>题库名称<input value={bankForm.name} onChange={(event) => setBankForm({ ...bankForm, name: event.target.value })} placeholder="如 2027广东省考·行测综合" /></label>

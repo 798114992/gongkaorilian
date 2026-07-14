@@ -227,6 +227,7 @@ export const userQuestionProgress = sqliteTable(
     favorite: integer("favorite").notNull().default(0),
     wrongReason: text("wrong_reason").notNull().default(""),
     reviewCount: integer("review_count").notNull().default(0),
+    reviewStage: integer("review_stage").notNull().default(0),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
@@ -246,6 +247,9 @@ export const practiceAttempts = sqliteTable(
     module: text("module").notNull(),
     isCorrect: integer("is_correct").notNull(),
     uncertain: integer("uncertain").notNull().default(0),
+    confidence: text("confidence").notNull().default("confident"),
+    wrongReason: text("wrong_reason").notNull().default(""),
+    overtime: integer("overtime").notNull().default(0),
     durationMs: integer("duration_ms").notNull().default(0),
     answeredAt: text("answered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },

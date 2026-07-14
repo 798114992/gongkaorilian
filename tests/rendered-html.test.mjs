@@ -41,7 +41,7 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(migration, /CREATE TABLE `practice_attempts`/);
 });
 
-test("daily practice adapts to 30, 45 or 60 minutes and survives refreshes", async () => {
+test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defaults and survives refreshes", async () => {
   const [page, layout, app, route, content, schema] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -56,9 +56,11 @@ test("daily practice adapts to 30, 45 or 60 minutes and survives refreshes", asy
   assert.match(schema, /dailyMinutes:[\s\S]*?\.default\(30\)/);
 
   assert.match(app, /buildDailyPlan/);
-  for (const questionCount of [10, 15, 20]) {
+  for (const questionCount of [5, 10, 15, 20]) {
     assert.match(app, new RegExp(`questionCount:\\s*${questionCount}\\b`));
   }
+  assert.match(app, /planOverrides/);
+  assert.match(app, /10分钟保底/);
   assert.match(app, /todayKey/);
   assert.match(route, /chinaDateKey/);
   assert.match(route, /resumeQuestionCodes/);
@@ -108,9 +110,36 @@ test("learners can combine national and multiple provincial exam targets and ban
 
   assert.match(practiceBatch, /const selected = await selectedBankCodes\(userId\)/);
   assert.match(practiceBatch, /requested\.length \? requested : selected/);
-  assert.doesNotMatch(practiceBatch, /loadExamProfile|bankMatchesTargets|bankMatchesProfile/);
-  assert.match(route, /不同省份题库必须使用独立编号/);
-  assert.match(manager, /省考必须按省份单独建库/);
+  assert.match(practiceBatch, /const profile = await loadExamProfile\(userId\)/);
+  assert.match(practiceBatch, /urgentTargets/);
+  assert.match(practiceBatch, /takeBalanced/);
+  assert.match(route, /共通题可复用编号/);
+  assert.match(route, /importedQuestionIdentityMatches/);
+  assert.match(manager, /国省共通题可复用同一题目编号/);
+});
+
+test("the differentiated daily prescription records confidence, balances banks and produces a next-day action", async () => {
+  const [app, route, migration, css] = await Promise.all([
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0005_free_silk_fever.sql", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /今日训练处方/);
+  assert.match(app, /nextDailyStep/);
+  assert.match(app, /真会/);
+  assert.match(app, /有点犹豫/);
+  assert.match(app, /蒙对了/);
+  assert.match(app, /明日训练处方/);
+  assert.match(route, /takeBalanced/);
+  assert.match(route, /questionFingerprint/);
+  assert.match(route, /reviewAtAfterChinaDays/);
+  assert.match(route, /practice_confidence/);
+  assert.match(route, /tomorrowPlan/);
+  assert.match(migration, /ADD `confidence`/);
+  assert.match(migration, /ADD `review_stage`/);
+  assert.match(css, /safe-area-inset-top/);
+  assert.match(css, /confidence-box/);
 });
 
 test("account sync and redemption protections are server side", async () => {
@@ -175,6 +204,8 @@ test("database migrations include durable product, content, analytics and questi
   assert.match(runtime, /user_exam_targets_user_target_uq/);
   assert.match(allMigrations, /CREATE TABLE `user_exam_targets`/);
   assert.match(allMigrations, /CREATE UNIQUE INDEX `user_exam_targets_user_target_uq`/);
+  assert.match(allMigrations, /ADD `confidence`/);
+  assert.match(allMigrations, /ADD `review_stage`/);
 });
 
 test("the 日练电台 uses fixed audio and supports the requested controls", async () => {
@@ -187,6 +218,7 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /时政电台/);
   assert.match(hub, /申论晨读/);
   assert.match(hub, /错题语音朗读/);
+  assert.match(hub, /请先暂停十秒/);
   assert.match(hub, /0\.75/);
   assert.match(hub, /1\.5/);
   assert.match(hub, /循环中/);

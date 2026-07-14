@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Question } from "./data/content";
 import type { AudioCategory, AudioTrack } from "./data/audio";
 
@@ -37,6 +37,23 @@ function splitForSpeech(text: string) {
   return chunks.length ? chunks : [text];
 }
 
+function subscribeOnlineStatus(onChange: () => void) {
+  window.addEventListener("online", onChange);
+  window.addEventListener("offline", onChange);
+  return () => {
+    window.removeEventListener("online", onChange);
+    window.removeEventListener("offline", onChange);
+  };
+}
+
+function readOnlineStatus() {
+  return navigator.onLine;
+}
+
+function readServerOnlineStatus() {
+  return true;
+}
+
 export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions, notify, trackEvent }: AudioHubProps) {
   const wrongTracks = useMemo<AudioTrack[]>(() => wrongQuestions.map((question) => ({
     id: `wrong-${question.id}`,
@@ -46,7 +63,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     source: "我的错题本",
     duration: "约1分钟",
     description: question.stem,
-    text: `开始复习一道${question.module}错题。题目是：${question.stem}。选项分别是：${question.options.map((option, index) => `${String.fromCharCode(65 + index)}，${option}`).join("；")}。正确答案是${String.fromCharCode(65 + question.answer)}，${question.options[question.answer]}。解析：${question.explanation}。请暂停十秒，复述本题考点和错误原因。`,
+    text: `开始复习一道${question.module}错题。题目是：${question.stem}。选项分别是：${question.options.map((option, index) => `${String.fromCharCode(65 + index)}，${option}`).join("；")}。请先暂停十秒，独立回忆答案和解题思路，再继续播放。正确答案是${String.fromCharCode(65 + question.answer)}，${question.options[question.answer]}。解析：${question.explanation}。最后请复述本题考点和错误原因。`,
   })), [wrongQuestions]);
 
   const tracks = useMemo(() => [...curatedTracks, ...wrongTracks], [curatedTracks, wrongTracks]);
@@ -58,11 +75,8 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const [speed, setSpeed] = useState(1);
   const [loop, setLoop] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState(0);
-  const [cachedIds, setCachedIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try { return JSON.parse(window.localStorage.getItem("gkrl-cached-audio") ?? "[]") as string[]; } catch { return []; }
-  });
-  const [online, setOnline] = useState(() => typeof navigator === "undefined" ? true : navigator.onLine);
+  const [cachedIds, setCachedIds] = useState<string[]>([]);
+  const online = useSyncExternalStore(subscribeOnlineStatus, readOnlineStatus, readServerOnlineStatus);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const sessionRef = useRef(0);
   const speedRef = useRef(speed);
@@ -87,14 +101,13 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
   useEffect(() => {
     const audioElement = audioRef.current;
-    const goOnline = () => setOnline(true);
-    const goOffline = () => setOnline(false);
-    window.addEventListener("online", goOnline);
-    window.addEventListener("offline", goOffline);
+    const cachedTimer = window.setTimeout(() => {
+      try { setCachedIds(JSON.parse(window.localStorage.getItem("gkrl-cached-audio") ?? "[]") as string[]); }
+      catch { setCachedIds([]); }
+    }, 0);
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
     return () => {
-      window.removeEventListener("online", goOnline);
-      window.removeEventListener("offline", goOffline);
+      window.clearTimeout(cachedTimer);
       sessionRef.current += 1;
       window.speechSynthesis?.cancel();
       audioElement?.pause();
@@ -114,13 +127,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setProgress(0);
     if (message) notify(message);
   }, [notify]);
-
-  useEffect(() => {
-    const firstVisibleId = visibleTracks[0]?.id ?? "";
-    if (selectedId && visibleTracks.some((track) => track.id === selectedId)) return;
-    if (selectedId || firstVisibleId) stop();
-    setSelectedId(firstVisibleId);
-  }, [selectedId, stop, visibleTracks]);
 
   const changeFilter = (nextFilter: Filter) => {
     if (nextFilter === filter) return;
@@ -322,6 +328,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
           </div>
           <button onClick={togglePlayback}>{playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
+          {selectedTrack.category === "wrong" && <small className="audio-recall-tip">听到“暂停十秒”时先独立作答，再继续听答案。</small>}
         </section>
       ) : null}
 

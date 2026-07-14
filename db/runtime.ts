@@ -190,6 +190,7 @@ export async function ensureSchema() {
       favorite INTEGER NOT NULL DEFAULT 0,
       wrong_reason TEXT NOT NULL DEFAULT '',
       review_count INTEGER NOT NULL DEFAULT 0,
+      review_stage INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_question_progress_user_question_uq ON user_question_progress(user_id, question_code)"),
@@ -203,6 +204,9 @@ export async function ensureSchema() {
       module TEXT NOT NULL,
       is_correct INTEGER NOT NULL,
       uncertain INTEGER NOT NULL DEFAULT 0,
+      confidence TEXT NOT NULL DEFAULT 'confident',
+      wrong_reason TEXT NOT NULL DEFAULT '',
+      overtime INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER NOT NULL DEFAULT 0,
       answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),

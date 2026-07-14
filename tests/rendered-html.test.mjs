@@ -127,6 +127,7 @@ test("the differentiated daily prescription records confidence, balances banks a
   ]);
   assert.match(app, /今日训练处方/);
   assert.match(app, /nextDailyStep/);
+  assert.match(app, /timeZone: "Asia\/Shanghai"/);
   assert.match(app, /真会/);
   assert.match(app, /有点犹豫/);
   assert.match(app, /蒙对了/);

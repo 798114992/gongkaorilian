@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import test from "node:test";
 
 test("the 公考日练 product shell has a real preview boundary", async () => {
@@ -41,16 +41,31 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(migration, /CREATE TABLE `practice_attempts`/);
 });
 
-test("provincial question banks are isolated by the learner target province", async () => {
+test("learners can combine national and multiple provincial exam targets and banks", async () => {
   const [app, route, manager] = await Promise.all([
     readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/QuestionBankManager.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /不会跨省混题/);
-  assert.match(app, /只练目标考试，不混入其他省份/);
-  assert.match(route, /bankMatchesProfile/);
-  assert.match(route, /当前目标是.*请先切换目标考试再添加这套题库/);
+  const saveProfile = route.slice(route.indexOf("async function saveExamProfile"), route.indexOf("async function toggleQuestionBank"));
+  const toggleBank = route.slice(route.indexOf("async function toggleQuestionBank"), route.indexOf("async function dbQuestionCandidates"));
+  const practiceBatch = route.slice(route.indexOf("async function getPracticeBatch"), route.indexOf("async function resolveQuestion"));
+
+  assert.match(app, /targets/);
+  assert.match(saveProfile, /Array\.isArray\(payload\.targets\)/);
+  assert.match(saveProfile, /payload\.targets\.slice\(0, 32\)/);
+  assert.match(saveProfile, /请至少选择一个报考目标/);
+  assert.match(saveProfile, /DELETE FROM user_exam_targets WHERE user_id = \?/);
+  assert.match(saveProfile, /targets\.map\(\(target\) => db\.prepare/);
+
+  assert.match(toggleBank, /INSERT OR IGNORE INTO user_question_banks/);
+  assert.match(toggleBank, /INSERT OR IGNORE INTO user_exam_targets/);
+  assert.match(toggleBank, /targetCode/);
+  assert.doesNotMatch(toggleBank, /请先切换目标考试再添加这套题库/);
+
+  assert.match(practiceBatch, /const selected = await selectedBankCodes\(userId\)/);
+  assert.match(practiceBatch, /requested\.length \? requested : selected/);
+  assert.doesNotMatch(practiceBatch, /loadExamProfile|bankMatchesTargets|bankMatchesProfile/);
   assert.match(route, /不同省份题库必须使用独立编号/);
   assert.match(manager, /省考必须按省份单独建库/);
 });
@@ -87,11 +102,17 @@ test("the admin surface includes codes, content publishing and analytics", async
 });
 
 test("database migrations include durable product, content, analytics and question bank records", async () => {
-  const [baseMigration, contentMigration, questionMigration] = await Promise.all([
+  const migrationDirectory = new URL("../drizzle/", import.meta.url);
+  const migrationFiles = (await readdir(migrationDirectory)).filter((name) => /^\d+_.+\.sql$/.test(name)).sort();
+  const [baseMigration, contentMigration, questionMigration, schema, runtime, ...allMigrationFiles] = await Promise.all([
     readFile(new URL("../drizzle/0000_sweet_may_parker.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0001_even_azazel.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0002_lyrical_goblin_queen.sql", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/runtime.ts", import.meta.url), "utf8"),
+    ...migrationFiles.map((name) => readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8")),
   ]);
+  const allMigrations = allMigrationFiles.join("\n");
   assert.match(baseMigration, /CREATE TABLE `redemption_codes`/);
   assert.match(baseMigration, /CREATE TABLE `membership_ledger`/);
   assert.match(baseMigration, /CREATE TABLE `invite_relations`/);
@@ -104,6 +125,13 @@ test("database migrations include durable product, content, analytics and questi
   assert.match(questionMigration, /CREATE TABLE `question_bank_items`/);
   assert.match(questionMigration, /CREATE TABLE `question_imports`/);
   assert.match(questionMigration, /question_bank_items_bank_question_uq/);
+  assert.match(schema, /export const userExamTargets = sqliteTable/);
+  assert.match(schema, /"user_exam_targets"/);
+  assert.match(schema, /user_exam_targets_user_target_uq/);
+  assert.match(runtime, /CREATE TABLE IF NOT EXISTS user_exam_targets/);
+  assert.match(runtime, /user_exam_targets_user_target_uq/);
+  assert.match(allMigrations, /CREATE TABLE `user_exam_targets`/);
+  assert.match(allMigrations, /CREATE UNIQUE INDEX `user_exam_targets_user_target_uq`/);
 });
 
 test("the 日练电台 uses fixed audio and supports the requested controls", async () => {

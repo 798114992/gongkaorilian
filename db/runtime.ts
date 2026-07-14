@@ -156,6 +156,18 @@ export async function ensureSchema() {
       daily_minutes INTEGER NOT NULL DEFAULT 20,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_exam_targets (
+      user_id TEXT NOT NULL,
+      target_code TEXT NOT NULL,
+      exam_type TEXT NOT NULL,
+      province TEXT NOT NULL DEFAULT '',
+      exam_year INTEGER NOT NULL,
+      exam_date TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_exam_targets_user_target_uq ON user_exam_targets(user_id, target_code)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS user_exam_targets_user_idx ON user_exam_targets(user_id, created_at)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_question_banks (
       user_id TEXT NOT NULL,
       bank_code TEXT NOT NULL,

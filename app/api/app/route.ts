@@ -98,6 +98,29 @@ type ResolvedQuestion = {
   bankName: string;
 };
 
+type ExamTargetProfile = {
+  code: string;
+  label: string;
+  examType: "国考" | "省考";
+  province: string;
+  examYear: number;
+  examDate: string | null;
+};
+
+type LoadedExamProfile = {
+  onboarded: boolean;
+  dailyMinutes: number;
+  targets: ExamTargetProfile[];
+  /** @deprecated Kept for one rolling-release window so an older cached client can still render. */
+  examType: "国考" | "省考";
+  /** @deprecated Use targets instead. */
+  province: string;
+  /** @deprecated Use targets instead. */
+  examYear: number;
+  /** @deprecated Use targets instead. */
+  examDate: string | null;
+};
+
 function json(data: unknown, status = 200, cookie?: string) {
   const headers = new Headers({
     "content-type": "application/json; charset=utf-8",
@@ -191,6 +214,30 @@ async function migrateDeviceUser(deviceId: string, accountId: string) {
     db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(laterDate(account?.membership_end ?? null, device.membership_end), accountId),
     db.prepare(`INSERT INTO user_states (user_id, progress_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(user_id) DO UPDATE SET progress_json = excluded.progress_json, updated_at = CURRENT_TIMESTAMP`).bind(accountId, progress),
+    db.prepare(`INSERT OR IGNORE INTO user_exam_profiles
+      (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
+      SELECT ?, exam_type, province, exam_year, exam_date, daily_minutes, CURRENT_TIMESTAMP
+      FROM user_exam_profiles WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare(`INSERT OR IGNORE INTO user_exam_targets
+      (user_id, target_code, exam_type, province, exam_year, exam_date, created_at, updated_at)
+      SELECT ?, target_code, exam_type, province, exam_year, exam_date, created_at, CURRENT_TIMESTAMP
+      FROM user_exam_targets WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare(`INSERT OR IGNORE INTO user_exam_targets
+      (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
+      SELECT ?, CASE WHEN exam_type = '省考' THEN 'province:' || province ELSE 'national' END,
+        CASE WHEN exam_type = '省考' THEN 'provincial' ELSE 'national' END,
+        CASE WHEN exam_type = '省考' THEN province ELSE '' END, exam_year, exam_date, CURRENT_TIMESTAMP
+      FROM user_exam_profiles WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare(`INSERT OR IGNORE INTO user_question_banks (user_id, bank_code, added_at)
+      SELECT ?, bank_code, added_at FROM user_question_banks WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare(`INSERT OR IGNORE INTO user_question_progress
+      (user_id, question_code, state, correct_count, wrong_count, uncertain_count, last_answer,
+        last_correct, last_duration_ms, last_answered_at, next_review_at, favorite, wrong_reason,
+        review_count, updated_at)
+      SELECT ?, question_code, state, correct_count, wrong_count, uncertain_count, last_answer,
+        last_correct, last_duration_ms, last_answered_at, next_review_at, favorite, wrong_reason,
+        review_count, updated_at FROM user_question_progress WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare("UPDATE practice_attempts SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE redemptions SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE membership_ledger SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE invite_relations SET inviter_id = ? WHERE inviter_id = ?").bind(accountId, deviceId),
@@ -329,35 +376,71 @@ async function selectedBankCodes(userId: string) {
   return [STARTER_BANK_CODE];
 }
 
-async function loadExamProfile(userId: string) {
-  const row = await getD1().prepare(`SELECT exam_type, province, exam_year, exam_date, daily_minutes
-    FROM user_exam_profiles WHERE user_id = ?`).bind(userId).first<{
-      exam_type: string; province: string; exam_year: number; exam_date: string | null; daily_minutes: number;
-    }>();
-  return row ? {
-    onboarded: true,
-    examType: row.exam_type,
-    province: row.province,
-    examYear: row.exam_year,
-    examDate: row.exam_date,
-    dailyMinutes: row.daily_minutes,
-  } : {
-    onboarded: false,
-    examType: "国考",
-    province: "",
-    examYear: new Date().getFullYear() + 1,
-    examDate: null,
-    dailyMinutes: 20,
+async function loadExamProfile(userId: string): Promise<LoadedExamProfile> {
+  const db = getD1();
+  const [row, targetRows] = await Promise.all([
+    db.prepare(`SELECT exam_type, province, exam_year, exam_date, daily_minutes
+      FROM user_exam_profiles WHERE user_id = ?`).bind(userId).first<{
+        exam_type: string; province: string; exam_year: number; exam_date: string | null; daily_minutes: number;
+      }>(),
+    db.prepare(`SELECT target_code, exam_type, province, exam_year, exam_date
+      FROM user_exam_targets WHERE user_id = ? ORDER BY created_at, target_code`).bind(userId).all<{
+        target_code: string; exam_type: string; province: string; exam_year: number; exam_date: string | null;
+      }>(),
+  ]);
+  const targets = Array.from(new Map(targetRows.results.map((target) => {
+    const province = target.exam_type === "national" ? "" : normalizeProvince(target.province);
+    const code = target.exam_type === "national" ? "national" : `province:${province}`;
+    return [code, {
+    code,
+    label: target.exam_type === "national" ? "国考" : `${province}省考`,
+    examType: target.exam_type === "national" ? "国考" as const : "省考" as const,
+    province,
+    examYear: target.exam_year,
+    examDate: target.exam_date,
+  } satisfies ExamTargetProfile] as const;
+  })).values());
+  if (row) {
+    const isProvincial = row.exam_type === "省考";
+    const province = isProvincial ? normalizeProvince(row.province) : "";
+    const legacyTarget = {
+      code: isProvincial ? `province:${province}` : "national",
+      label: isProvincial ? `${province}省考` : "国考",
+      examType: isProvincial ? "省考" : "国考",
+      province,
+      examYear: row.exam_year,
+      examDate: row.exam_date,
+    } satisfies ExamTargetProfile;
+    if (!targets.some((target) => target.code === legacyTarget.code)) targets.unshift(legacyTarget);
+  }
+  const primary = targets[0];
+  return {
+    onboarded: targets.length > 0,
+    dailyMinutes: row?.daily_minutes ?? 20,
+    targets,
+    examType: primary?.examType ?? "国考",
+    province: primary?.province ?? "",
+    examYear: primary?.examYear ?? new Date().getFullYear() + 1,
+    examDate: primary?.examDate ?? null,
   };
 }
 
-function bankMatchesProfile(bank: { exam_type: string; province?: string | null }, profile: { examType: string; province: string }) {
-  if (profile.examType === "国考") return bank.exam_type === "national";
-  return bank.exam_type === "provincial" && (bank.province ?? "") === profile.province;
+function bankMatchesTargets(bank: { exam_type: string; province?: string | null }, profile: LoadedExamProfile) {
+  if (bank.exam_type === "special") return true;
+  if (bank.exam_type === "national") return profile.targets.some((target) => target.examType === "国考");
+  const province = normalizeProvince(bank.province);
+  return profile.targets.some((target) => target.examType === "省考" && normalizeProvince(target.province) === province);
 }
 
 function displayExamType(value: string) {
   return value === "national" ? "国考" : value === "provincial" ? "省考" : "专项";
+}
+
+function normalizeProvince(value: unknown) {
+  return trimmed(value, 24)
+    .replace(/特别行政区$/, "")
+    .replace(/壮族自治区$|回族自治区$|维吾尔自治区$|自治区$/, "")
+    .replace(/省$|市$/, "");
 }
 
 async function loadQuestionBanks(userId: string) {
@@ -404,17 +487,20 @@ async function loadQuestionBanks(userId: string) {
     mismatchReason: "只用于练习基础题型，不代表目标考试的命题特点。",
   };
   return [starter, ...rows.results.map((row) => {
-    const targetMatch = bankMatchesProfile(row, profile);
-    const recommended = targetMatch && (!row.exam_year || row.exam_year === profile.examYear);
-    const scopeLabel = row.exam_type === "provincial" ? `${row.province ?? "未设置"}省考专属` : row.exam_type === "national" ? "国考专属" : "专项训练";
-    const mismatchReason = targetMatch ? "" : profile.examType === "省考"
-      ? `当前目标是${profile.province}省考，该题库不会进入智能组题。`
-      : "当前目标是国考，该题库不会进入智能组题。";
+    const targetMatch = bankMatchesTargets(row, profile);
+    const matchingTarget = profile.targets.find((target) => row.exam_type === "national"
+      ? target.examType === "国考"
+      : row.exam_type === "provincial" ? target.examType === "省考" && normalizeProvince(target.province) === normalizeProvince(row.province) : true);
+    const recommended = targetMatch && (!row.exam_year || matchingTarget?.examYear === row.exam_year);
+    const scopeLabel = row.exam_type === "provincial" ? `${normalizeProvince(row.province) || "未设置"}省考专属` : row.exam_type === "national" ? "国考专属" : "专项训练";
+    const mismatchReason = targetMatch ? "" : row.exam_type === "provincial"
+      ? `添加后会同步加入“${normalizeProvince(row.province) || "该省"}省考”报考目标。`
+      : row.exam_type === "national" ? "添加后会同步加入“国考”报考目标。" : "可作为专项题库加入。";
     return {
     code: row.bank_code,
     name: row.name,
     examType: displayExamType(row.exam_type),
-    province: row.province ?? "全国",
+    province: normalizeProvince(row.province) || "全国",
     examYear: row.exam_year,
     subject: row.subject,
     description: row.description,
@@ -432,6 +518,7 @@ async function loadQuestionBanks(userId: string) {
 
 async function loadStudyInsights(userId: string) {
   const db = getD1();
+  const selectedBanks = (await selectedBankCodes(userId)).slice(0, 32);
   const [summary, modules, states, recent] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(AVG(duration_ms), 0) AS avg_duration FROM practice_attempts WHERE user_id = ?`).bind(userId)
@@ -450,13 +537,34 @@ async function loadStudyInsights(userId: string) {
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
   const correct = Number(summary?.correct ?? 0);
+  const dueScopes: string[] = [];
+  const dueBindings: unknown[] = [userId];
+  if (selectedBanks.includes(STARTER_BANK_CODE)) {
+    const starterCodes = starterQuestionList().map((question) => question.id);
+    dueScopes.push(`uqp.question_code IN (${starterCodes.map(() => "?").join(",")})`);
+    dueBindings.push(...starterCodes);
+  }
+  const publishedBanks = selectedBanks.filter((code) => code !== STARTER_BANK_CODE);
+  if (publishedBanks.length) {
+    dueScopes.push(`EXISTS (
+      SELECT 1 FROM question_bank_items qbi
+      JOIN questions q ON q.id = qbi.question_id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE q.question_code = uqp.question_code AND qb.status = 'published'
+        AND qb.bank_code IN (${publishedBanks.map(() => "?").join(",")})
+    )`);
+    dueBindings.push(...publishedBanks);
+  }
+  const dueCount = dueScopes.length
+    ? await db.prepare(`SELECT COUNT(*) AS total FROM user_question_progress uqp
+      WHERE uqp.user_id = ? AND uqp.next_review_at <= CURRENT_TIMESTAMP AND uqp.state != 'mastered'
+        AND (${dueScopes.join(" OR ")})`).bind(...dueBindings).first<{ total: number }>().then((row) => Number(row?.total ?? 0))
+    : 0;
   return {
     total,
     accuracy: total ? Math.round((correct / total) * 100) : 0,
     avgSeconds: total ? Math.round(Number(summary?.avg_duration ?? 0) / 1000) : 0,
-    dueCount: await db.prepare(`SELECT COUNT(*) AS total FROM user_question_progress
-      WHERE user_id = ? AND next_review_at <= CURRENT_TIMESTAMP AND state != 'mastered'`).bind(userId)
-      .first<{ total: number }>().then((row) => Number(row?.total ?? 0)),
+    dueCount,
     stateCounts: {
       learning: stateMap.learning ?? 0,
       weak: stateMap.weak ?? 0,
@@ -555,43 +663,60 @@ async function saveProgress(userId: string, payload: Record<string, unknown>) {
 }
 
 async function saveExamProfile(userId: string, payload: Record<string, unknown>) {
-  const examType = payload.examType === "省考" ? "省考" : "国考";
-  const province = examType === "省考" ? trimmed(payload.province, 24) : "";
-  const examYear = Math.max(new Date().getFullYear(), Math.min(new Date().getFullYear() + 3, Math.floor(Number(payload.examYear)) || new Date().getFullYear() + 1));
-  const examDateValue = trimmed(payload.examDate, 10);
-  const examDate = /^\d{4}-\d{2}-\d{2}$/.test(examDateValue) ? examDateValue : null;
+  const currentYear = new Date().getFullYear();
   const allowedMinutes = new Set([10, 20, 30, 45, 60]);
-  const dailyMinutesValue = Number(payload.dailyMinutes);
-  const dailyMinutes = allowedMinutes.has(dailyMinutesValue) ? dailyMinutesValue : 20;
-  const requestedBanks = Array.isArray(payload.selectedBanks)
-    ? Array.from(new Set(payload.selectedBanks.map(String).filter((value) => /^[a-zA-Z0-9_-]{3,80}$/.test(value)))).slice(0, 12)
-    : [STARTER_BANK_CODE];
   const db = getD1();
-  const requestedPublished = requestedBanks.filter((code) => code !== STARTER_BANK_CODE).length
-    ? await db.prepare(`SELECT bank_code, exam_type, province, exam_year FROM question_banks
-      WHERE status = 'published' AND bank_code IN (${requestedBanks.filter((code) => code !== STARTER_BANK_CODE).map(() => "?").join(",")})`)
-      .bind(...requestedBanks.filter((code) => code !== STARTER_BANK_CODE)).all<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null }>()
-    : { results: [] as Array<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null }> };
-  const targetProfile = { examType, province };
-  const exactRequested = requestedPublished.results.filter((bank) => bankMatchesProfile(bank, targetProfile)).map((bank) => bank.bank_code);
-  const targetType = examType === "国考" ? "national" : "provincial";
-  const recommended = await db.prepare(`SELECT bank_code FROM question_banks
-    WHERE status = 'published' AND exam_type = ? AND (? = 'national' OR province = ?)
-      AND (exam_year IS NULL OR exam_year = ?)
-    ORDER BY CASE WHEN exam_year = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 6`)
-    .bind(targetType, targetType, province, examYear, examYear).all<{ bank_code: string }>();
-  const validBanks = Array.from(new Set(exactRequested.length ? exactRequested : recommended.results.map((bank) => bank.bank_code)));
-  if (!validBanks.length) validBanks.push(STARTER_BANK_CODE);
+  const currentProfile = await loadExamProfile(userId);
+  const dailyMinutesValue = Number(payload.dailyMinutes);
+  const dailyMinutes = allowedMinutes.has(dailyMinutesValue) ? dailyMinutesValue : currentProfile.dailyMinutes;
+  const replacingTargets = Array.isArray(payload.targets);
+  const rawTargets = replacingTargets
+    ? payload.targets.slice(0, 32)
+    : [{
+      examType: payload.examType,
+      province: payload.province,
+      examYear: payload.examYear,
+      examDate: payload.examDate,
+    }];
+  const targetMap = new Map<string, ExamTargetProfile>();
+  // A cached single-target client may still submit the old flat shape. Merge it
+  // into the new collection so an upgrade can never silently erase other targets.
+  if (!replacingTargets) currentProfile.targets.forEach((target) => targetMap.set(target.code, target));
+  for (const raw of rawTargets) {
+    const item = raw as Record<string, unknown>;
+    const examType = item.examType === "省考" ? "省考" : "国考";
+    const province = examType === "省考" ? normalizeProvince(item.province) : "";
+    if (examType === "省考" && !province) continue;
+    const examYear = Math.max(currentYear, Math.min(currentYear + 3, Math.floor(Number(item.examYear)) || currentYear + 1));
+    const dateValue = trimmed(item.examDate, 10);
+    const examDate = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? dateValue : null;
+    const code = examType === "国考" ? "national" : `province:${province}`;
+    targetMap.set(code, { code, label: examType === "国考" ? "国考" : `${province}省考`, examType, province, examYear, examDate });
+  }
+  const targets = Array.from(targetMap.values());
+  if (!targets.length) return json({ error: "请至少选择一个报考目标" }, 400);
+  const primary = targets[0];
+  const targetProfile: LoadedExamProfile = {
+    onboarded: true,
+    dailyMinutes,
+    targets,
+    examType: primary.examType,
+    province: primary.province,
+    examYear: primary.examYear,
+    examDate: primary.examDate,
+  };
   await db.batch([
     db.prepare(`INSERT INTO user_exam_profiles (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(user_id) DO UPDATE SET exam_type = excluded.exam_type, province = excluded.province,
       exam_year = excluded.exam_year, exam_date = excluded.exam_date, daily_minutes = excluded.daily_minutes,
-      updated_at = CURRENT_TIMESTAMP`).bind(userId, examType, province, examYear, examDate, dailyMinutes),
-    db.prepare("DELETE FROM user_question_banks WHERE user_id = ?").bind(userId),
-    ...validBanks.map((code) => db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, code)),
+      updated_at = CURRENT_TIMESTAMP`).bind(userId, primary.examType, primary.province, primary.examYear, primary.examDate, dailyMinutes),
+    db.prepare("DELETE FROM user_exam_targets WHERE user_id = ?").bind(userId),
+    ...targets.map((target) => db.prepare(`INSERT INTO user_exam_targets
+      (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(userId, target.code, target.examType === "国考" ? "national" : "provincial", target.province, target.examYear, target.examDate)),
   ]);
-  return json({ ok: true, profile: { onboarded: true, examType, province, examYear, examDate, dailyMinutes }, selectedBanks: validBanks });
+  return json({ ok: true, profile: targetProfile, selectedBanks: await selectedBankCodes(userId) });
 }
 
 async function toggleQuestionBank(userId: string, payload: Record<string, unknown>) {
@@ -599,20 +724,47 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
   const added = payload.added === true;
   if (!/^[a-zA-Z0-9_-]{3,80}$/.test(bankCode)) return json({ error: "题库编号无效" }, 400);
   const db = getD1();
+  let bank: { id: number; exam_type: string; province: string | null; exam_year: number | null } | null = null;
   if (bankCode !== STARTER_BANK_CODE) {
-    const exists = await db.prepare("SELECT id, exam_type, province FROM question_banks WHERE bank_code = ? AND status = 'published'")
-      .bind(bankCode).first<{ id: number; exam_type: string; province: string | null }>();
-    if (!exists) return json({ error: "题库不存在或尚未发布" }, 404);
-    if (added) {
-      const profile = await loadExamProfile(userId);
-      if (profile.onboarded && !bankMatchesProfile(exists, profile)) {
-        const target = profile.examType === "省考" ? `${profile.province}省考` : "国考";
-        return json({ error: `当前目标是${target}，请先切换目标考试再添加这套题库` }, 409);
-      }
-    }
+    bank = await db.prepare("SELECT id, exam_type, province, exam_year FROM question_banks WHERE bank_code = ? AND status = 'published'")
+      .bind(bankCode).first<{ id: number; exam_type: string; province: string | null; exam_year: number | null }>() ?? null;
+    if (!bank) return json({ error: "题库不存在或尚未发布" }, 404);
   }
   if (added) {
-    await db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, bankCode).run();
+    const statements: D1PreparedStatement[] = [
+      db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, bankCode),
+    ];
+    if (bankCode !== STARTER_BANK_CODE) statements.push(
+      db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, STARTER_BANK_CODE),
+    );
+    if (bank && (bank.exam_type === "national" || bank.exam_type === "provincial")) {
+      const profile = await loadExamProfile(userId);
+      const province = bank.exam_type === "provincial" ? normalizeProvince(bank.province) : "";
+      const targetCode = bank.exam_type === "national" ? "national" : `province:${province}`;
+      const targetExists = profile.targets.some((target) => target.code === targetCode);
+      if (!targetExists) {
+        const examYear = bank.exam_year ?? new Date().getFullYear() + 1;
+        statements.push(...profile.targets.map((target) => db.prepare(`INSERT OR IGNORE INTO user_exam_targets
+          (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(
+            userId,
+            target.code,
+            target.examType === "国考" ? "national" : "provincial",
+            target.province,
+            target.examYear,
+            target.examDate,
+          )));
+        statements.push(db.prepare(`INSERT OR IGNORE INTO user_exam_targets
+          (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
+          VALUES (?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)`).bind(userId, targetCode, bank.exam_type, province, examYear));
+        if (!profile.onboarded) statements.push(db.prepare(`INSERT INTO user_exam_profiles
+          (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
+          VALUES (?, ?, ?, ?, NULL, 20, CURRENT_TIMESTAMP)
+          ON CONFLICT(user_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`)
+          .bind(userId, bank.exam_type === "national" ? "国考" : "省考", province, examYear));
+      }
+    }
+    await db.batch(statements);
   } else {
     await db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode).run();
     const remaining = await db.prepare("SELECT COUNT(*) AS total FROM user_question_banks WHERE user_id = ?").bind(userId).first<{ total: number }>();
@@ -620,26 +772,36 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
       await db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, STARTER_BANK_CODE).run();
     }
   }
-  return json({ ok: true, banks: await loadQuestionBanks(userId) });
+  return json({ ok: true, banks: await loadQuestionBanks(userId), profile: await loadExamProfile(userId) });
 }
 
 async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
   if (!bankCodes.length) return [] as Array<{ question: ResolvedQuestion; progress?: QuestionProgressRow }>;
   const placeholders = bankCodes.map(() => "?").join(",");
-  const rows = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json,
-    q.answer, q.explanation, q.technique, q.difficulty, q.source, qb.bank_code, qb.name AS bank_name,
-    uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.next_review_at,
-    uqp.favorite, uqp.wrong_reason, uqp.last_answered_at
-    FROM questions q
-    JOIN question_bank_items qbi ON qbi.question_id = q.id
-    JOIN question_banks qb ON qb.id = qbi.bank_id
-    LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
-    WHERE q.status = 'active' AND q.subject = '行测' AND qb.status = 'published' AND qb.bank_code IN (${placeholders})
-    GROUP BY q.question_code
-    ORDER BY CASE WHEN uqp.next_review_at <= CURRENT_TIMESTAMP THEN 0 WHEN uqp.state = 'weak' THEN 1
-      WHEN uqp.question_code IS NULL THEN 2 WHEN uqp.state = 'learning' THEN 3 ELSE 4 END,
-      COALESCE(uqp.last_answered_at, '1970-01-01'), qbi.sort_order
-    LIMIT 160`).bind(userId, ...bankCodes).all<Record<string, unknown>>();
+  const rows = await getD1().prepare(`WITH candidates AS (
+      SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json,
+        q.answer, q.explanation, q.technique, q.difficulty, q.source, qb.bank_code, qb.name AS bank_name,
+        uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.next_review_at,
+        uqp.favorite, uqp.wrong_reason, uqp.last_answered_at, qbi.sort_order,
+        CASE WHEN uqp.next_review_at <= CURRENT_TIMESTAMP THEN 0 WHEN uqp.state = 'weak' THEN 1
+          WHEN uqp.question_code IS NULL THEN 2 WHEN uqp.state = 'learning' THEN 3 ELSE 4 END AS priority_rank
+      FROM questions q
+      JOIN question_bank_items qbi ON qbi.question_id = q.id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
+      WHERE q.status = 'active' AND q.subject = '行测' AND qb.status = 'published'
+        AND qb.bank_code IN (${placeholders})
+    ), ranked AS (
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY bank_code
+        ORDER BY priority_rank, COALESCE(last_answered_at, '1970-01-01'), sort_order, question_code
+      ) AS bank_rank
+      FROM candidates
+    )
+    SELECT * FROM ranked
+    WHERE bank_rank <= 40
+    ORDER BY priority_rank, bank_rank, bank_code
+    LIMIT 640`).bind(userId, ...bankCodes).all<Record<string, unknown>>();
   return rows.results.map((row) => {
     const progress = row.state ? {
       question_code: String(row.question_code),
@@ -676,18 +838,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
   const selected = await selectedBankCodes(userId);
   const allowed = new Set(selected);
-  let bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 12);
-  if (!requested.length) {
-    const profile = await loadExamProfile(userId);
-    const selectedPublished = bankCodes.filter((code) => code !== STARTER_BANK_CODE);
-    const rows = selectedPublished.length
-      ? await getD1().prepare(`SELECT bank_code, exam_type, province FROM question_banks
-        WHERE status = 'published' AND bank_code IN (${selectedPublished.map(() => "?").join(",")})`)
-        .bind(...selectedPublished).all<{ bank_code: string; exam_type: string; province: string | null }>()
-      : { results: [] as Array<{ bank_code: string; exam_type: string; province: string | null }> };
-    const exactCodes = rows.results.filter((bank) => bankMatchesProfile(bank, profile)).map((bank) => bank.bank_code);
-    bankCodes = exactCodes.length ? exactCodes : bankCodes.includes(STARTER_BANK_CODE) ? [STARTER_BANK_CODE] : [];
-  }
+  const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
   const mode = payload.mode === "review" ? "review" : "mixed";
   const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
   const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());

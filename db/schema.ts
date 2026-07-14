@@ -179,6 +179,24 @@ export const userExamProfiles = sqliteTable("user_exam_profiles", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const userExamTargets = sqliteTable(
+  "user_exam_targets",
+  {
+    userId: text("user_id").notNull(),
+    targetCode: text("target_code").notNull(),
+    examType: text("exam_type").notNull(),
+    province: text("province").notNull().default(""),
+    examYear: integer("exam_year").notNull(),
+    examDate: text("exam_date"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("user_exam_targets_user_target_uq").on(table.userId, table.targetCode),
+    index("user_exam_targets_user_idx").on(table.userId, table.createdAt),
+  ],
+);
+
 export const userQuestionBanks = sqliteTable(
   "user_question_banks",
   {

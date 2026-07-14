@@ -293,12 +293,12 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
       <audio ref={audioRef} preload="metadata" onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
       <div className="subpage-heading audio-heading">
-        <div><span>日练电台</span><h1>通勤也能练</h1><p>固定音频保证音色一致，错题仍可即时生成朗读。</p></div>
+        <div><span>日练电台</span><h1>通勤也能练</h1><p>上下班路上，听完一组时政热点、申论表达或个人错题。</p></div>
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
       </div>
 
       <section className="audio-hero">
-        <div className="audio-live"><i /> 固定音频 · 支持锁屏播放</div>
+        <div className="audio-live"><i /> 精选更新 · 支持锁屏播放</div>
         <h2>{selectedTrack.title}</h2>
         <p>{selectedTrack.description}</p>
         <div className={`waveform ${playing && !paused ? "playing" : ""}`} aria-hidden="true">
@@ -334,7 +334,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
         <div className="player-controls">
           <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
-          <label>倍速<select value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></label>
+          <label>倍速<select value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2.0×</option></select></label>
           <label>定时<select value={sleepMinutes} onChange={(event) => setSleepTimer(Number(event.target.value))}><option value={0}>关闭</option><option value={10}>10分钟</option><option value={20}>20分钟</option><option value={30}>30分钟</option><option value={60}>60分钟</option></select></label>
           <button className="player-main" onClick={togglePlayback}>{playing && !paused ? "Ⅱ" : "▶"}</button>
         </div>

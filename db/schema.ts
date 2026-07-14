@@ -168,3 +168,71 @@ export const questionImports = sqliteTable("question_imports", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   completedAt: text("completed_at"),
 });
+
+export const userExamProfiles = sqliteTable("user_exam_profiles", {
+  userId: text("user_id").primaryKey(),
+  examType: text("exam_type").notNull().default("国考"),
+  province: text("province").notNull().default(""),
+  examYear: integer("exam_year").notNull().default(2027),
+  examDate: text("exam_date"),
+  dailyMinutes: integer("daily_minutes").notNull().default(20),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const userQuestionBanks = sqliteTable(
+  "user_question_banks",
+  {
+    userId: text("user_id").notNull(),
+    bankCode: text("bank_code").notNull(),
+    addedAt: text("added_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("user_question_banks_user_bank_uq").on(table.userId, table.bankCode),
+    index("user_question_banks_user_idx").on(table.userId, table.addedAt),
+  ],
+);
+
+export const userQuestionProgress = sqliteTable(
+  "user_question_progress",
+  {
+    userId: text("user_id").notNull(),
+    questionCode: text("question_code").notNull(),
+    state: text("state").notNull().default("learning"),
+    correctCount: integer("correct_count").notNull().default(0),
+    wrongCount: integer("wrong_count").notNull().default(0),
+    uncertainCount: integer("uncertain_count").notNull().default(0),
+    lastAnswer: integer("last_answer"),
+    lastCorrect: integer("last_correct").notNull().default(0),
+    lastDurationMs: integer("last_duration_ms").notNull().default(0),
+    lastAnsweredAt: text("last_answered_at"),
+    nextReviewAt: text("next_review_at"),
+    favorite: integer("favorite").notNull().default(0),
+    wrongReason: text("wrong_reason").notNull().default(""),
+    reviewCount: integer("review_count").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("user_question_progress_user_question_uq").on(table.userId, table.questionCode),
+    index("user_question_progress_due_idx").on(table.userId, table.nextReviewAt),
+    index("user_question_progress_state_idx").on(table.userId, table.state),
+  ],
+);
+
+export const practiceAttempts = sqliteTable(
+  "practice_attempts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").notNull(),
+    questionCode: text("question_code").notNull(),
+    bankCode: text("bank_code").notNull(),
+    module: text("module").notNull(),
+    isCorrect: integer("is_correct").notNull(),
+    uncertain: integer("uncertain").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    answeredAt: text("answered_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("practice_attempts_user_time_idx").on(table.userId, table.answeredAt),
+    index("practice_attempts_user_module_idx").on(table.userId, table.module),
+  ],
+);

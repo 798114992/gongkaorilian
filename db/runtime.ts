@@ -147,6 +147,55 @@ export async function ensureSchema() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       completed_at TEXT
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_exam_profiles (
+      user_id TEXT PRIMARY KEY,
+      exam_type TEXT NOT NULL DEFAULT '国考',
+      province TEXT NOT NULL DEFAULT '',
+      exam_year INTEGER NOT NULL DEFAULT 2027,
+      exam_date TEXT,
+      daily_minutes INTEGER NOT NULL DEFAULT 20,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_question_banks (
+      user_id TEXT NOT NULL,
+      bank_code TEXT NOT NULL,
+      added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_question_banks_user_bank_uq ON user_question_banks(user_id, bank_code)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS user_question_banks_user_idx ON user_question_banks(user_id, added_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_question_progress (
+      user_id TEXT NOT NULL,
+      question_code TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'learning',
+      correct_count INTEGER NOT NULL DEFAULT 0,
+      wrong_count INTEGER NOT NULL DEFAULT 0,
+      uncertain_count INTEGER NOT NULL DEFAULT 0,
+      last_answer INTEGER,
+      last_correct INTEGER NOT NULL DEFAULT 0,
+      last_duration_ms INTEGER NOT NULL DEFAULT 0,
+      last_answered_at TEXT,
+      next_review_at TEXT,
+      favorite INTEGER NOT NULL DEFAULT 0,
+      wrong_reason TEXT NOT NULL DEFAULT '',
+      review_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_question_progress_user_question_uq ON user_question_progress(user_id, question_code)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS user_question_progress_due_idx ON user_question_progress(user_id, next_review_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS user_question_progress_state_idx ON user_question_progress(user_id, state)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS practice_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      question_code TEXT NOT NULL,
+      bank_code TEXT NOT NULL,
+      module TEXT NOT NULL,
+      is_correct INTEGER NOT NULL,
+      uncertain INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS practice_attempts_user_time_idx ON practice_attempts(user_id, answered_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS practice_attempts_user_module_idx ON practice_attempts(user_id, module)"),
   ]);
   schemaReady = true;
 }

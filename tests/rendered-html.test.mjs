@@ -23,6 +23,24 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
   assert.doesNotMatch(`${page}\n${app}\n${layout}`, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
+test("the learner flow includes goal onboarding, question banks and spaced review", async () => {
+  const [app, route, migration] = await Promise.all([
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0003_clammy_rick_jones.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /选择你的考试题库/);
+  assert.match(app, /智能刷题10道/);
+  assert.match(app, /按1、3、7天节奏/);
+  assert.match(app, /不确定（即使答对也会复习）/);
+  assert.match(route, /getPracticeBatch/);
+  assert.match(route, /submitPracticeAnswer/);
+  assert.match(route, /nextReviewAt/);
+  assert.match(migration, /CREATE TABLE `user_exam_profiles`/);
+  assert.match(migration, /CREATE TABLE `user_question_progress`/);
+  assert.match(migration, /CREATE TABLE `practice_attempts`/);
+});
+
 test("account sync and redemption protections are server side", async () => {
   const route = await readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8");
   assert.match(route, /oai-authenticated-user-email/);

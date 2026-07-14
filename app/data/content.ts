@@ -6,6 +6,12 @@ export type Question = {
   answer: number;
   explanation: string;
   knowledge: string;
+  subject?: "行测" | "申论";
+  source?: string;
+  difficulty?: string;
+  technique?: string;
+  bankCode?: string;
+  bankName?: string;
 };
 
 export type PracticeDay = {
@@ -234,4 +240,3 @@ export const practiceDays: PracticeDay[] = [
     },
   },
 ];
-

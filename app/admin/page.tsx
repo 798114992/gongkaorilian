@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useState } from "react";
 
 type CodeItem = {
   id: number;
@@ -15,11 +16,45 @@ type CodeItem = {
 };
 
 type Redemption = { redeemed_at: string; user_id: string; code_preview: string; duration_days: number };
+type ContentItem = {
+  id: number;
+  content_type: "practice_day" | "audio_track";
+  content_key: string;
+  title: string;
+  status: "draft" | "published";
+  publish_at: string | null;
+  updated_at: string;
+};
+type EventCount = { event_name: string; count: number | string };
+type Analytics = { activeUsers: number; eventCounts: EventCount[] };
+
+const contentExample = JSON.stringify([
+  {
+    contentType: "audio_track",
+    contentKey: "august-hotspot",
+    title: "八月热点：示例标题",
+    status: "draft",
+    publishAt: null,
+    payload: {
+      id: "august-hotspot",
+      category: "current",
+      title: "八月热点：示例标题",
+      kicker: "月度热点",
+      source: "公考日练整理",
+      duration: "5分钟",
+      description: "一句话说明本期音频价值。",
+      text: "在这里填写音频逐字稿。",
+      audioUrl: "/audio/august-hotspot.wav",
+    },
+  },
+], null, 2);
 
 export default function AdminPage() {
-  const [token, setToken] = useState("");
+  const [token, setToken] = useState(() => typeof window === "undefined" ? "" : window.sessionStorage.getItem("gkrl-admin-token") ?? "");
   const [codes, setCodes] = useState<CodeItem[]>([]);
   const [redemptions, setRedemptions] = useState<Redemption[]>([]);
+  const [content, setContent] = useState<ContentItem[]>([]);
+  const [analytics, setAnalytics] = useState<Analytics>({ activeUsers: 0, eventCounts: [] });
   const [generated, setGenerated] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [batchName, setBatchName] = useState("渠道体验码");
@@ -29,11 +64,7 @@ export default function AdminPage() {
   const [validUntil, setValidUntil] = useState("");
   const [rewardDays, setRewardDays] = useState(3);
   const [monthlyCap, setMonthlyCap] = useState(30);
-
-  useEffect(() => {
-    const remembered = window.sessionStorage.getItem("gkrl-admin-token");
-    if (remembered) setToken(remembered);
-  }, []);
+  const [contentJson, setContentJson] = useState(contentExample);
 
   const api = async (payload: Record<string, unknown>) => {
     const response = await fetch("/api/app", {
@@ -52,6 +83,8 @@ export default function AdminPage() {
       const data = await api({ action: "adminList" });
       setCodes((data.codes ?? []) as CodeItem[]);
       setRedemptions((data.redemptions ?? []) as Redemption[]);
+      setContent((data.content ?? []) as ContentItem[]);
+      setAnalytics((data.analytics ?? { activeUsers: 0, eventCounts: [] }) as Analytics);
       const config = data.config as { rewardDays?: number; monthlyCap?: number } | undefined;
       setRewardDays(config?.rewardDays ?? 3);
       setMonthlyCap(config?.monthlyCap ?? 30);
@@ -91,17 +124,49 @@ export default function AdminPage() {
     }
   };
 
+  const importContent = async () => {
+    try {
+      const parsed = JSON.parse(contentJson) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("内容必须是 JSON 数组");
+      await api({ action: "adminUpsertContentBatch", items: parsed });
+      setMessage(`已导入 ${parsed.length} 条内容；published 状态会立即生效`);
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "内容导入失败");
+    }
+  };
+
+  const disableContent = async (id: number) => {
+    try {
+      await api({ action: "adminDisableContent", id });
+      setMessage("内容已转为草稿，不再向用户展示");
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "内容下线失败");
+    }
+  };
+
   const copyGenerated = async () => {
     await navigator.clipboard.writeText(generated.join("\n"));
     setMessage("本批兑换码已复制");
   };
 
+  const metric = (name: string) => Number(analytics.eventCounts.find((item) => item.event_name === name)?.count ?? 0);
+
   return (
     <main className="admin-shell">
-      <header className="admin-header"><div><span>公考日练</span><h1>运营管理后台</h1><p>配置兑换码、会员时长和邀请奖励</p></div><a href="/">返回用户端</a></header>
+      <header className="admin-header"><div><span>公考日练</span><h1>运营管理后台</h1><p>管理兑换码、内容发布、邀请奖励和运营数据</p></div><Link href="/">返回用户端</Link></header>
 
       <section className="admin-auth"><label>管理员口令<input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="输入部署时配置的管理员口令" /></label><button onClick={load}>进入后台</button></section>
       {message && <div className="admin-message">{message}</div>}
+
+      <section className="analytics-grid" aria-label="近七日运营数据">
+        <article><span>7日活跃用户</span><strong>{analytics.activeUsers}</strong></article>
+        <article><span>打开次数</span><strong>{metric("app_open")}</strong></article>
+        <article><span>行测交卷</span><strong>{metric("quiz_submit")}</strong></article>
+        <article><span>音频播放</span><strong>{metric("audio_play")}</strong></article>
+        <article><span>兑换成功</span><strong>{metric("redeem_success")}</strong></article>
+      </section>
 
       <div className="admin-grid">
         <section className="admin-panel">
@@ -114,19 +179,30 @@ export default function AdminPage() {
             <label className="wide">兑换截止日期<input type="date" value={validUntil} onChange={(event) => setValidUntil(event.target.value)} /></label>
           </div>
           <button className="admin-primary" onClick={createCodes}>生成随机兑换码</button>
-          {generated.length > 0 && <div className="generated-box"><div><strong>本批明文兑换码</strong><button onClick={copyGenerated}>复制全部</button></div><pre>{generated.join("\n")}</pre><small>安全起见，数据库只保存哈希；离开页面前请复制本批明文兑换码。</small></div>}
+          {generated.length > 0 && <div className="generated-box"><div><strong>本批明文兑换码</strong><button onClick={copyGenerated}>复制全部</button></div><pre>{generated.join("\n")}</pre><small>数据库只保存哈希；离开页面前请复制本批明文兑换码。</small></div>}
         </section>
 
         <section className="admin-panel">
-          <div className="admin-panel-title"><div><span>裂变活动</span><h2>邀请奖励配置</h2></div></div>
+          <div className="admin-panel-title"><div><span>邀请活动</span><h2>邀请奖励配置</h2></div></div>
           <div className="form-grid">
             <label>双方奖励天数<input type="number" min="0" max="365" value={rewardDays} onChange={(event) => setRewardDays(Number(event.target.value))} /></label>
             <label>邀请人月度上限<input type="number" min="0" max="3650" value={monthlyCap} onChange={(event) => setMonthlyCap(Number(event.target.value))} /></label>
           </div>
-          <p className="admin-note">好友首次成功兑换会员码后，邀请人与被邀请人获得相同时长。仅计算直接邀请，不形成多级关系。</p>
+          <p className="admin-note">好友首次成功激活会员码后，邀请人与被邀请人获得相同时长。只计算直接邀请，不形成多级关系。</p>
           <button className="admin-primary" onClick={updateInvite}>保存邀请配置</button>
         </section>
       </div>
+
+      <section className="admin-panel content-editor">
+        <div className="admin-panel-title"><div><span>内容发布</span><h2>批量导入日练或电台内容</h2></div><small>先用 draft 预存，确认后改为 published</small></div>
+        <textarea value={contentJson} onChange={(event) => setContentJson(event.target.value)} spellCheck={false} />
+        <div className="content-editor-actions"><p>支持 <code>practice_day</code> 和 <code>audio_track</code>；同一 contentKey 再次导入会更新原内容。</p><button className="admin-primary" onClick={importContent}>校验并导入</button></div>
+      </section>
+
+      <section className="admin-panel table-panel">
+        <div className="admin-panel-title"><div><span>内容库</span><h2>已导入内容</h2></div><button onClick={load}>刷新</button></div>
+        <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{content.length ? content.map((item) => <tr key={item.id}><td>{item.content_type === "audio_track" ? "电台" : "日练"}</td><td>{item.content_key}</td><td>{item.title}</td><td><span className={`status ${item.status}`}>{item.status === "published" ? "已发布" : "草稿"}</span></td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td>{item.status === "published" && <button onClick={() => disableContent(item.id)}>转为草稿</button>}</td></tr>) : <tr><td colSpan={6}>暂无自定义内容，系统默认内容仍正常展示。</td></tr>}</tbody></table></div>
+      </section>
 
       <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>最近批次</span><h2>兑换码状态</h2></div><button onClick={load}>刷新</button></div>
@@ -140,4 +216,3 @@ export default function AdminPage() {
     </main>
   );
 }
-

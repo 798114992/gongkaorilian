@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { practiceDays, type Question } from "./data/content";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { PracticeDay, Question } from "./data/content";
+import type { AudioTrack } from "./data/audio";
 import AudioHub from "./AudioHub";
 
 type Tab = "today" | "audio" | "wrong" | "report" | "me";
@@ -21,7 +22,16 @@ type Progress = {
 };
 
 type Bootstrap = {
-  user: { id: string; inviteCode: string; membershipEnd: string | null; membershipActive: boolean };
+  user: {
+    id: string;
+    inviteCode: string;
+    membershipEnd: string | null;
+    membershipActive: boolean;
+    signedIn: boolean;
+    authProvider: "chatgpt" | "device";
+    displayName: string;
+  };
+  content: { practiceDays: PracticeDay[]; audioTracks: AudioTrack[]; access: "premium" | "preview" };
   progress: Partial<Progress>;
   ledger: Array<{ delta_days: number; source_type: string; note: string; created_at: string }>;
   inviteStats: { total: number; rewarded: number; pending: number };
@@ -42,6 +52,25 @@ const emptyProgress: Progress = {
 };
 
 const reasonOptions = ["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足", "蒙对了"];
+
+const loadingQuestion: Question = {
+  id: "loading",
+  module: "加载中",
+  stem: "正在准备今日练习……",
+  options: ["请稍候"],
+  answer: 0,
+  explanation: "",
+  knowledge: "",
+};
+
+const loadingDay: PracticeDay = {
+  day: 1,
+  label: "今日练习",
+  morning: { title: "正在加载今日晨读", lead: "", paragraphs: [], keywords: [] },
+  questions: [loadingQuestion],
+  currentAffairs: [],
+  essay: { expressions: [], prompt: "正在加载今日申论微练", reference: "" },
+};
 
 function mergeProgress(input?: Partial<Progress>): Progress {
   return {
@@ -64,7 +93,7 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value));
 }
 
-function findQuestion(id: string) {
+function findQuestion(id: string, practiceDays: PracticeDay[]) {
   return practiceDays.flatMap((day) => day.questions).find((question) => question.id === id);
 }
 
@@ -78,20 +107,36 @@ export default function DailyPracticeApp() {
   const [essayReference, setEssayReference] = useState(false);
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
+  const trackedUserRef = useRef("");
+  const paywallTrackedRef = useRef(false);
 
-  const day = practiceDays.find((item) => item.day === progress.currentDay) ?? practiceDays[0];
-  const currentQuestion = day.questions[questionIndex];
+  const practiceDays = bootstrap?.content.practiceDays ?? [];
+  const day = practiceDays.find((item) => item.day === progress.currentDay) ?? practiceDays[0] ?? loadingDay;
+  const currentQuestion = day.questions[questionIndex] ?? loadingQuestion;
   const dayKey = `d${day.day}`;
   const doneCount = [
     progress.completed[`${dayKey}-morning`],
     progress.submittedDays[dayKey],
     progress.completed[`${dayKey}-essay`],
   ].filter(Boolean).length;
-  const wrongQuestions = progress.wrongIds.map(findQuestion).filter(Boolean) as Question[];
+  const wrongQuestions = progress.wrongIds.map((id) => findQuestion(id, practiceDays)).filter(Boolean) as Question[];
+  const hasExtendedMembership = Boolean(bootstrap?.ledger.some((item) => item.source_type !== "trial"));
+  const membershipLabel = bootstrap?.user.membershipActive
+    ? hasExtendedMembership ? "会员有效" : "体验中"
+    : "免费版";
 
   const notify = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
+  }, []);
+
+  const trackEvent = useCallback((eventName: string, eventData: Record<string, unknown> = {}) => {
+    void fetch("/api/app", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "trackEvent", eventName, eventData }),
+      keepalive: true,
+    }).catch(() => undefined);
   }, []);
 
   const loadBootstrap = useCallback(async () => {
@@ -100,7 +145,9 @@ export default function DailyPracticeApp() {
       const data = (await response.json()) as Bootstrap & { error?: string };
       if (!response.ok) throw new Error(data.error || "加载失败");
       setBootstrap(data);
-      setProgress(mergeProgress(data.progress));
+      const merged = mergeProgress(data.progress);
+      if (!data.content.practiceDays.some((item) => item.day === merged.currentDay)) merged.currentDay = data.content.practiceDays[0]?.day ?? 1;
+      setProgress(merged);
       const inviteCode = new URLSearchParams(window.location.search).get("invite");
       if (inviteCode) {
         const inviteResponse = await fetch("/api/app", {
@@ -121,6 +168,18 @@ export default function DailyPracticeApp() {
     return () => window.clearTimeout(timer);
   }, [loadBootstrap]);
 
+  useEffect(() => {
+    if (!bootstrap?.user.id || trackedUserRef.current === bootstrap.user.id) return;
+    trackedUserRef.current = bootstrap.user.id;
+    trackEvent("app_open", { access: bootstrap.content.access, signedIn: bootstrap.user.signedIn });
+  }, [bootstrap, trackEvent]);
+
+  useEffect(() => {
+    if (bootstrap?.content.access !== "preview" || paywallTrackedRef.current) return;
+    paywallTrackedRef.current = true;
+    trackEvent("paywall_view", { placement: "today" });
+  }, [bootstrap?.content.access, trackEvent]);
+
   const persist = useCallback(async (next: Progress) => {
     setProgress(next);
     try {
@@ -139,6 +198,11 @@ export default function DailyPracticeApp() {
     setQuestionIndex(0);
     setEssayReference(false);
     void persist(next);
+  };
+
+  const openModule = (module: Exclude<Module, null>) => {
+    setActiveModule(module);
+    trackEvent("module_open", { module, day: day.day, access: bootstrap?.content.access ?? "loading" });
   };
 
   const addCheckinWhenDayIsComplete = (next: Progress, key: string) => {
@@ -176,6 +240,7 @@ export default function DailyPracticeApp() {
       wrongIds: nextWrong,
     }, dayKey);
     void persist(next);
+    trackEvent("quiz_submit", { day: day.day, correct: day.questions.length - wrong.length, total: day.questions.length });
     notify(`提交成功，本次答对 ${day.questions.length - wrong.length} 题`);
   };
 
@@ -210,6 +275,7 @@ export default function DailyPracticeApp() {
       const result = (await response.json()) as { error?: string; days?: number };
       if (!response.ok) throw new Error(result.error || "兑换失败");
       setRedeemCode("");
+      trackEvent("redeem_success", { days: result.days ?? 0 });
       notify(`激活成功，会员时长增加 ${result.days} 天`);
       await loadBootstrap();
     } catch (error) {
@@ -224,6 +290,7 @@ export default function DailyPracticeApp() {
     const url = `${window.location.origin}/?invite=${bootstrap.user.inviteCode}`;
     try {
       await navigator.clipboard.writeText(url);
+      trackEvent("invite_copy");
       notify("邀请链接已复制，好友激活后双方加时长");
     } catch {
       notify(url);
@@ -321,7 +388,10 @@ export default function DailyPracticeApp() {
         <header className="topbar">
           <div className="brand-mark">公</div>
           <div className="brand-copy"><strong>公考日练</strong><span>每天进步一点点</span></div>
-          <button className="member-chip" onClick={() => setTab("me")}>{bootstrap?.user.membershipActive ? "会员有效" : "3天体验"}</button>
+          <button className="member-chip" onClick={() => {
+            setTab("me");
+            if (bootstrap?.content.access === "preview") trackEvent("paywall_action", { placement: "topbar" });
+          }}>{membershipLabel}</button>
         </header>
 
         {activeModule ? renderModule() : (
@@ -337,53 +407,70 @@ export default function DailyPracticeApp() {
                   <div className="day-switcher">{practiceDays.map((item) => <button key={item.day} className={item.day === day.day ? "active" : ""} onClick={() => switchDay(item.day)}>Day {item.day}</button>)}</div>
                 </section>
 
+                {bootstrap?.content.access === "preview" && (
+                  <section className="access-card">
+                    <div><span>当前为免费版</span><h3>今日可练 5 题、试听 1 条音频</h3><p>激活会员后解锁全部日练、完整解析和电台内容。</p></div>
+                    <button onClick={() => { setTab("me"); trackEvent("paywall_action", { placement: "today" }); }}>去激活</button>
+                  </section>
+                )}
+
                 <section className="today-plan">
                   <div className="section-heading"><div><span>今日安排</span><h2>20 分钟完成三个动作</h2></div><em>{doneCount === 3 ? "今日已完成" : `还剩 ${3 - doneCount} 项`}</em></div>
-                  <button className="plan-item" onClick={() => setActiveModule("morning")}><span className="plan-icon blue">早</span><div><b>晨读与表达</b><p>{day.morning.title}</p></div><i>{progress.completed[`${dayKey}-morning`] ? "✓" : "5分钟"}</i></button>
-                  <button className="plan-item" onClick={() => setActiveModule("quiz")}><span className="plan-icon orange">练</span><div><b>行测 10 题</b><p>{day.label} · 记录正确率与错题</p></div><i>{progress.submittedDays[dayKey] ? "✓" : "10分钟"}</i></button>
-                  <button className="plan-item" onClick={() => setActiveModule("essay")}><span className="plan-icon green">写</span><div><b>申论微练</b><p>3 条表达＋1 道短写作</p></div><i>{progress.completed[`${dayKey}-essay`] ? "✓" : "5分钟"}</i></button>
+                  <button className="plan-item" onClick={() => openModule("morning")}><span className="plan-icon blue">早</span><div><b>晨读与表达</b><p>{day.morning.title}</p></div><i>{progress.completed[`${dayKey}-morning`] ? "✓" : "5分钟"}</i></button>
+                  <button className="plan-item" onClick={() => openModule("quiz")}><span className="plan-icon orange">练</span><div><b>行测 {day.questions.length} 题</b><p>{day.label} · 记录正确率与错题</p></div><i>{progress.submittedDays[dayKey] ? "✓" : `${Math.max(5, day.questions.length)}分钟`}</i></button>
+                  <button className="plan-item" onClick={() => openModule("essay")}><span className="plan-icon green">写</span><div><b>申论微练</b><p>{day.essay.expressions.length} 条表达＋1 道短写作</p></div><i>{progress.completed[`${dayKey}-essay`] ? "✓" : "5分钟"}</i></button>
                 </section>
 
                 <section className="tool-section">
                   <div className="section-heading"><div><span>随时巩固</span><h2>今日学习工具</h2></div></div>
                   <div className="tool-grid">
-                    <button className="audio-tool" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤也能练</small></button>
-                    <button onClick={() => setActiveModule("affairs")}><span>政</span><b>时政常识</b><small>5张知识卡</small></button>
+                    <button className="audio-tool" onClick={() => { setTab("audio"); trackEvent("module_open", { module: "audio" }); }}><span>听</span><b>日练电台</b><small>通勤也能练</small></button>
+                    <button onClick={() => openModule("affairs")}><span>政</span><b>时政常识</b><small>{day.currentAffairs.length} 张知识卡</small></button>
                     <button onClick={() => setTab("wrong")}><span>错</span><b>错题回炉</b><small>{wrongQuestions.length} 道待复习</small></button>
                   </div>
                 </section>
               </div>
             )}
 
-            {tab === "audio" && <AudioHub wrongQuestions={wrongQuestions} notify={notify} />}
-
             {tab === "wrong" && (
               <div className="page-content subpage">
                 <div className="subpage-heading"><span>个人错题本</span><h1>错过的题，再遇见一次</h1><p>当前 {wrongQuestions.length} 道错题，已复习 {progress.reviewedIds.length} 道。</p></div>
-                {wrongQuestions.length === 0 ? <div className="empty-state"><span>✓</span><h3>暂时没有错题</h3><p>完成行测练习后，错题会自动归集到这里。</p><button className="primary-button" onClick={() => { setTab("today"); setActiveModule("quiz"); }}>开始今日练习</button></div> : wrongQuestions.map((question) => <article className="wrong-card" key={question.id}><div className="wrong-card-top"><span>{question.module}</span><em>{progress.reviewedIds.includes(question.id) ? "已复习" : "待回炉"}</em></div><h3>{question.stem}</h3><p><b>正确答案：</b>{String.fromCharCode(65 + question.answer)} · {question.options[question.answer]}</p><p className="wrong-explain">{question.explanation}</p><label>这次为什么错？<select value={progress.wrongReasons[question.id] ?? ""} onChange={(event) => void persist({ ...progress, wrongReasons: { ...progress.wrongReasons, [question.id]: event.target.value } })}><option value="">选择错因</option>{reasonOptions.map((reason) => <option key={reason}>{reason}</option>)}</select></label><button className="secondary-button" onClick={() => reviewed(question.id)}>标记已复习</button></article>)}
+                {wrongQuestions.length === 0 ? <div className="empty-state"><span>✓</span><h3>暂时没有错题</h3><p>完成行测练习后，错题会自动归集到这里。</p><button className="primary-button" onClick={() => { setTab("today"); openModule("quiz"); }}>开始今日练习</button></div> : wrongQuestions.map((question) => <article className="wrong-card" key={question.id}><div className="wrong-card-top"><span>{question.module}</span><em>{progress.reviewedIds.includes(question.id) ? "已复习" : "待回炉"}</em></div><h3>{question.stem}</h3><p><b>正确答案：</b>{String.fromCharCode(65 + question.answer)} · {question.options[question.answer]}</p><p className="wrong-explain">{question.explanation}</p><label>这次为什么错？<select value={progress.wrongReasons[question.id] ?? ""} onChange={(event) => void persist({ ...progress, wrongReasons: { ...progress.wrongReasons, [question.id]: event.target.value } })}><option value="">选择错因</option>{reasonOptions.map((reason) => <option key={reason}>{reason}</option>)}</select></label><button className="secondary-button" onClick={() => reviewed(question.id)}>标记已复习</button></article>)}
               </div>
             )}
 
             {tab === "report" && (
               <div className="page-content subpage">
-                <div className="subpage-heading"><span>学习报告</span><h1>看见自己的每一步</h1><p>完成三天体验后，你会得到一张清晰的薄弱项图谱。</p></div>
+                <div className="subpage-heading"><span>学习报告</span><h1>看见自己的每一步</h1><p>持续完成日练，你会得到一张清晰的薄弱项图谱。</p></div>
                 <div className="stats-grid"><article><span>完成天数</span><strong>{progress.checkins.length}</strong><small>天</small></article><article><span>累计答题</span><strong>{Object.keys(progress.answers).length}</strong><small>题</small></article><article><span>错题数量</span><strong>{wrongQuestions.length}</strong><small>题</small></article><article><span>表达收藏</span><strong>{progress.favorites.length}</strong><small>条</small></article></div>
-                <article className="report-card"><div className="report-title"><h3>三日学习进度</h3><span>{Math.round((progress.checkins.length / 3) * 100)}%</span></div>{practiceDays.map((item) => { const key = `d${item.day}`; const value = [progress.completed[`${key}-morning`], progress.submittedDays[key], progress.completed[`${key}-essay`]].filter(Boolean).length; return <div className="bar-row" key={key}><span>Day {item.day}</span><div><i style={{ width: `${value / 3 * 100}%` }} /></div><em>{value}/3</em></div>; })}</article>
+                <article className="report-card"><div className="report-title"><h3>{practiceDays.length} 日学习进度</h3><span>{Math.min(100, Math.round((progress.checkins.length / Math.max(1, practiceDays.length)) * 100))}%</span></div>{practiceDays.map((item) => { const key = `d${item.day}`; const value = [progress.completed[`${key}-morning`], progress.submittedDays[key], progress.completed[`${key}-essay`]].filter(Boolean).length; return <div className="bar-row" key={key}><span>Day {item.day}</span><div><i style={{ width: `${value / 3 * 100}%` }} /></div><em>{value}/3</em></div>; })}</article>
                 <article className="report-card suggestion"><span>下一个建议</span><h3>{wrongQuestions.length ? "先把错题原因标清楚" : "完成第一组行测训练"}</h3><p>{wrongQuestions.length ? "知道“为什么错”，比只记正确答案更有价值。" : "完成后系统会自动生成你的第一批错题。"}</p></article>
               </div>
             )}
 
             {tab === "me" && (
               <div className="page-content subpage">
-                <div className="profile-card"><div className="profile-avatar">练</div><div><span>公考日练用户</span><h2>{bootstrap?.user.membershipActive ? "会员学习中" : "免费体验中"}</h2><p>用户编号 {bootstrap?.user.id.slice(0, 8) ?? "正在生成"}</p></div></div>
+                <div className="profile-card"><div className="profile-avatar">练</div><div><span>{bootstrap?.user.displayName ?? "公考日练用户"}</span><h2>{bootstrap?.user.membershipActive ? hasExtendedMembership ? "会员学习中" : "体验学习中" : "免费版学习中"}</h2><p>用户编号 {bootstrap?.user.id.slice(0, 8) ?? "正在生成"}</p></div></div>
+                <article className={`panel-card account-panel ${bootstrap?.user.signedIn ? "synced" : ""}`}>
+                  <div><span>{bootstrap?.user.signedIn ? "账号同步已开启" : "当前仅保存在本设备"}</span><h3>{bootstrap?.user.signedIn ? "换设备也能继续学习" : "登录后同步进度和会员时长"}</h3><p>{bootstrap?.user.signedIn ? "当前学习记录已绑定平台账号。" : "登录时会自动合并本设备已有记录。"}</p></div>
+                  {bootstrap?.user.signedIn ? <b>✓ 已同步</b> : <a href="/signin-with-chatgpt?return_to=%2F">登录并同步</a>}
+                </article>
                 <article className="membership-card"><div><span>会员有效期</span><h3>{formatDate(bootstrap?.user.membershipEnd ?? null)}</h3><p>{bootstrap?.user.membershipActive ? "全部学习功能已解锁" : "兑换会员码后解锁长期使用"}</p></div><b>VIP</b></article>
-                <article className="panel-card"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天</span></div><div className="redeem-row"><input value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={redeem} disabled={busy}>{busy ? "激活中" : "立即激活"}</button></div><small>内测可使用：DEMO-7DAYS-2026</small></article>
+                <article className="panel-card"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天</span></div><div className="redeem-row"><input value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={redeem} disabled={busy}>{busy ? "激活中" : "立即激活"}</button></div><small>购买后输入商家发放的兑换码，时长将自动累计。</small></article>
                 <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请备考搭子</h3><span>双方各得 {bootstrap?.inviteConfig.rewardDays ?? 3} 天</span></div><p>好友通过你的链接进入，并首次激活会员后，你们双方都会获得额外时长。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.inviteCode ?? "生成中"}</strong></div><button className="primary-button full-button" onClick={copyInvite}>复制专属邀请链接</button><div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待激活</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
-                <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><a href="/admin">管理后台</a></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={`${item.created_at}-${index}`}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
+                <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={`${item.created_at}-${index}`}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
               </div>
             )}
           </>
         )}
+
+        <AudioHub
+          active={!activeModule && tab === "audio"}
+          tracks={bootstrap?.content.audioTracks ?? []}
+          wrongQuestions={wrongQuestions}
+          notify={notify}
+          trackEvent={trackEvent}
+        />
 
         {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>听</span>听练</button><button className={tab === "wrong" ? "active" : ""} onClick={() => setTab("wrong")}><span>错</span>错题</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}><span>报</span>报告</button><button className={tab === "me" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
         {toast && <div className="toast" role="status">{toast}</div>}

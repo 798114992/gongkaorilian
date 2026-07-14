@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -67,3 +67,34 @@ export const configs = sqliteTable("configs", {
   value: text("value").notNull(),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const contentItems = sqliteTable(
+  "content_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    contentType: text("content_type").notNull(),
+    contentKey: text("content_key").notNull().unique(),
+    title: text("title").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    status: text("status").notNull().default("draft"),
+    publishAt: text("publish_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("content_items_key_uq").on(table.contentKey)],
+);
+
+export const analyticsEvents = sqliteTable(
+  "analytics_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").notNull(),
+    eventName: text("event_name").notNull(),
+    eventData: text("event_data").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("analytics_events_name_time_idx").on(table.eventName, table.createdAt),
+    index("analytics_events_user_time_idx").on(table.userId, table.createdAt),
+  ],
+);

@@ -51,6 +51,7 @@ test("provincial question banks are isolated by the learner target province", as
   assert.match(app, /只练目标考试，不混入其他省份/);
   assert.match(route, /bankMatchesProfile/);
   assert.match(route, /当前目标是.*请先切换目标考试再添加这套题库/);
+  assert.match(route, /不同省份题库必须使用独立编号/);
   assert.match(manager, /省考必须按省份单独建库/);
 });
 

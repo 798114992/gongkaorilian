@@ -1150,16 +1150,34 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
   const db = getD1();
   const job = await db.prepare("SELECT id FROM question_imports WHERE id = ? AND bank_id = ? AND status = 'processing'").bind(importId, bankId).first();
   if (!job) return json({ error: "导入任务不存在或已经结束" }, 409);
-  const valid: ImportedQuestion[] = [];
+  const valid: Array<{ question: ImportedQuestion; row: number }> = [];
   const errors: Array<{ row: number; message: string }> = [];
   payload.rows.forEach((raw, index) => {
     const result = validateImportedQuestion(raw);
-    if (result.question) valid.push(result.question);
+    if (result.question) valid.push({ question: result.question, row: offset + index + 2 });
     else errors.push({ row: offset + index + 2, message: result.error ?? "未知错误" });
   });
+  let accepted = valid;
   if (valid.length) {
+    const placeholders = valid.map(() => "?").join(",");
+    const conflicts = await db.prepare(`SELECT DISTINCT q.question_code, qb.name AS bank_name
+      FROM questions q
+      JOIN question_bank_items qbi ON qbi.question_id = q.id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE q.question_code IN (${placeholders}) AND qb.id != ?`)
+      .bind(...valid.map((item) => item.question.questionCode), bankId)
+      .all<{ question_code: string; bank_name: string }>();
+    const conflictMap = new Map(conflicts.results.map((item) => [item.question_code, item.bank_name]));
+    accepted = valid.filter((item) => {
+      const bankName = conflictMap.get(item.question.questionCode);
+      if (!bankName) return true;
+      errors.push({ row: item.row, message: `题目编号已属于“${bankName}”，不同省份题库必须使用独立编号` });
+      return false;
+    });
+  }
+  if (accepted.length) {
     const statements: D1PreparedStatement[] = [];
-    valid.forEach((item, index) => {
+    accepted.forEach(({ question: item }, index) => {
       statements.push(
         db.prepare(`INSERT INTO questions
           (question_code, subject, module, sub_type, stem, options_json, answer, explanation, technique,
@@ -1182,8 +1200,8 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
     await db.batch(statements);
   }
   await db.prepare(`UPDATE question_imports SET imported_rows = imported_rows + ?, failed_rows = failed_rows + ?
-    WHERE id = ?`).bind(valid.length, errors.length, importId).run();
-  return json({ ok: true, imported: valid.length, failed: errors.length, errors });
+    WHERE id = ?`).bind(accepted.length, errors.length, importId).run();
+  return json({ ok: true, imported: accepted.length, failed: errors.length, errors });
 }
 
 async function adminFinishQuestionImport(payload: Record<string, unknown>) {

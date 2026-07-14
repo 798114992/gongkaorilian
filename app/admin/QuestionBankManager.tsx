@@ -301,12 +301,12 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   return (
     <>
       <section className="admin-panel bank-config-panel">
-        <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
+        <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2><small>省考必须按省份单独建库，例如“广东省考行测”和“江苏省考行测”不能合并。</small></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
         <div className="form-grid bank-form-grid">
           <label>题库编码<input value={bankForm.bankCode} onChange={(event) => setBankForm({ ...bankForm, bankCode: event.target.value.toUpperCase() })} placeholder="如 GD-XC-2027" /></label>
           <label>题库名称<input value={bankForm.name} onChange={(event) => setBankForm({ ...bankForm, name: event.target.value })} placeholder="如 2027广东省考·行测综合" /></label>
-          <label>考试类型<select value={bankForm.examType} onChange={(event) => setBankForm({ ...bankForm, examType: event.target.value })}><option value="national">国考</option><option value="provincial">省考</option><option value="special">专项题库</option></select></label>
-          <label>省份<input value={bankForm.province} onChange={(event) => setBankForm({ ...bankForm, province: event.target.value })} placeholder={bankForm.examType === "provincial" ? "省考必填，如广东" : "国考可留空"} /></label>
+          <label>考试类型<select value={bankForm.examType} onChange={(event) => setBankForm({ ...bankForm, examType: event.target.value, province: event.target.value === "provincial" ? bankForm.province : "" })}><option value="national">国考</option><option value="provincial">省考</option><option value="special">专项题库</option></select></label>
+          <label>省份<input value={bankForm.province} disabled={bankForm.examType !== "provincial"} onChange={(event) => setBankForm({ ...bankForm, province: event.target.value })} placeholder={bankForm.examType === "provincial" ? "省考必填，如广东" : "仅省考题库需要填写"} /></label>
           <label>适用年份<input type="number" min="2020" max="2100" value={bankForm.examYear} onChange={(event) => setBankForm({ ...bankForm, examYear: Number(event.target.value) })} /></label>
           <label>科目<select value={bankForm.subject} onChange={(event) => setBankForm({ ...bankForm, subject: event.target.value })}><option>行测</option><option>申论</option><option>综合</option></select></label>
           <label>封面颜色<select value={bankForm.coverColor} onChange={(event) => setBankForm({ ...bankForm, coverColor: event.target.value })}><option value="blue">公考蓝</option><option value="orange">活力橙</option><option value="green">成长绿</option><option value="purple">进阶紫</option></select></label>

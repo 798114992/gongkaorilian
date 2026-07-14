@@ -29,7 +29,7 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0003_clammy_rick_jones.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /选择你的考试题库/);
+  assert.match(app, /题库中心/);
   assert.match(app, /智能刷题10道/);
   assert.match(app, /按1、3、7天节奏/);
   assert.match(app, /不确定（即使答对也会复习）/);
@@ -39,6 +39,19 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(migration, /CREATE TABLE `user_exam_profiles`/);
   assert.match(migration, /CREATE TABLE `user_question_progress`/);
   assert.match(migration, /CREATE TABLE `practice_attempts`/);
+});
+
+test("provincial question banks are isolated by the learner target province", async () => {
+  const [app, route, manager] = await Promise.all([
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/QuestionBankManager.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /不会跨省混题/);
+  assert.match(app, /只练目标考试，不混入其他省份/);
+  assert.match(route, /bankMatchesProfile/);
+  assert.match(route, /当前目标是.*请先切换目标考试再添加这套题库/);
+  assert.match(manager, /省考必须按省份单独建库/);
 });
 
 test("account sync and redemption protections are server side", async () => {

@@ -45,6 +45,10 @@ type QuestionBank = {
   studiedCount: number;
   masteredCount: number;
   added: boolean;
+  targetMatch: boolean;
+  recommended: boolean;
+  scopeLabel: string;
+  mismatchReason: string;
 };
 
 type StudyInsights = {
@@ -196,7 +200,7 @@ export default function DailyPracticeApp() {
   const [hideKeywords, setHideKeywords] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [profileDraft, setProfileDraft] = useState<ExamProfile>({ onboarded: false, examType: "国考", province: "", examYear: new Date().getFullYear() + 1, examDate: null, dailyMinutes: 20 });
-  const [bankFilter, setBankFilter] = useState("全部");
+  const [bankFilter, setBankFilter] = useState("适合我");
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("mixed");
@@ -218,6 +222,9 @@ export default function DailyPracticeApp() {
   const targetDays = daysLeft(profile.examDate);
   const hasExtendedMembership = Boolean(bootstrap?.ledger.some((item) => item.source_type !== "trial"));
   const addedBanks = bootstrap?.questionBanks.filter((bank) => bank.added) ?? [];
+  const exactTargetBanks = addedBanks.filter((bank) => bank.targetMatch && bank.code !== "starter-gk");
+  const activeLearningBanks = exactTargetBanks.length ? exactTargetBanks : addedBanks.filter((bank) => bank.code === "starter-gk");
+  const targetBankMissing = profile.onboarded && profile.examType === "省考" && exactTargetBanks.length === 0;
   const baseTodayAttempts = insights.recent.find((item) => item.day === new Date().toISOString().slice(0, 10))?.total ?? 0;
   const practiceDone = baseTodayAttempts + sessionAnswered >= 10;
   const doneCount = [progress.completed[`${dayKey}-morning`], practiceDone, progress.completed[`${dayKey}-essay`]].filter(Boolean).length;
@@ -504,9 +511,10 @@ export default function DailyPracticeApp() {
 
   const filteredBanks = useMemo(() => {
     const banks = bootstrap?.questionBanks ?? [];
+    if (bankFilter === "适合我") return banks.filter((bank) => bank.targetMatch).sort((a, b) => Number(b.recommended) - Number(a.recommended));
     if (bankFilter === "我的") return banks.filter((bank) => bank.added);
-    if (bankFilter === "国考") return banks.filter((bank) => bank.examType === "国考" || bank.examType === "通用");
-    if (bankFilter === "省考") return banks.filter((bank) => bank.examType === "省考" || bank.examType === "通用");
+    if (bankFilter === "国考") return banks.filter((bank) => bank.examType === "国考");
+    if (bankFilter === "省考") return banks.filter((bank) => bank.examType === "省考");
     if (bankFilter === "申论") return banks.filter((bank) => bank.subject === "申论");
     return banks;
   }, [bankFilter, bootstrap?.questionBanks]);
@@ -525,18 +533,36 @@ export default function DailyPracticeApp() {
 
             {bootstrap?.content.access === "preview" && <section className="access-card"><div><span>当前为免费版</span><h3>每天可练5题，完整体验学习闭环</h3><p>激活后解锁不限题库、完整解析和全部音频。</p></div><button onClick={() => setTab("me")}>去激活</button></section>}
 
+            {targetBankMissing && <section className="province-warning"><div><span>题库待配置</span><h3>{profile.province}省考题库尚未发布</h3><p>当前仅使用通用基础题，不会混入其他省份。请在后台创建并发布“{profile.province}省考”专属题库。</p></div><button onClick={() => setTab("banks")}>查看题库</button></section>}
+
             <section className="today-plan"><div className="section-heading"><div><span>今日安排</span><h2>完成三个有效学习动作</h2></div><em>{doneCount === 3 ? "今日已完成" : `还剩 ${3 - doneCount} 项`}</em></div>
               <button className="plan-item" onClick={() => setActiveModule("morning")}><span className="plan-icon blue">读</span><div><b>晨读：记住3个规范表达</b><p>{day.morning.title}</p></div><i>{progress.completed[`${dayKey}-morning`] ? "✓" : "5分钟"}</i></button>
               <button className="plan-item featured-plan" onClick={() => void startPractice("mixed")}><span className="plan-icon orange">练</span><div><b>智能刷题10道</b><p>到期复习优先，自动补充薄弱题和新题</p></div><i>{practiceDone ? "✓" : "10分钟"}</i></button>
               <button className="plan-item" onClick={() => setActiveModule("essay")}><span className="plan-icon green">写</span><div><b>申论表达微练</b><p>独立改写＋参考对比＋四维自评</p></div><i>{progress.completed[`${dayKey}-essay`] ? "✓" : "5分钟"}</i></button>
             </section>
 
-            <section className="my-banks-preview"><div className="section-heading"><div><span>我的题库</span><h2>按目标持续刷，不再到处找题</h2></div><button onClick={() => setTab("banks")}>管理题库</button></div><div className="mini-bank-row">{addedBanks.slice(0, 2).map((bank) => <button key={bank.code} onClick={() => void startPractice("mixed", [bank.code])}><span>{bank.subject}</span><div><b>{bank.name}</b><small>已练 {bank.studiedCount}/{bank.questionCount} · 掌握 {bank.masteredCount}</small></div><i>开始</i></button>)}</div></section>
+            <section className="my-banks-preview"><div className="section-heading"><div><span>{profile.examType === "省考" ? `${profile.province}专属题库` : "国考题库"}</span><h2>只练目标考试，不混入其他省份</h2></div><button onClick={() => setTab("banks")}>管理题库</button></div><div className="mini-bank-row">{activeLearningBanks.slice(0, 2).map((bank) => <button key={bank.code} onClick={() => void startPractice("mixed", [bank.code])}><span>{bank.subject}</span><div><b>{bank.name}</b><small>{bank.scopeLabel} · 已练 {bank.studiedCount}/{bank.questionCount}</small></div><i>开始</i></button>)}</div></section>
 
             <section className="tool-section"><div className="section-heading"><div><span>随时巩固</span><h2>不浪费碎片时间</h2></div></div><div className="tool-grid refreshed-tools"><button className="audio-tool" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤听时政与申论</small></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount} 道今天该复习</small></button><button onClick={() => setTab("report")}><span>报</span><b>提分诊断</b><small>{weakestModule ? `${weakestModule.module}需加强` : "完成练习后生成"}</small></button></div></section>
           </div>}
 
-          {tab === "banks" && <div className="page-content subpage"><div className="subpage-heading bank-heading"><div><span>题库中心</span><h1>选择你的考试题库</h1><p>像添加词书一样添加国考或省考题库，学习进度相互独立。</p></div><strong>{addedBanks.length} 本已添加</strong></div><div className="bank-filters">{["全部", "我的", "国考", "省考", "申论"].map((item) => <button key={item} className={bankFilter === item ? "active" : ""} onClick={() => setBankFilter(item)}>{item}</button>)}</div><section className="bank-list">{filteredBanks.map((bank) => { const percent = bank.questionCount ? Math.round((bank.studiedCount / bank.questionCount) * 100) : 0; return <article className={`bank-card bank-${bank.coverColor}`} key={bank.code}><div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bank.province}</small></div><div className="bank-copy"><div><span>{bank.examYear ? `${bank.examYear}年` : "持续更新"} · {bank.questionCount}题</span><h3>{bank.name}</h3><p>{bank.description}</p></div><div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div><footer><small>已掌握 {bank.masteredCount} 题</small><div><button disabled={busy} className={bank.added ? "remove" : ""} onClick={() => void toggleBank(bank)}>{bank.added ? "已添加" : "+ 添加"}</button>{bank.added && <button className="start-bank" onClick={() => void startPractice("mixed", [bank.code])}>开始练</button>}</div></footer></div></article>; })}</section>{filteredBanks.length === 0 && <div className="empty-state compact"><span>库</span><h3>对应题库正在整理</h3><p>你在后台发布的新题库会自动显示在这里。</p></div>}</div>}
+          {tab === "banks" && <div className="page-content subpage">
+            <div className="subpage-heading bank-heading"><div><span>题库中心</span><h1>{profile.examType === "省考" ? `${profile.province}省考题库` : "国考题库"}</h1><p>每个省单独建库、单独统计，智能组题不会跨省混题。</p></div><strong>{addedBanks.length} 本已添加</strong></div>
+            <div className="target-scope-note"><b>当前组题范围</b><span>{profile.examType === "省考" ? `${profile.province}省考专属题库` : "国考专属题库"}</span><button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>切换目标</button></div>
+            <div className="bank-filters">{["适合我", "我的", "全部", "国考", "省考", "申论"].map((item) => <button key={item} className={bankFilter === item ? "active" : ""} onClick={() => setBankFilter(item)}>{item}</button>)}</div>
+            <section className="bank-list">{filteredBanks.map((bank) => {
+              const percent = bank.questionCount ? Math.round((bank.studiedCount / bank.questionCount) * 100) : 0;
+              const canUse = bank.targetMatch;
+              return <article className={`bank-card bank-${bank.coverColor} ${canUse ? "" : "bank-mismatch"}`} key={bank.code}>
+                <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bank.province}</small></div>
+                <div className="bank-copy"><div><span>{bank.examYear ? `${bank.examYear}年` : "持续更新"} · {bank.questionCount}题</span><h3>{bank.name}</h3><p>{bank.description}</p><div className={`scope-badge ${bank.recommended ? "recommended" : canUse ? "generic" : "mismatch"}`}>{bank.recommended ? "✓ 适合当前目标" : bank.scopeLabel}</div></div>
+                  <div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
+                  <footer><small>{canUse ? `已掌握 ${bank.masteredCount} 题` : bank.mismatchReason}</small><div>{canUse ? <><button disabled={busy} className={bank.added ? "remove" : ""} onClick={() => void toggleBank(bank)}>{bank.added ? "已添加" : "+ 添加"}</button>{bank.added && <button className="start-bank" onClick={() => void startPractice("mixed", [bank.code])}>开始练</button>}</> : <button className="switch-target" onClick={() => { setProfileDraft({ ...profile, examType: bank.examType === "省考" ? "省考" : "国考", province: bank.examType === "省考" ? bank.province : "" }); setOnboardingOpen(true); }}>切换目标后添加</button>}</div></footer>
+                </div>
+              </article>;
+            })}</section>
+            {filteredBanks.length === 0 && <div className="empty-state compact"><span>库</span><h3>{profile.examType === "省考" ? `${profile.province}题库正在整理` : "国考题库正在整理"}</h3><p>在后台按考试类型和省份创建并发布后，会自动显示在这里。</p></div>}
+          </div>}
 
           {tab === "review" && <div className="page-content subpage"><div className="subpage-heading"><span>智能复习</span><h1>不是重看答案，而是再次做对</h1><p>系统按1、3、7天节奏安排错题、蒙对题和到期题。</p></div><section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy} onClick={() => void startPractice("review")}>开始回炉</button></section><div className="review-rules"><article><span>1天</span><div><b>错题与蒙对题</b><p>趁记忆还新鲜，先把错因说明白。</p></div></article><article><span>3天</span><div><b>学习中题目</b><p>再次做对，才能进入长期记忆。</p></div></article><article><span>7天</span><div><b>已掌握题目</b><p>低频抽查，防止“会过又忘”。</p></div></article></div>{practiceEmpty && <div className="empty-state compact"><span>✓</span><h3>今天没有到期题</h3><p>可以去题库继续学习新题。</p><button className="primary-button" onClick={() => setTab("banks")}>去题库</button></div>}</div>}
 
@@ -549,7 +575,7 @@ export default function DailyPracticeApp() {
 
         {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>听</span>听练</button><button className={tab === "report" || tab === "review" ? "active" : ""} onClick={() => setTab("report")}><span>报</span>报告</button><button className={tab === "me" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
 
-        {onboardingOpen && bootstrap && <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-label="设置备考目标"><section className="onboarding-card"><div className="onboarding-top"><span>只需30秒</span><h2>{profile.onboarded ? "调整你的备考目标" : "先告诉我，你在准备哪场考试？"}</h2><p>系统会据此筛选题库、计算倒计时并安排每日题量。</p></div><div className="choice-group"><label>考试类型</label><div className="segmented-choice"><button className={profileDraft.examType === "国考" ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, examType: "国考", province: "" })}>国考</button><button className={profileDraft.examType === "省考" ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, examType: "省考" })}>省考</button></div></div>{profileDraft.examType === "省考" && <div className="choice-group"><label>目标省份</label><select value={profileDraft.province} onChange={(event) => setProfileDraft({ ...profileDraft, province: event.target.value })}><option value="">请选择省份</option>{provinces.map((province) => <option key={province}>{province}</option>)}</select></div>}<div className="onboarding-grid"><div className="choice-group"><label>考试年份</label><select value={profileDraft.examYear} onChange={(event) => setProfileDraft({ ...profileDraft, examYear: Number(event.target.value) })}>{[new Date().getFullYear(), new Date().getFullYear() + 1, new Date().getFullYear() + 2].map((year) => <option key={year}>{year}</option>)}</select></div><div className="choice-group"><label>考试日期（可选）</label><input type="date" value={profileDraft.examDate ?? ""} onChange={(event) => setProfileDraft({ ...profileDraft, examDate: event.target.value || null })} /></div></div><div className="choice-group"><label>每天计划学习</label><div className="minute-choice">{[10, 20, 30, 45, 60].map((minutes) => <button key={minutes} className={profileDraft.dailyMinutes === minutes ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, dailyMinutes: minutes })}>{minutes}分钟</button>)}</div></div><button className="primary-button full-button onboarding-submit" disabled={busy} onClick={() => void saveProfile()}>{busy ? "正在生成学习计划…" : "保存并开始日练"}</button>{profile.onboarded && <button className="onboarding-cancel" onClick={() => setOnboardingOpen(false)}>取消修改</button>}</section></div>}
+        {onboardingOpen && bootstrap && <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-label="设置备考目标"><section className="onboarding-card"><div className="onboarding-top"><span>只需30秒</span><h2>{profile.onboarded ? "调整你的备考目标" : "先告诉我，你在准备哪场考试？"}</h2><p>系统会据此筛选题库、计算倒计时并安排每日题量。</p></div><div className="choice-group"><label>考试类型</label><div className="segmented-choice"><button className={profileDraft.examType === "国考" ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, examType: "国考", province: "" })}>国考</button><button className={profileDraft.examType === "省考" ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, examType: "省考" })}>省考</button></div></div>{profileDraft.examType === "省考" && <div className="choice-group"><label>目标省份</label><select value={profileDraft.province} onChange={(event) => setProfileDraft({ ...profileDraft, province: event.target.value })}><option value="">请选择省份</option>{provinces.map((province) => <option key={province}>{province}</option>)}</select></div>}<div className="onboarding-grid"><div className="choice-group"><label>考试年份</label><select value={profileDraft.examYear} onChange={(event) => setProfileDraft({ ...profileDraft, examYear: Number(event.target.value) })}>{[new Date().getFullYear(), new Date().getFullYear() + 1, new Date().getFullYear() + 2].map((year) => <option key={year}>{year}</option>)}</select></div><div className="choice-group"><label>考试日期（可选）</label><input type="date" value={profileDraft.examDate ?? ""} onChange={(event) => setProfileDraft({ ...profileDraft, examDate: event.target.value || null })} /></div></div><div className="choice-group"><label>每天计划学习</label><div className="minute-choice">{[10, 20, 30, 45, 60].map((minutes) => <button key={minutes} className={profileDraft.dailyMinutes === minutes ? "active" : ""} onClick={() => setProfileDraft({ ...profileDraft, dailyMinutes: minutes })}>{minutes}分钟</button>)}</div></div><div className="province-isolation-note">{profileDraft.examType === "省考" ? `保存后只使用${profileDraft.province || "所选省份"}省考题库，不会混入其他省份题目。` : "保存后只使用国考题库，不会混入各省省考题目。"}</div><button className="primary-button full-button onboarding-submit" disabled={busy} onClick={() => void saveProfile()}>{busy ? "正在生成学习计划…" : "保存并开始日练"}</button>{profile.onboarded && <button className="onboarding-cancel" onClick={() => setOnboardingOpen(false)}>取消修改</button>}</section></div>}
         {toast && <div className="toast" role="status">{toast}</div>}
       </div>
     </main>

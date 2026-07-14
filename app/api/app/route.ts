@@ -351,9 +351,18 @@ async function loadExamProfile(userId: string) {
   };
 }
 
+function bankMatchesProfile(bank: { exam_type: string; province?: string | null }, profile: { examType: string; province: string }) {
+  if (profile.examType === "国考") return bank.exam_type === "national";
+  return bank.exam_type === "provincial" && (bank.province ?? "") === profile.province;
+}
+
+function displayExamType(value: string) {
+  return value === "national" ? "国考" : value === "provincial" ? "省考" : "专项";
+}
+
 async function loadQuestionBanks(userId: string) {
   const db = getD1();
-  const [selected, rows] = await Promise.all([
+  const [selected, rows, profile] = await Promise.all([
     selectedBankCodes(userId),
     db.prepare(`SELECT qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year, qb.subject,
       qb.description, qb.cover_color, COUNT(DISTINCT qbi.question_id) AS question_count,
@@ -368,6 +377,7 @@ async function loadQuestionBanks(userId: string) {
         bank_code: string; name: string; exam_type: string; province: string | null; exam_year: number | null;
         subject: string; description: string; cover_color: string; question_count: number; studied_count: number; mastered_count: number;
       }>(),
+    loadExamProfile(userId),
   ]);
   const starterCodes = starterQuestionList().map((question) => question.id);
   const placeholders = starterCodes.map(() => "?").join(",");
@@ -388,11 +398,22 @@ async function loadQuestionBanks(userId: string) {
     studiedCount: starterProgress.results.length,
     masteredCount: starterProgress.results.filter((item) => item.state === "mastered").length,
     added: selected.includes(STARTER_BANK_CODE),
+    targetMatch: true,
+    recommended: false,
+    scopeLabel: "通用基础 · 非国考/省考真题",
+    mismatchReason: "只用于练习基础题型，不代表目标考试的命题特点。",
   };
-  return [starter, ...rows.results.map((row) => ({
+  return [starter, ...rows.results.map((row) => {
+    const targetMatch = bankMatchesProfile(row, profile);
+    const recommended = targetMatch && (!row.exam_year || row.exam_year === profile.examYear);
+    const scopeLabel = row.exam_type === "provincial" ? `${row.province ?? "未设置"}省考专属` : row.exam_type === "national" ? "国考专属" : "专项训练";
+    const mismatchReason = targetMatch ? "" : profile.examType === "省考"
+      ? `当前目标是${profile.province}省考，该题库不会进入智能组题。`
+      : "当前目标是国考，该题库不会进入智能组题。";
+    return {
     code: row.bank_code,
     name: row.name,
-    examType: row.exam_type,
+    examType: displayExamType(row.exam_type),
     province: row.province ?? "全国",
     examYear: row.exam_year,
     subject: row.subject,
@@ -402,7 +423,11 @@ async function loadQuestionBanks(userId: string) {
     studiedCount: Number(row.studied_count),
     masteredCount: Number(row.mastered_count),
     added: selected.includes(row.bank_code),
-  }))];
+    targetMatch,
+    recommended,
+    scopeLabel,
+    mismatchReason,
+  }; })];
 }
 
 async function loadStudyInsights(userId: string) {
@@ -542,14 +567,20 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
     ? Array.from(new Set(payload.selectedBanks.map(String).filter((value) => /^[a-zA-Z0-9_-]{3,80}$/.test(value)))).slice(0, 12)
     : [STARTER_BANK_CODE];
   const db = getD1();
-  const published = requestedBanks.filter((code) => code !== STARTER_BANK_CODE).length
-    ? await db.prepare(`SELECT bank_code FROM question_banks WHERE status = 'published' AND bank_code IN (${requestedBanks.filter((code) => code !== STARTER_BANK_CODE).map(() => "?").join(",")})`)
-      .bind(...requestedBanks.filter((code) => code !== STARTER_BANK_CODE)).all<{ bank_code: string }>()
-    : { results: [] as Array<{ bank_code: string }> };
-  const validBanks = Array.from(new Set([
-    ...(requestedBanks.includes(STARTER_BANK_CODE) ? [STARTER_BANK_CODE] : []),
-    ...published.results.map((row) => row.bank_code),
-  ]));
+  const requestedPublished = requestedBanks.filter((code) => code !== STARTER_BANK_CODE).length
+    ? await db.prepare(`SELECT bank_code, exam_type, province, exam_year FROM question_banks
+      WHERE status = 'published' AND bank_code IN (${requestedBanks.filter((code) => code !== STARTER_BANK_CODE).map(() => "?").join(",")})`)
+      .bind(...requestedBanks.filter((code) => code !== STARTER_BANK_CODE)).all<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null }>()
+    : { results: [] as Array<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null }> };
+  const targetProfile = { examType, province };
+  const exactRequested = requestedPublished.results.filter((bank) => bankMatchesProfile(bank, targetProfile)).map((bank) => bank.bank_code);
+  const targetType = examType === "国考" ? "national" : "provincial";
+  const recommended = await db.prepare(`SELECT bank_code FROM question_banks
+    WHERE status = 'published' AND exam_type = ? AND (? = 'national' OR province = ?)
+      AND (exam_year IS NULL OR exam_year = ?)
+    ORDER BY CASE WHEN exam_year = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 6`)
+    .bind(targetType, targetType, province, examYear, examYear).all<{ bank_code: string }>();
+  const validBanks = Array.from(new Set(exactRequested.length ? exactRequested : recommended.results.map((bank) => bank.bank_code)));
   if (!validBanks.length) validBanks.push(STARTER_BANK_CODE);
   await db.batch([
     db.prepare(`INSERT INTO user_exam_profiles (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
@@ -569,8 +600,16 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
   if (!/^[a-zA-Z0-9_-]{3,80}$/.test(bankCode)) return json({ error: "题库编号无效" }, 400);
   const db = getD1();
   if (bankCode !== STARTER_BANK_CODE) {
-    const exists = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ? AND status = 'published'").bind(bankCode).first();
+    const exists = await db.prepare("SELECT id, exam_type, province FROM question_banks WHERE bank_code = ? AND status = 'published'")
+      .bind(bankCode).first<{ id: number; exam_type: string; province: string | null }>();
     if (!exists) return json({ error: "题库不存在或尚未发布" }, 404);
+    if (added) {
+      const profile = await loadExamProfile(userId);
+      if (profile.onboarded && !bankMatchesProfile(exists, profile)) {
+        const target = profile.examType === "省考" ? `${profile.province}省考` : "国考";
+        return json({ error: `当前目标是${target}，请先切换目标考试再添加这套题库` }, 409);
+      }
+    }
   }
   if (added) {
     await db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, bankCode).run();
@@ -637,7 +676,18 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
   const selected = await selectedBankCodes(userId);
   const allowed = new Set(selected);
-  const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 12);
+  let bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 12);
+  if (!requested.length) {
+    const profile = await loadExamProfile(userId);
+    const selectedPublished = bankCodes.filter((code) => code !== STARTER_BANK_CODE);
+    const rows = selectedPublished.length
+      ? await getD1().prepare(`SELECT bank_code, exam_type, province FROM question_banks
+        WHERE status = 'published' AND bank_code IN (${selectedPublished.map(() => "?").join(",")})`)
+        .bind(...selectedPublished).all<{ bank_code: string; exam_type: string; province: string | null }>()
+      : { results: [] as Array<{ bank_code: string; exam_type: string; province: string | null }> };
+    const exactCodes = rows.results.filter((bank) => bankMatchesProfile(bank, profile)).map((bank) => bank.bank_code);
+    bankCodes = exactCodes.length ? exactCodes : bankCodes.includes(STARTER_BANK_CODE) ? [STARTER_BANK_CODE] : [];
+  }
   const mode = payload.mode === "review" ? "review" : "mixed";
   const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
   const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());

@@ -25,6 +25,9 @@ const EVENT_NAMES = new Set([
   "plan_override",
   "bank_toggle",
   "profile_save",
+  "calendar_event_save",
+  "reminder_enable",
+  "micro_drill_open",
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
@@ -114,6 +117,17 @@ type ExamTargetProfile = {
   province: string;
   examYear: number;
   examDate: string | null;
+};
+
+type PublishedExamEvent = {
+  id: string;
+  targetCode: string;
+  targetLabel: string;
+  eventType: string;
+  title: string;
+  eventDate: string;
+  reminderDays: number;
+  sourceUrl: string;
 };
 
 type LoadedExamProfile = {
@@ -337,6 +351,30 @@ async function seedDefaults() {
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_reward_days', '3')"),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_monthly_cap', '30')"),
     db.prepare("UPDATE redemption_codes SET status = 'disabled' WHERE batch_name = '内测演示码'"),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('gk-2027', '2027国考行测', 'national', NULL, 2027, '行测', '按国考命题结构整理，支持后台持续导入真题与专项题。', 'navy', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('joint-provincial-2027', '2027省考联考通用', 'special', '多省', 2027, '行测', '用于省考共通模块训练，各省差异题仍放在对应省份独立题库。', 'green', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('gd-2027', '2027广东省考行测', 'provincial', '广东', 2027, '行测', '广东省考独立题库，题型、题量与考情单独维护。', 'orange', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('zj-2027', '2027浙江省考行测', 'provincial', '浙江', 2027, '行测', '浙江省考独立题库，题型、题量与考情单独维护。', 'blue', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('sd-2027', '2027山东省考行测', 'provincial', '山东', 2027, '行测', '山东省考独立题库，题型、题量与考情单独维护。', 'green', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('police-post', '公安岗专项', 'special', '全国', NULL, '综合', '面向公安岗考生的专业科目与岗位专项练习。', 'navy', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('law-enforcement', '行政执法专项', 'special', '全国', NULL, '综合', '聚焦行政执法类岗位高频法律与实务考点。', 'orange', 'published')`),
+    db.prepare(`INSERT OR IGNORE INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
+      VALUES ('public-institution', '事业单位职测', 'special', '全国', NULL, '综合', '事业单位职测与综合应用能力日练入口。', 'blue', 'published')`),
   ]);
 }
 
@@ -743,25 +781,45 @@ async function loadContent(membershipActive: boolean) {
     ORDER BY id ASC`).all<{ content_type: string; content_key: string; payload_json: string }>();
   const dayMap = new Map(defaultPracticeDays.map((day) => [`day-${day.day}`, clone(day)]));
   const audioMap = new Map(defaultAudioTracks.map((track) => [track.id, clone(track)]));
+  const examEventMap = new Map<string, PublishedExamEvent>();
   for (const row of rows.results) {
     try {
-      const parsed = JSON.parse(row.payload_json) as PracticeDay | AudioTrack;
+      const parsed = JSON.parse(row.payload_json) as PracticeDay | AudioTrack | Record<string, unknown>;
       if (row.content_type === "practice_day") dayMap.set(row.content_key, parsed as PracticeDay);
       if (row.content_type === "audio_track") audioMap.set(row.content_key, parsed as AudioTrack);
+      if (row.content_type === "exam_event") {
+        const item = parsed as Record<string, unknown>;
+        const targetCode = trimmed(item.targetCode, 60);
+        const eventDate = trimmed(item.eventDate, 10);
+        const title = trimmed(item.title, 40);
+        if (targetCode && title && /^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
+          examEventMap.set(row.content_key, {
+            id: `official-${row.content_key}`,
+            targetCode,
+            targetLabel: trimmed(item.targetLabel, 24) || (targetCode === "national" ? "国考" : targetCode.replace(/^province:/, "") + "省考"),
+            eventType: trimmed(item.eventType, 24) || "公告发布",
+            title,
+            eventDate,
+            reminderDays: [0, 1, 3, 7, 14].includes(Number(item.reminderDays)) ? Number(item.reminderDays) : 3,
+            sourceUrl: /^https?:\/\//i.test(trimmed(item.sourceUrl, 400)) ? trimmed(item.sourceUrl, 400) : "",
+          });
+        }
+      }
     } catch {
       // Invalid draft data never blocks the learner experience.
     }
   }
   const practiceDays = Array.from(dayMap.values()).sort((a, b) => a.day - b.day);
   const audioTracks = Array.from(audioMap.values());
-  if (membershipActive) return { practiceDays, audioTracks, access: "premium" as const };
+  const examEvents = Array.from(examEventMap.values()).sort((a, b) => a.eventDate.localeCompare(b.eventDate));
+  if (membershipActive) return { practiceDays, audioTracks, examEvents, access: "premium" as const };
 
   const previewDay = clone(practiceDays[0]);
   previewDay.questions = previewDay.questions.slice(0, 5).map((question) => ({ ...question, explanation: "会员可查看完整解析与解题技巧。" }));
   previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
   previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
   previewDay.essay.reference = "兑换会员码后查看参考答案。";
-  return { practiceDays: [previewDay], audioTracks: audioTracks.slice(0, 1), access: "preview" as const };
+  return { practiceDays: [previewDay], audioTracks: audioTracks.slice(0, 1), examEvents, access: "preview" as const };
 }
 
 async function bootstrap(request: Request) {
@@ -894,9 +952,6 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
     const statements: D1PreparedStatement[] = [
       db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, bankCode),
     ];
-    if (bankCode !== STARTER_BANK_CODE) statements.push(
-      db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, STARTER_BANK_CODE),
-    );
     if (bank && (bank.exam_type === "national" || bank.exam_type === "provincial")) {
       const profile = await loadExamProfile(userId);
       const province = bank.exam_type === "provincial" ? normalizeProvince(bank.province) : "";
@@ -927,8 +982,16 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
     await db.batch(statements);
   } else {
     await db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode).run();
-    const remaining = await db.prepare("SELECT COUNT(*) AS total FROM user_question_banks WHERE user_id = ?").bind(userId).first<{ total: number }>();
-    if (!Number(remaining?.total ?? 0)) {
+    const [remaining, available] = await Promise.all([
+      db.prepare("SELECT bank_code FROM user_question_banks WHERE user_id = ?").bind(userId).all<{ bank_code: string }>(),
+      db.prepare(`SELECT COUNT(DISTINCT q.id) AS total FROM user_question_banks uqb
+        JOIN question_banks qb ON qb.bank_code = uqb.bank_code AND qb.status = 'published'
+        JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+        JOIN questions q ON q.id = qbi.question_id AND q.status = 'active'
+        WHERE uqb.user_id = ?`).bind(userId).first<{ total: number }>(),
+    ]);
+    const hasStarter = remaining.results.some((item) => item.bank_code === STARTER_BANK_CODE);
+    if (!hasStarter && !Number(available?.total ?? 0)) {
       await db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, STARTER_BANK_CODE).run();
     }
   }
@@ -1015,6 +1078,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   }
   const mode = payload.mode === "review" ? "review" : "mixed";
   const focusModule = trimmed(payload.focusModule, 40);
+  const strictFocus = payload.strictFocus === true;
   const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
   const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
   const requestedLimit = Math.max(1, Math.min(active ? 20 : 5, Math.floor(Number(payload.limit)) || 10));
@@ -1081,10 +1145,14 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     chosen = [];
     const due = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
     takeBalanced(due, requestedLimit, chosen, bankCycle);
+  } else if (strictFocus && focusModule) {
+    const focusPool = sorted.filter((item) => item.question.module.includes(focusModule) || item.question.knowledge.includes(focusModule));
+    chosen = [];
+    takeBalanced(focusPool, requestedLimit, chosen, bankCycle);
   } else {
     const due = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
     const fresh = sorted.filter((item) => !item.progress);
-    const focusFresh = focusModule ? fresh.filter((item) => item.question.module === focusModule) : fresh;
+    const focusFresh = focusModule ? fresh.filter((item) => item.question.module.includes(focusModule) || item.question.knowledge.includes(focusModule)) : fresh;
     const selectedItems: typeof sorted = [];
     takeBalanced(due, Math.ceil(requestedLimit * 0.6), selectedItems, bankCycle);
     takeBalanced(focusFresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
@@ -1465,7 +1533,7 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     const contentKey = String(item.contentKey ?? "").trim();
     const title = String(item.title ?? "").trim().slice(0, 120);
     const status = item.status === "published" ? "published" : "draft";
-    if (!new Set(["practice_day", "audio_track"]).has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
+    if (!new Set(["practice_day", "audio_track", "exam_event"]).has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
     if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(contentKey) || !title) return json({ error: "内容标识或标题无效" }, 400);
     const payloadJson = JSON.stringify(item.payload ?? {});
     if (payloadJson.length > 120_000) return json({ error: `${contentKey} 内容过大` }, 400);

@@ -19,7 +19,7 @@ type CodeItem = {
 type Redemption = { redeemed_at: string; user_id: string; code_preview: string; duration_days: number };
 type ContentItem = {
   id: number;
-  content_type: "practice_day" | "audio_track";
+  content_type: "practice_day" | "audio_track" | "exam_event";
   content_key: string;
   title: string;
   status: "draft" | "published";
@@ -46,6 +46,22 @@ const contentExample = JSON.stringify([
       description: "一句话说明本期音频价值。",
       text: "在这里填写音频逐字稿。",
       audioUrl: "/audio/august-hotspot.wav",
+    },
+  },
+  {
+    contentType: "exam_event",
+    contentKey: "gd-2027-registration-end",
+    title: "广东省考报名截止",
+    status: "draft",
+    publishAt: null,
+    payload: {
+      targetCode: "province:广东",
+      targetLabel: "广东省考",
+      eventType: "报名截止",
+      title: "广东省考报名截止",
+      eventDate: "2026-12-31",
+      reminderDays: 3,
+      sourceUrl: "https://example.com/official-announcement",
     },
   },
 ], null, 2);
@@ -207,14 +223,14 @@ export default function AdminPage() {
       </div>
 
       <section className="admin-panel content-editor">
-        <div className="admin-panel-title"><div><span>内容发布</span><h2>批量导入日练或电台内容</h2></div><small>先用 draft 预存，确认后改为 published</small></div>
+        <div className="admin-panel-title"><div><span>内容发布</span><h2>批量导入日练、电台或考试节点</h2></div><small>先用 draft 预存，确认后改为 published</small></div>
         <textarea value={contentJson} onChange={(event) => setContentJson(event.target.value)} spellCheck={false} />
-        <div className="content-editor-actions"><p>支持 <code>practice_day</code> 和 <code>audio_track</code>；同一 contentKey 再次导入会更新原内容。</p><button className="admin-primary" onClick={importContent}>校验并导入</button></div>
+        <div className="content-editor-actions"><p>支持 <code>practice_day</code>、<code>audio_track</code> 和 <code>exam_event</code>；同一 contentKey 再次导入会更新原内容。</p><button className="admin-primary" onClick={importContent}>校验并导入</button></div>
       </section>
 
       <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>内容库</span><h2>已导入内容</h2></div><button onClick={load}>刷新</button></div>
-        <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{content.length ? content.map((item) => <tr key={item.id}><td>{item.content_type === "audio_track" ? "电台" : "日练"}</td><td>{item.content_key}</td><td>{item.title}</td><td><span className={`status ${item.status}`}>{item.status === "published" ? "已发布" : "草稿"}</span></td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td>{item.status === "published" && <button onClick={() => disableContent(item.id)}>转为草稿</button>}</td></tr>) : <tr><td colSpan={6}>暂无自定义内容，系统默认内容仍正常展示。</td></tr>}</tbody></table></div>
+        <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{content.length ? content.map((item) => <tr key={item.id}><td>{item.content_type === "audio_track" ? "电台" : item.content_type === "exam_event" ? "考试节点" : "日练"}</td><td>{item.content_key}</td><td>{item.title}</td><td><span className={`status ${item.status}`}>{item.status === "published" ? "已发布" : "草稿"}</span></td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td>{item.status === "published" && <button onClick={() => disableContent(item.id)}>转为草稿</button>}</td></tr>) : <tr><td colSpan={6}>暂无自定义内容，系统默认内容仍正常展示。</td></tr>}</tbody></table></div>
       </section>
 
       <section className="admin-panel table-panel">

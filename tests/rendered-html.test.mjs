@@ -29,7 +29,7 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0003_clammy_rick_jones.sql", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /题库中心/);
+  assert.match(app, /题库书架/);
   assert.match(app, /buildDailyPlan/);
   assert.match(app, /错题、超时与没把握/);
   assert.match(app, /不确定（即使答对也会复习）/);
@@ -81,7 +81,7 @@ test("the compact loop exposes review, honest bank states and a finite session s
   assert.match(app, /setTab\("review"\)/);
   assert.match(app, /今天学够了/);
   assert.match(app, /申论微练建设中/);
-  assert.match(app, /bank\.subject === "行测"/);
+  assert.match(app, /bank\.subject !== "申论"/);
   assert.match(route, /wrongAudioQuestions/);
   assert.match(app, /wrongAudioQuestions/);
 });
@@ -141,6 +141,33 @@ test("the differentiated daily prescription records confidence, balances banks a
   assert.match(migration, /ADD `review_stage`/);
   assert.match(css, /safe-area-inset-top/);
   assert.match(css, /confidence-box/);
+});
+
+test("exam radar, registration reminders, streaks and focused micro drills are part of the daily loop", async () => {
+  const [app, route, css] = await Promise.all([
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(app, /考试雷达 · 目标日历/);
+  assert.match(app, /报名提醒已工作/);
+  assert.match(app, /公告发布/);
+  assert.match(app, /准考证打印/);
+  assert.match(app, /连续打卡/);
+  assert.match(app, /checkinStreak/);
+  assert.match(app, /资料分析速算/);
+  assert.match(app, /图形判断/);
+  assert.match(app, /言语易错成语/);
+  assert.match(app, /常识时政/);
+  assert.match(app, /申论规范表达/);
+  assert.match(route, /strictFocus/);
+  assert.match(route, /广东省考行测/);
+  assert.match(route, /公安岗专项/);
+  assert.match(route, /行政执法专项/);
+  assert.match(route, /事业单位职测/);
+  assert.match(css, /retention-strip/);
+  assert.match(css, /calendar-event/);
+  assert.match(css, /micro-grid/);
 });
 
 test("account sync and redemption protections are server side", async () => {

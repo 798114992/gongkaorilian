@@ -14,6 +14,7 @@ type PlanMinutes = 10 | 30 | 45 | 60;
 type PracticeKind = "daily" | "review" | "bank" | "bonus";
 type AnswerConfidence = "" | "confident" | "hesitant" | "guessed";
 type ReminderMode = "in_app" | "browser";
+type RadarMode = "notices" | "positions" | "tasks";
 
 type ExamEvent = {
   id: string;
@@ -25,6 +26,60 @@ type ExamEvent = {
   reminderDays: number;
   reminderEnabled: boolean;
   sourceUrl: string;
+};
+
+type ExamNotice = {
+  id: string;
+  targetCode: string;
+  targetLabel: string;
+  noticeType: string;
+  title: string;
+  publishDate: string;
+  summary: string;
+  sourceUrl: string;
+  status: string;
+};
+
+type JobPosition = {
+  id: string;
+  targetCode: string;
+  targetLabel: string;
+  examName: string;
+  department: string;
+  unit: string;
+  title: string;
+  code: string;
+  region: string;
+  recruitCount: number;
+  education: string;
+  degree: string;
+  majors: string;
+  majorCodes: string;
+  freshLimit: string;
+  politicalStatus: string;
+  household: string;
+  grassrootsYears: string;
+  gender: string;
+  certificates: string;
+  remote: string;
+  remarks: string;
+  phone: string;
+  sourceUrl: string;
+};
+
+type CandidateProfile = {
+  education: string;
+  degree: string;
+  major: string;
+  majorCategory: string;
+  freshStatus: string;
+  politicalStatus: string;
+  household: string;
+  grassrootsYears: string;
+  grassrootsProject: string;
+  gender: string;
+  certificates: string;
+  acceptRemote: string;
 };
 
 type ActivePracticeSession = {
@@ -60,6 +115,9 @@ type Progress = {
   activePractice: ActivePracticeSession | null;
   examEvents: ExamEvent[];
   reminderMode: ReminderMode;
+  candidateProfile: CandidateProfile;
+  savedPositionIds: string[];
+  radarTodoDone: Record<string, boolean>;
 };
 
 type ExamTarget = {
@@ -174,7 +232,14 @@ type Bootstrap = {
     authProvider: "chatgpt" | "device";
     displayName: string;
   };
-  content: { practiceDays: PracticeDay[]; audioTracks: AudioTrack[]; examEvents: Array<Omit<ExamEvent, "reminderEnabled">>; access: "premium" | "preview" };
+  content: {
+    practiceDays: PracticeDay[];
+    audioTracks: AudioTrack[];
+    examEvents: Array<Omit<ExamEvent, "reminderEnabled">>;
+    examNotices: ExamNotice[];
+    jobPositions: JobPosition[];
+    access: "premium" | "preview";
+  };
   progress: Partial<Progress>;
   examProfile: ExamProfile;
   questionBanks: QuestionBank[];
@@ -184,6 +249,21 @@ type Bootstrap = {
   inviteConfig: { rewardDays: number; monthlyCap: number };
   wrongAudioQuestions: Question[];
   todayKey: string;
+};
+
+const emptyCandidateProfile: CandidateProfile = {
+  education: "",
+  degree: "",
+  major: "",
+  majorCategory: "",
+  freshStatus: "",
+  politicalStatus: "",
+  household: "",
+  grassrootsYears: "",
+  grassrootsProject: "",
+  gender: "",
+  certificates: "",
+  acceptRemote: "可接受",
 };
 
 const emptyProgress: Progress = {
@@ -203,6 +283,9 @@ const emptyProgress: Progress = {
   activePractice: null,
   examEvents: [],
   reminderMode: "in_app",
+  candidateProfile: emptyCandidateProfile,
+  savedPositionIds: [],
+  radarTodoDone: {},
 };
 
 const emptyInsights: StudyInsights = {
@@ -248,6 +331,19 @@ const microDrills = [
   { id: "essay", icon: "写", title: "申论规范表达", detail: "动词＋对象＋机制＋结果", minutes: 8, focus: "essay" },
 ] as const;
 
+const candidateOptions = {
+  education: ["", "大专", "本科", "硕士研究生", "博士研究生"],
+  degree: ["", "无", "学士", "硕士", "博士"],
+  freshStatus: ["", "2027应届", "2026应届", "往届", "基层项目人员"],
+  politicalStatus: ["", "不限", "群众", "共青团员", "中共党员", "中共预备党员"],
+  grassrootsYears: ["", "无", "1年", "2年", "3年及以上"],
+  grassrootsProject: ["", "无", "三支一扶", "西部计划", "大学生村官", "特岗教师", "退役士兵"],
+  gender: ["", "不限", "男", "女"],
+  acceptRemote: ["可接受", "只看城区", "不接受艰苦边远"],
+} as const;
+
+const educationRank = ["高中", "中专", "大专", "本科", "硕士研究生", "博士研究生"];
+
 function safeExamEvents(input: unknown): ExamEvent[] {
   if (!Array.isArray(input)) return [];
   return input.slice(0, 96).flatMap((raw) => {
@@ -269,6 +365,35 @@ function safeExamEvents(input: unknown): ExamEvent[] {
       sourceUrl: typeof item.sourceUrl === "string" && /^https?:\/\//i.test(item.sourceUrl) ? item.sourceUrl.slice(0, 400) : "",
     }];
   });
+}
+
+function safeText(value: unknown, maxLength: number) {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function safeCandidateProfile(input: unknown): CandidateProfile {
+  if (!input || typeof input !== "object") return emptyCandidateProfile;
+  const item = input as Partial<CandidateProfile>;
+  return {
+    education: safeText(item.education, 20),
+    degree: safeText(item.degree, 20),
+    major: safeText(item.major, 40),
+    majorCategory: safeText(item.majorCategory, 40),
+    freshStatus: safeText(item.freshStatus, 20),
+    politicalStatus: safeText(item.politicalStatus, 20),
+    household: safeText(item.household, 40),
+    grassrootsYears: safeText(item.grassrootsYears, 20),
+    grassrootsProject: safeText(item.grassrootsProject, 30),
+    gender: safeText(item.gender, 10),
+    certificates: safeText(item.certificates, 120),
+    acceptRemote: safeText(item.acceptRemote, 20) || "可接受",
+  };
+}
+
+function safeStringList(input: unknown, max = 160) {
+  return Array.isArray(input)
+    ? Array.from(new Set(input.filter((item): item is string => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 120)))).slice(0, max)
+    : [];
 }
 
 function mergeProgress(input?: Partial<Progress>): Progress {
@@ -297,6 +422,9 @@ function mergeProgress(input?: Partial<Progress>): Progress {
     activePractice: validSession ? { ...validSession, reviewAdded: Number(validSession.reviewAdded ?? 0) } : null,
     examEvents: safeExamEvents(input?.examEvents),
     reminderMode: input?.reminderMode === "browser" ? "browser" : "in_app",
+    candidateProfile: safeCandidateProfile(input?.candidateProfile),
+    savedPositionIds: safeStringList(input?.savedPositionIds, 120),
+    radarTodoDone: { ...emptyProgress.radarTodoDone, ...(input?.radarTodoDone ?? {}) },
   };
 }
 
@@ -330,6 +458,95 @@ function shiftDateKey(dateKey: string, days: number) {
 function eventDaysLeft(eventDate: string, todayKey: string) {
   const value = Math.round((Date.parse(`${eventDate}T12:00:00+08:00`) - Date.parse(`${todayKey}T12:00:00+08:00`)) / 86_400_000);
   return Number.isFinite(value) ? value : 9999;
+}
+
+function compactText(value: string) {
+  return value.replace(/\s+/g, "").toLowerCase();
+}
+
+function isUnlimited(value: string) {
+  return !value.trim() || /不限|无要求|不限制|均可|不限专业/.test(value);
+}
+
+function educationMatches(requirement: string, profileEducation: string) {
+  if (isUnlimited(requirement)) return true;
+  if (!profileEducation) return null;
+  const req = compactText(requirement);
+  const userRank = educationRank.findIndex((item) => profileEducation.includes(item));
+  const requiredRank = educationRank.findIndex((item) => req.includes(item.toLowerCase()));
+  if (/本科及以上|本科以上/.test(requirement) && userRank >= educationRank.indexOf("本科")) return true;
+  if (/大专及以上|专科及以上|大专以上|专科以上/.test(requirement) && userRank >= educationRank.indexOf("大专")) return true;
+  if (/硕士及以上|研究生及以上|硕士研究生及以上/.test(requirement) && userRank >= educationRank.indexOf("硕士研究生")) return true;
+  if (requiredRank >= 0 && userRank >= 0) return userRank >= requiredRank;
+  return req.includes(compactText(profileEducation)) || compactText(profileEducation).includes(req);
+}
+
+function fieldMatches(requirement: string, profileValue: string) {
+  if (isUnlimited(requirement)) return true;
+  if (!profileValue) return null;
+  const req = compactText(requirement);
+  const value = compactText(profileValue);
+  return req.includes(value) || value.includes(req);
+}
+
+function majorMatches(position: JobPosition, profile: CandidateProfile) {
+  const requirement = `${position.majors} ${position.majorCodes}`;
+  if (isUnlimited(requirement)) return true;
+  if (!profile.major && !profile.majorCategory) return null;
+  const req = compactText(requirement);
+  const major = compactText(profile.major);
+  const category = compactText(profile.majorCategory);
+  return Boolean((major && req.includes(major)) || (category && req.includes(category)));
+}
+
+function matchPosition(position: JobPosition, profile: CandidateProfile) {
+  const reasons: string[] = [];
+  const risks: string[] = [];
+  const fails: string[] = [];
+
+  const education = educationMatches(position.education, profile.education);
+  if (education === true) reasons.push("学历基本符合");
+  else if (education === false) fails.push("学历不匹配");
+  else risks.push("学历待补充");
+
+  const degree = fieldMatches(position.degree, profile.degree);
+  if (degree === true && !isUnlimited(position.degree)) reasons.push("学位匹配");
+  else if (degree === false) risks.push("学位需核对");
+  else if (degree === null && !isUnlimited(position.degree)) risks.push("学位待补充");
+
+  const major = majorMatches(position, profile);
+  if (major === true) reasons.push(isUnlimited(`${position.majors} ${position.majorCodes}`) ? "不限专业" : "专业方向匹配");
+  else if (major === false) fails.push("专业不匹配");
+  else risks.push("专业待补充");
+
+  if (/应届/.test(position.freshLimit) && !/应届/.test(profile.freshStatus)) fails.push("应届身份不符");
+  else if (!isUnlimited(position.freshLimit) && !profile.freshStatus) risks.push("应届/往届待补充");
+
+  if (/党员|中共/.test(position.politicalStatus) && !/党员/.test(profile.politicalStatus)) fails.push("政治面貌不符");
+  else if (!isUnlimited(position.politicalStatus) && !profile.politicalStatus) risks.push("政治面貌待补充");
+
+  const household = fieldMatches(position.household, profile.household);
+  if (household === false) risks.push("户籍/生源地需核对");
+  else if (household === null && !isUnlimited(position.household)) risks.push("户籍待补充");
+
+  const grassroots = fieldMatches(position.grassrootsYears, profile.grassrootsYears);
+  if (grassroots === false) risks.push("基层经历年限需核对");
+  else if (grassroots === null && !isUnlimited(position.grassrootsYears)) risks.push("基层经历待补充");
+
+  if (!isUnlimited(position.gender) && profile.gender && position.gender !== profile.gender) fails.push("性别限制不符");
+  else if (!isUnlimited(position.gender) && !profile.gender) risks.push("性别待补充");
+
+  if (!isUnlimited(position.certificates) && !profile.certificates) risks.push("证书要求待核对");
+  else if (!isUnlimited(position.certificates) && !compactText(profile.certificates).includes(compactText(position.certificates))) risks.push("证书可能不匹配");
+
+  if (/艰苦|边远|驻外|夜班|加班/.test(position.remote) && profile.acceptRemote === "不接受艰苦边远") risks.push("工作地点/强度需谨慎");
+
+  if (!profile.education || !profile.major || !profile.freshStatus) {
+    return { level: "risk" as const, label: "先完善条件", reasons: ["学历、专业、身份至少补全后再筛"], score: 1 };
+  }
+  if (fails.length) return { level: "fail" as const, label: "明显不符", reasons: fails.slice(0, 3), score: 0 };
+  if (risks.length) return { level: "risk" as const, label: "条件存疑", reasons: risks.slice(0, 3), score: 2 };
+  return { level: "fit" as const, label: "初步符合", reasons: reasons.slice(0, 3), score: 3 };
 }
 
 function checkinStreak(checkins: string[], todayKey: string) {
@@ -498,6 +715,7 @@ export default function DailyPracticeApp() {
   const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
   const [eventFormOpen, setEventFormOpen] = useState(false);
   const [eventDraft, setEventDraft] = useState({ targetCode: "", eventType: "报名截止", title: "报名截止", eventDate: "", reminderDays: 3, sourceUrl: "" });
+  const [radarMode, setRadarMode] = useState<RadarMode>("notices");
   const trackedUserRef = useRef("");
   const reminderShownRef = useRef("");
   const progressRef = useRef<Progress>(emptyProgress);
@@ -508,6 +726,15 @@ export default function DailyPracticeApp() {
   const day = practiceDays[contentDayIndex(dayKey, practiceDays.length)] ?? practiceDays[0] ?? loadingDay;
   const insights = bootstrap?.studyInsights ?? emptyInsights;
   const profile = bootstrap?.examProfile ?? profileDraft;
+  const examNotices = bootstrap?.content.examNotices ?? [];
+  const jobPositions = bootstrap?.content.jobPositions ?? [];
+  const activeTargetCodes = new Set(profile.targets.map((target) => target.code));
+  const relevantNotices = examNotices
+    .filter((notice) => !profile.targets.length || activeTargetCodes.has(notice.targetCode))
+    .sort((a, b) => b.publishDate.localeCompare(a.publishDate));
+  const relevantPositions = jobPositions
+    .filter((position) => !profile.targets.length || activeTargetCodes.has(position.targetCode))
+    .sort((a, b) => a.targetLabel.localeCompare(b.targetLabel) || a.department.localeCompare(b.department));
   const dailySessionForPlan = progress.activePractice?.dateKey === dayKey && progress.activePractice.kind === "daily"
     ? progress.activePractice
     : null;
@@ -576,6 +803,38 @@ export default function DailyPracticeApp() {
     .sort((a, b) => a.days - b.days || a.eventDate.localeCompare(b.eventDate));
   const nextCalendarEvent = upcomingCalendarEvents[0] ?? null;
   const dueReminder = upcomingCalendarEvents.find((event) => event.reminderEnabled && event.days <= event.reminderDays) ?? null;
+  const savedPositions = relevantPositions.filter((position) => progress.savedPositionIds.includes(position.id));
+  const matchedPositions = relevantPositions
+    .map((position) => ({ position, match: matchPosition(position, progress.candidateProfile), saved: progress.savedPositionIds.includes(position.id) }))
+    .sort((a, b) => b.match.score - a.match.score || Number(b.saved) - Number(a.saved) || b.position.recruitCount - a.position.recruitCount);
+  const candidateProfileMissing = !progress.candidateProfile.education || !progress.candidateProfile.major || !progress.candidateProfile.freshStatus;
+  const radarTodoItems = [
+    ...(candidateProfileMissing ? [{ id: "profile:complete", kind: "profile" as const, title: "完善我的报考条件", detail: "至少补全学历、专业、应届/往届，职位筛选才会更准。", tone: "urgent" as const, actionLabel: "去完善" }] : []),
+    ...upcomingCalendarEvents.slice(0, 4).map((event) => ({
+      id: `event:${event.id}`,
+      kind: "event" as const,
+      title: `${event.targetLabel} · ${event.title}`,
+      detail: event.days === 0 ? "今天处理，优先级最高。" : `${shortDate(event.eventDate)} · 还有${event.days}天 · 提前${event.reminderDays}天提醒`,
+      tone: event.days <= event.reminderDays ? "urgent" as const : "normal" as const,
+      actionLabel: event.id.startsWith("exam-") ? "修改日期" : event.sourceUrl ? "看来源" : "查看",
+    })),
+    ...relevantNotices.slice(0, 2).map((notice) => ({
+      id: `notice:${notice.id}`,
+      kind: "notice" as const,
+      title: `${notice.targetLabel} · ${notice.noticeType}`,
+      detail: notice.title,
+      tone: "normal" as const,
+      actionLabel: "看公告",
+    })),
+    ...savedPositions.slice(0, 3).map((position) => ({
+      id: `position:${position.id}`,
+      kind: "position" as const,
+      title: `核对备选岗位 · ${position.title}`,
+      detail: `${position.targetLabel} · ${position.department}${position.region ? ` · ${position.region}` : ""}`,
+      tone: "normal" as const,
+      actionLabel: "去核对",
+    })),
+  ].slice(0, 8);
   const streak = checkinStreak(progress.checkins, dayKey);
   const recentCheckinKeys = Array.from({ length: 7 }, (_, index) => shiftDateKey(dayKey, index - 6));
   const nextStreakMilestone = [7, 14, 30, 60, 100, 180, 365].find((value) => value > streak) ?? Math.ceil((streak + 1) / 100) * 100;
@@ -734,8 +993,8 @@ export default function DailyPracticeApp() {
     finally { setBusy(false); }
   };
 
-  const openEventForm = (targetCode = primaryTarget?.code ?? profile.targets[0]?.code ?? "") => {
-    setEventDraft({ targetCode, eventType: "报名截止", title: "报名截止", eventDate: "", reminderDays: 3, sourceUrl: "" });
+  const openEventForm = (targetCode = primaryTarget?.code ?? profile.targets[0]?.code ?? "", eventType = "报名截止", title = eventType) => {
+    setEventDraft({ targetCode, eventType, title, eventDate: "", reminderDays: 3, sourceUrl: "" });
     setEventFormOpen(true);
   };
 
@@ -769,6 +1028,44 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     await persist({ ...current, examEvents: current.examEvents.filter((event) => event.id !== eventId) });
     notify("节点已删除");
+  };
+
+  const updateCandidateProfile = (patch: Partial<CandidateProfile>) => {
+    setProgress((current) => {
+      const next = { ...current, candidateProfile: { ...current.candidateProfile, ...patch } };
+      progressRef.current = next;
+      return next;
+    });
+  };
+
+  const saveCandidateProfile = async () => {
+    const current = progressRef.current;
+    const next = { ...current, candidateProfile: safeCandidateProfile(current.candidateProfile) };
+    await persist(next);
+    trackEvent("candidate_profile_save", {
+      education: next.candidateProfile.education,
+      freshStatus: next.candidateProfile.freshStatus,
+      hasMajor: Boolean(next.candidateProfile.major),
+    });
+    notify("报考条件档案已保存，职位匹配会按它重新判断");
+  };
+
+  const toggleSavedPosition = async (position: JobPosition) => {
+    const current = progressRef.current;
+    const exists = current.savedPositionIds.includes(position.id);
+    const savedPositionIds = exists
+      ? current.savedPositionIds.filter((id) => id !== position.id)
+      : [...current.savedPositionIds, position.id].slice(-120);
+    await persist({ ...current, savedPositionIds });
+    trackEvent("position_save", { positionId: position.id, targetCode: position.targetCode, saved: !exists });
+    notify(exists ? "已从备选岗位移除" : "已加入备选岗位，报名待办会提醒你核对");
+  };
+
+  const toggleRadarTodo = async (todoId: string) => {
+    const current = progressRef.current;
+    const nextDone = !current.radarTodoDone[todoId];
+    await persist({ ...current, radarTodoDone: { ...current.radarTodoDone, [todoId]: nextDone } });
+    trackEvent("radar_todo_toggle", { todoId, done: nextDone });
   };
 
   const enableBrowserReminders = async () => {
@@ -1300,15 +1597,86 @@ export default function DailyPracticeApp() {
           {tab === "calendar" && <div className="page-content subpage calendar-page">
             <div className="subpage-heading calendar-heading"><div><span>公考雷达 · 报考工作台</span><h1>公告、职位表和报名节点，一个都不漏</h1><p>围绕公告发布、职位表、岗位条件筛选和报名截止，帮多考试考生守住关键动作。</p></div><button className="primary-button" onClick={() => openEventForm()}>＋ 添加节点</button></div>
             <section className={`reminder-banner${dueReminder ? " urgent" : ""}`}><div><span>{dueReminder ? "有节点进入提醒期" : "报名提醒已工作"}</span><h3>{dueReminder ? `${dueReminder.targetLabel} · ${dueReminder.title}` : "每次打开自动检查全部考试节点"}</h3><p>{dueReminder ? dueReminder.days === 0 ? "今天就是截止或办理日期，请优先确认。" : `还有${dueReminder.days}天，请提前准备材料。` : "站内提醒默认开启；浏览器通知开启后，会在打开应用时同步弹出。"}</p></div><button onClick={() => void enableBrowserReminders()}>{progress.reminderMode === "browser" ? "✓ 系统通知已开" : "开启系统通知"}</button></section>
+            <div className="radar-mode-tabs" role="tablist" aria-label="公考雷达模块">
+              {[
+                ["notices", "公告雷达", `${relevantNotices.length}条`] as const,
+                ["positions", "职位筛选", `${matchedPositions.length}岗`] as const,
+                ["tasks", "报名待办", `${radarTodoItems.filter((item) => !progress.radarTodoDone[item.id]).length}项`] as const,
+              ].map(([mode, label, count]) => <button key={mode} className={radarMode === mode ? "active" : ""} onClick={() => setRadarMode(mode)}><span>{label}</span><b>{count}</b></button>)}
+            </div>
             <section className="radar-feature-grid" aria-label="公考雷达能力">
-              <article><span>公告</span><h3>公告发布提醒</h3><p>记录招录公告、补充公告和重要变更，避免只盯笔试日期。</p></article>
-              <article><span>职位表</span><h3>职位表节点</h3><p>职位表发布后及时进入筛选动作，适合多省考同时报名。</p></article>
-              <article><span>筛选</span><h3>报考条件确认</h3><p>专业、学历、基层经历、应届身份等条件，用节点提醒反复核对。</p></article>
+              <button className={radarMode === "notices" ? "active" : ""} onClick={() => setRadarMode("notices")}><span>公告</span><h3>公告雷达</h3><p>招录公告、补充公告、职位表发布和重要变更统一收口。</p></button>
+              <button className={radarMode === "positions" ? "active" : ""} onClick={() => setRadarMode("positions")}><span>职位</span><h3>职位筛选</h3><p>按学历、专业、应届身份、政治面貌等条件初步匹配岗位。</p></button>
+              <button className={radarMode === "tasks" ? "active" : ""} onClick={() => setRadarMode("tasks")}><span>待办</span><h3>报名动作</h3><p>把公告查看、职位收藏、资格核对、报名截止变成可勾选清单。</p></button>
             </section>
-            <div className="calendar-targets">{profile.targets.map((target, index) => <button key={target.code} onClick={() => openEventForm(target.code)}><span>{index === 0 ? "主攻" : "兼顾"}</span><b>{target.label}</b><small>{target.examDate ? `${shortDate(target.examDate)}笔试` : "补充考试节点"}</small></button>)}</div>
-            <section className="calendar-list"><div className="section-heading"><div><span>接下来</span><h2>按时间排好的公告、职位表与报名任务</h2></div><em>{upcomingCalendarEvents.length} 个节点</em></div>
-              {upcomingCalendarEvents.length ? upcomingCalendarEvents.map((event) => <article className={event.reminderEnabled && event.days <= event.reminderDays ? "calendar-event due" : "calendar-event"} key={event.id}><time><b>{new Date(`${event.eventDate}T12:00:00+08:00`).getMonth() + 1}</b><span>{new Date(`${event.eventDate}T12:00:00+08:00`).getDate()}日</span></time><div><span>{event.targetLabel} · {event.eventType}{event.id.startsWith("official-") ? " · 官方发布" : ""}</span><h3>{event.title}</h3><p>{event.days === 0 ? "今天处理" : `还有${event.days}天`} · 提前{event.reminderDays}天提醒{event.sourceUrl && <> · <a href={event.sourceUrl} target="_blank" rel="noreferrer">查看公告来源</a></>}</p></div><button aria-label={`${event.id.startsWith("event-") ? "删除" : "查看"}${event.title}`} onClick={() => { if (event.id.startsWith("exam-")) { setProfileDraft(profile); setOnboardingOpen(true); return; } void removeExamEvent(event.id); }}>{event.id.startsWith("exam-") ? "修改" : event.id.startsWith("official-") ? "官方" : "删除"}</button></article>) : <div className="empty-state compact calendar-empty"><span>历</span><h3>还没有公考雷达节点</h3><p>建议先添加“公告发布”“职位表发布”和“报名截止”，比只记笔试日期更有用。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
-            </section>
+
+            {radarMode === "notices" && <>
+              <section className="notice-summary-grid">
+                <article><span>已选考试</span><b>{profile.targets.length || 0}</b><small>{profile.targets.length ? profile.targets.map((target) => target.label).slice(0, 3).join(" / ") : "先设置国考或省考目标"}</small></article>
+                <article><span>公告/职位表</span><b>{relevantNotices.length}</b><small>后台发布后自动匹配到你的备考组合</small></article>
+                <article><span>日历节点</span><b>{upcomingCalendarEvents.length}</b><small>{nextCalendarEvent ? `最近：${shortDate(nextCalendarEvent.eventDate)}` : "可手动添加报名节点"}</small></article>
+              </section>
+              <section className="notice-list"><div className="section-heading"><div><span>公告雷达</span><h2>只看与你备考组合相关的公告</h2></div><button onClick={() => openEventForm(primaryTarget?.code ?? "", "公告发布", "公告发布")}>补充公告节点</button></div>
+                {relevantNotices.length ? relevantNotices.map((notice) => <article className="notice-card" key={notice.id}>
+                  <div><span>{notice.targetLabel} · {notice.noticeType}</span><h3>{notice.title}</h3><p>{notice.summary || "后台可配置公告摘要、报名要求和职位表说明。"}</p><small>{notice.publishDate ? `${shortDate(notice.publishDate)}发布` : "发布时间待补充"} · {notice.status || "已发布"}</small></div>
+                  {notice.sourceUrl ? <a href={notice.sourceUrl} target="_blank" rel="noreferrer" onClick={() => trackEvent("radar_notice_open", { noticeId: notice.id, targetCode: notice.targetCode })}>查看来源</a> : <button onClick={() => openEventForm(notice.targetCode, notice.noticeType, notice.title)}>加节点</button>}
+                </article>) : <div className="empty-state compact calendar-empty"><span>告</span><h3>后台还没有发布相关公告</h3><p>你可以先手动添加公告、职位表和报名截止节点；等后台导入公告后，这里会按国考/省份自动显示。</p><button className="primary-button" onClick={() => openEventForm()}>手动添加公告节点</button></div>}
+              </section>
+            </>}
+
+            {radarMode === "positions" && <>
+              <section className="candidate-panel"><div className="section-heading"><div><span>我的报考条件</span><h2>先录入一次，后面按岗位自动初筛</h2></div><button onClick={() => void saveCandidateProfile()}>保存条件档案</button></div>
+                <div className="candidate-grid">
+                  <label><span>学历</span><select value={progress.candidateProfile.education} onChange={(event) => updateCandidateProfile({ education: event.target.value })}>{candidateOptions.education.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>学位</span><select value={progress.candidateProfile.degree} onChange={(event) => updateCandidateProfile({ degree: event.target.value })}>{candidateOptions.degree.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>专业名称</span><input value={progress.candidateProfile.major} onChange={(event) => updateCandidateProfile({ major: event.target.value })} placeholder="如：汉语言文学" /></label>
+                  <label><span>专业大类</span><input value={progress.candidateProfile.majorCategory} onChange={(event) => updateCandidateProfile({ majorCategory: event.target.value })} placeholder="如：中国语言文学类" /></label>
+                  <label><span>应届/往届</span><select value={progress.candidateProfile.freshStatus} onChange={(event) => updateCandidateProfile({ freshStatus: event.target.value })}>{candidateOptions.freshStatus.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>政治面貌</span><select value={progress.candidateProfile.politicalStatus} onChange={(event) => updateCandidateProfile({ politicalStatus: event.target.value })}>{candidateOptions.politicalStatus.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>户籍/生源地</span><input value={progress.candidateProfile.household} onChange={(event) => updateCandidateProfile({ household: event.target.value })} placeholder="如：广东广州" /></label>
+                  <label><span>基层经历</span><select value={progress.candidateProfile.grassrootsYears} onChange={(event) => updateCandidateProfile({ grassrootsYears: event.target.value })}>{candidateOptions.grassrootsYears.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>基层项目</span><select value={progress.candidateProfile.grassrootsProject} onChange={(event) => updateCandidateProfile({ grassrootsProject: event.target.value })}>{candidateOptions.grassrootsProject.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label><span>性别</span><select value={progress.candidateProfile.gender} onChange={(event) => updateCandidateProfile({ gender: event.target.value })}>{candidateOptions.gender.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
+                  <label className="wide"><span>证书/资格</span><input value={progress.candidateProfile.certificates} onChange={(event) => updateCandidateProfile({ certificates: event.target.value })} placeholder="如：法律职业资格证、英语六级、计算机二级" /></label>
+                  <label><span>岗位偏好</span><select value={progress.candidateProfile.acceptRemote} onChange={(event) => updateCandidateProfile({ acceptRemote: event.target.value })}>{candidateOptions.acceptRemote.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+                </div>
+                <p className="candidate-note">这是“报名初筛”，不能替代官方资格审查；但能帮考生先排除明显不符、标出需要电话确认的岗位。</p>
+              </section>
+              <section className="position-list"><div className="section-heading"><div><span>职位筛选</span><h2>按你的备考组合和条件初步排序</h2></div><em>{savedPositions.length} 个备选</em></div>
+                {matchedPositions.length ? matchedPositions.map(({ position, match, saved }) => <article className={`position-card ${match.level}`} key={position.id}>
+                  <header><div><span>{position.targetLabel} · {position.examName || "职位表"}</span><h3>{position.title}</h3><p>{position.department}{position.unit ? ` · ${position.unit}` : ""}</p></div><strong>{position.recruitCount || 1}<small>人</small></strong></header>
+                  <div className="position-meta"><span>{position.region || "地区待补充"}</span><span>{position.education || "学历不限"}</span><span>{position.majors || "专业不限"}</span></div>
+                  <div className={`position-match ${match.level}`}><b>{match.label}</b><span>{match.reasons.join(" · ")}</span></div>
+                  {position.remarks && <p className="position-remark">{position.remarks}</p>}
+                  <footer><button className={saved ? "saved" : ""} onClick={() => void toggleSavedPosition(position)}>{saved ? "✓ 已加入备选" : "+ 加入备选"}</button>{position.sourceUrl && <a href={position.sourceUrl} target="_blank" rel="noreferrer">查看职位来源</a>}</footer>
+                </article>) : <div className="empty-state compact calendar-empty"><span>职</span><h3>后台还没有导入职位表</h3><p>导入职位表后，考生会看到“初步符合 / 条件存疑 / 明显不符”，并能把岗位加入备选清单。</p></div>}
+              </section>
+            </>}
+
+            {radarMode === "tasks" && <>
+              <section className="radar-todo-list"><div className="section-heading"><div><span>报名待办</span><h2>今天打开后，先知道该处理什么</h2></div><button onClick={() => openEventForm()}>添加自定义待办</button></div>
+                {radarTodoItems.length ? radarTodoItems.map((item) => {
+                  const done = Boolean(progress.radarTodoDone[item.id]);
+                  return <article className={`${item.tone}${done ? " done" : ""}`} key={item.id}>
+                    <button className="todo-check" aria-label={`${done ? "取消完成" : "标记完成"}${item.title}`} onClick={() => void toggleRadarTodo(item.id)}>{done ? "✓" : ""}</button>
+                    <div><h3>{item.title}</h3><p>{item.detail}</p></div>
+                    <button className="todo-action" onClick={() => {
+                      if (item.kind === "profile" || item.kind === "position") return setRadarMode("positions");
+                      if (item.kind === "notice") return setRadarMode("notices");
+                      const eventId = item.id.replace(/^event:/, "");
+                      const event = upcomingCalendarEvents.find((entry) => entry.id === eventId);
+                      if (event?.id.startsWith("exam-")) { setProfileDraft(profile); setOnboardingOpen(true); return; }
+                      if (event?.sourceUrl) { trackEvent("radar_notice_open", { eventId: event.id, targetCode: event.targetCode }); window.open(event.sourceUrl, "_blank", "noopener,noreferrer"); return; }
+                      setRadarMode("tasks");
+                    }}>{item.actionLabel}</button>
+                  </article>;
+                }) : <div className="empty-state compact calendar-empty"><span>✓</span><h3>当前没有待办</h3><p>添加报名截止、资格审查、准考证打印等节点后，这里会自动生成待办。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
+              </section>
+              <div className="calendar-targets">{profile.targets.map((target, index) => <button key={target.code} onClick={() => openEventForm(target.code)}><span>{index === 0 ? "主攻" : "兼顾"}</span><b>{target.label}</b><small>{target.examDate ? `${shortDate(target.examDate)}笔试` : "补充考试节点"}</small></button>)}</div>
+              <section className="calendar-list"><div className="section-heading"><div><span>时间轴</span><h2>按时间排好的公告、职位表与报名任务</h2></div><em>{upcomingCalendarEvents.length} 个节点</em></div>
+                {upcomingCalendarEvents.length ? upcomingCalendarEvents.map((event) => <article className={event.reminderEnabled && event.days <= event.reminderDays ? "calendar-event due" : "calendar-event"} key={event.id}><time><b>{new Date(`${event.eventDate}T12:00:00+08:00`).getMonth() + 1}</b><span>{new Date(`${event.eventDate}T12:00:00+08:00`).getDate()}日</span></time><div><span>{event.targetLabel} · {event.eventType}{event.id.startsWith("official-") ? " · 官方发布" : ""}</span><h3>{event.title}</h3><p>{event.days === 0 ? "今天处理" : `还有${event.days}天`} · 提前{event.reminderDays}天提醒{event.sourceUrl && <> · <a href={event.sourceUrl} target="_blank" rel="noreferrer">查看公告来源</a></>}</p></div><button aria-label={`${event.id.startsWith("event-") ? "删除" : "查看"}${event.title}`} onClick={() => { if (event.id.startsWith("exam-")) { setProfileDraft(profile); setOnboardingOpen(true); return; } void removeExamEvent(event.id); }}>{event.id.startsWith("exam-") ? "修改" : event.id.startsWith("official-") ? "官方" : "删除"}</button></article>) : <div className="empty-state compact calendar-empty"><span>历</span><h3>还没有公考雷达节点</h3><p>建议先添加“公告发布”“职位表发布”和“报名截止”，比只记笔试日期更有用。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
+              </section>
+            </>}
             <p className="calendar-disclaimer">日期由你保存或从报考目标带入。公告、职位表和报名资格请以招录机关官方发布为准；来源链接可随节点一并保存。</p>
           </div>}
 

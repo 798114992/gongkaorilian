@@ -158,6 +158,13 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
   assert.match(app, /报名提醒已工作/);
   assert.match(app, /公告发布/);
   assert.match(app, /准考证打印/);
+  assert.match(app, /candidateProfile/);
+  assert.match(app, /matchPosition/);
+  assert.match(app, /savedPositionIds/);
+  assert.match(app, /radarTodoDone/);
+  assert.match(route, /exam_notice/);
+  assert.match(route, /job_position/);
+  assert.match(route, /candidate_profile_save/);
   assert.match(app, /连续打卡/);
   assert.match(app, /checkinStreak/);
   assert.match(app, /资料分析速算/);
@@ -172,6 +179,9 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
   assert.match(route, /事业单位职测/);
   assert.match(css, /retention-strip/);
   assert.match(css, /radar-feature-grid/);
+  assert.match(css, /radar-mode-tabs/);
+  assert.match(css, /position-card/);
+  assert.match(css, /candidate-panel/);
   assert.match(css, /calendar-event/);
   assert.match(css, /micro-grid/);
 });

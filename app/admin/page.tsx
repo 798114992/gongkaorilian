@@ -19,7 +19,7 @@ type CodeItem = {
 type Redemption = { redeemed_at: string; user_id: string; code_preview: string; duration_days: number };
 type ContentItem = {
   id: number;
-  content_type: "practice_day" | "audio_track" | "exam_event";
+  content_type: "practice_day" | "audio_track" | "exam_event" | "exam_notice" | "job_position";
   content_key: string;
   title: string;
   status: "draft" | "published";
@@ -62,6 +62,55 @@ const contentExample = JSON.stringify([
       eventDate: "2026-12-31",
       reminderDays: 3,
       sourceUrl: "https://example.com/official-announcement",
+    },
+  },
+  {
+    contentType: "exam_notice",
+    contentKey: "gd-2027-notice",
+    title: "广东省考招录公告",
+    status: "draft",
+    publishAt: null,
+    payload: {
+      targetCode: "province:广东",
+      targetLabel: "广东省考",
+      noticeType: "招录公告",
+      title: "广东省考招录公告",
+      publishDate: "2026-12-01",
+      summary: "填写公告摘要：报名时间、职位表发布时间、资格条件变化和注意事项。",
+      sourceUrl: "https://example.com/official-announcement",
+      status: "待报名",
+    },
+  },
+  {
+    contentType: "job_position",
+    contentKey: "gd-2027-gz-001",
+    title: "广州市基层治理岗",
+    status: "draft",
+    publishAt: null,
+    payload: {
+      targetCode: "province:广东",
+      targetLabel: "广东省考",
+      examName: "2027广东省考",
+      department: "广州市某区人民政府",
+      unit: "基层治理办公室",
+      title: "基层治理岗",
+      code: "101001",
+      region: "广州",
+      recruitCount: 1,
+      education: "本科及以上",
+      degree: "学士及以上",
+      majors: "汉语言文学、法学、公共管理类",
+      majorCodes: "",
+      freshLimit: "不限",
+      politicalStatus: "不限",
+      household: "不限",
+      grassrootsYears: "不限",
+      gender: "不限",
+      certificates: "不限",
+      remote: "",
+      remarks: "示例岗位，请替换为官方职位表信息。",
+      phone: "020-00000000",
+      sourceUrl: "https://example.com/position-table",
     },
   },
 ], null, 2);
@@ -173,6 +222,13 @@ export default function AdminPage() {
   };
 
   const metric = (name: string) => Number(analytics.eventCounts.find((item) => item.event_name === name)?.count ?? 0);
+  const contentTypeLabel = (type: ContentItem["content_type"]) => ({
+    practice_day: "日练",
+    audio_track: "电台",
+    exam_event: "考试节点",
+    exam_notice: "公告",
+    job_position: "职位",
+  }[type] ?? type);
 
   return (
     <main className="admin-shell">
@@ -223,14 +279,14 @@ export default function AdminPage() {
       </div>
 
       <section className="admin-panel content-editor">
-        <div className="admin-panel-title"><div><span>内容发布</span><h2>批量导入日练、电台或考试节点</h2></div><small>先用 draft 预存，确认后改为 published</small></div>
+        <div className="admin-panel-title"><div><span>内容发布</span><h2>批量导入日练、电台、考试节点、公告和职位</h2></div><small>先用 draft 预存，确认后改为 published</small></div>
         <textarea value={contentJson} onChange={(event) => setContentJson(event.target.value)} spellCheck={false} />
-        <div className="content-editor-actions"><p>支持 <code>practice_day</code>、<code>audio_track</code> 和 <code>exam_event</code>；同一 contentKey 再次导入会更新原内容。</p><button className="admin-primary" onClick={importContent}>校验并导入</button></div>
+        <div className="content-editor-actions"><p>支持 <code>practice_day</code>、<code>audio_track</code>、<code>exam_event</code>、<code>exam_notice</code> 和 <code>job_position</code>；同一 contentKey 再次导入会更新原内容。</p><button className="admin-primary" onClick={importContent}>校验并导入</button></div>
       </section>
 
       <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>内容库</span><h2>已导入内容</h2></div><button onClick={load}>刷新</button></div>
-        <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{content.length ? content.map((item) => <tr key={item.id}><td>{item.content_type === "audio_track" ? "电台" : item.content_type === "exam_event" ? "考试节点" : "日练"}</td><td>{item.content_key}</td><td>{item.title}</td><td><span className={`status ${item.status}`}>{item.status === "published" ? "已发布" : "草稿"}</span></td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td>{item.status === "published" && <button onClick={() => disableContent(item.id)}>转为草稿</button>}</td></tr>) : <tr><td colSpan={6}>暂无自定义内容，系统默认内容仍正常展示。</td></tr>}</tbody></table></div>
+        <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>标识</th><th>标题</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{content.length ? content.map((item) => <tr key={item.id}><td>{contentTypeLabel(item.content_type)}</td><td>{item.content_key}</td><td>{item.title}</td><td><span className={`status ${item.status}`}>{item.status === "published" ? "已发布" : "草稿"}</span></td><td>{new Date(item.updated_at).toLocaleString("zh-CN")}</td><td>{item.status === "published" && <button onClick={() => disableContent(item.id)}>转为草稿</button>}</td></tr>) : <tr><td colSpan={6}>暂无自定义内容，系统默认内容仍正常展示。</td></tr>}</tbody></table></div>
       </section>
 
       <section className="admin-panel table-panel">

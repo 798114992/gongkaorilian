@@ -28,6 +28,10 @@ const EVENT_NAMES = new Set([
   "calendar_event_save",
   "reminder_enable",
   "micro_drill_open",
+  "radar_notice_open",
+  "position_save",
+  "candidate_profile_save",
+  "radar_todo_toggle",
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
@@ -127,6 +131,45 @@ type PublishedExamEvent = {
   title: string;
   eventDate: string;
   reminderDays: number;
+  sourceUrl: string;
+};
+
+type PublishedExamNotice = {
+  id: string;
+  targetCode: string;
+  targetLabel: string;
+  noticeType: string;
+  title: string;
+  publishDate: string;
+  summary: string;
+  sourceUrl: string;
+  status: string;
+};
+
+type PublishedJobPosition = {
+  id: string;
+  targetCode: string;
+  targetLabel: string;
+  examName: string;
+  department: string;
+  unit: string;
+  title: string;
+  code: string;
+  region: string;
+  recruitCount: number;
+  education: string;
+  degree: string;
+  majors: string;
+  majorCodes: string;
+  freshLimit: string;
+  politicalStatus: string;
+  household: string;
+  grassrootsYears: string;
+  gender: string;
+  certificates: string;
+  remote: string;
+  remarks: string;
+  phone: string;
   sourceUrl: string;
 };
 
@@ -782,6 +825,8 @@ async function loadContent(membershipActive: boolean) {
   const dayMap = new Map(defaultPracticeDays.map((day) => [`day-${day.day}`, clone(day)]));
   const audioMap = new Map(defaultAudioTracks.map((track) => [track.id, clone(track)]));
   const examEventMap = new Map<string, PublishedExamEvent>();
+  const examNoticeMap = new Map<string, PublishedExamNotice>();
+  const jobPositionMap = new Map<string, PublishedJobPosition>();
   for (const row of rows.results) {
     try {
       const parsed = JSON.parse(row.payload_json) as PracticeDay | AudioTrack | Record<string, unknown>;
@@ -805,6 +850,58 @@ async function loadContent(membershipActive: boolean) {
           });
         }
       }
+      if (row.content_type === "exam_notice") {
+        const item = parsed as Record<string, unknown>;
+        const targetCode = trimmed(item.targetCode, 60);
+        const title = trimmed(item.title, 80);
+        if (targetCode && title) {
+          examNoticeMap.set(row.content_key, {
+            id: `notice-${row.content_key}`,
+            targetCode,
+            targetLabel: trimmed(item.targetLabel, 24) || (targetCode === "national" ? "国考" : targetCode.replace(/^province:/, "") + "省考"),
+            noticeType: trimmed(item.noticeType, 24) || "公告发布",
+            title,
+            publishDate: /^\d{4}-\d{2}-\d{2}$/.test(trimmed(item.publishDate, 10)) ? trimmed(item.publishDate, 10) : chinaDateKey(),
+            summary: trimmed(item.summary, 220),
+            sourceUrl: /^https?:\/\//i.test(trimmed(item.sourceUrl, 400)) ? trimmed(item.sourceUrl, 400) : "",
+            status: trimmed(item.status, 24) || "已发布",
+          });
+        }
+      }
+      if (row.content_type === "job_position") {
+        const item = parsed as Record<string, unknown>;
+        const targetCode = trimmed(item.targetCode, 60);
+        const title = trimmed(item.title, 80);
+        const code = trimmed(item.code, 40) || row.content_key;
+        if (targetCode && title) {
+          jobPositionMap.set(row.content_key, {
+            id: `position-${row.content_key}`,
+            targetCode,
+            targetLabel: trimmed(item.targetLabel, 24) || (targetCode === "national" ? "国考" : targetCode.replace(/^province:/, "") + "省考"),
+            examName: trimmed(item.examName, 80),
+            department: trimmed(item.department, 80),
+            unit: trimmed(item.unit, 80),
+            title,
+            code,
+            region: trimmed(item.region, 60),
+            recruitCount: Math.max(0, Math.min(999, Math.round(Number(item.recruitCount ?? 0)))),
+            education: trimmed(item.education, 60) || "不限",
+            degree: trimmed(item.degree, 60) || "不限",
+            majors: trimmed(item.majors, 160) || "不限",
+            majorCodes: trimmed(item.majorCodes, 160),
+            freshLimit: trimmed(item.freshLimit, 80) || "不限",
+            politicalStatus: trimmed(item.politicalStatus, 60) || "不限",
+            household: trimmed(item.household, 80) || "不限",
+            grassrootsYears: trimmed(item.grassrootsYears, 60) || "不限",
+            gender: trimmed(item.gender, 20) || "不限",
+            certificates: trimmed(item.certificates, 120) || "不限",
+            remote: trimmed(item.remote, 100),
+            remarks: trimmed(item.remarks, 220),
+            phone: trimmed(item.phone, 80),
+            sourceUrl: /^https?:\/\//i.test(trimmed(item.sourceUrl, 400)) ? trimmed(item.sourceUrl, 400) : "",
+          });
+        }
+      }
     } catch {
       // Invalid draft data never blocks the learner experience.
     }
@@ -812,14 +909,16 @@ async function loadContent(membershipActive: boolean) {
   const practiceDays = Array.from(dayMap.values()).sort((a, b) => a.day - b.day);
   const audioTracks = Array.from(audioMap.values());
   const examEvents = Array.from(examEventMap.values()).sort((a, b) => a.eventDate.localeCompare(b.eventDate));
-  if (membershipActive) return { practiceDays, audioTracks, examEvents, access: "premium" as const };
+  const examNotices = Array.from(examNoticeMap.values()).sort((a, b) => b.publishDate.localeCompare(a.publishDate));
+  const jobPositions = Array.from(jobPositionMap.values()).sort((a, b) => a.targetLabel.localeCompare(b.targetLabel) || a.department.localeCompare(b.department));
+  if (membershipActive) return { practiceDays, audioTracks, examEvents, examNotices, jobPositions, access: "premium" as const };
 
   const previewDay = clone(practiceDays[0]);
   previewDay.questions = previewDay.questions.slice(0, 5).map((question) => ({ ...question, explanation: "会员可查看完整解析与解题技巧。" }));
   previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
   previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
   previewDay.essay.reference = "兑换会员码后查看参考答案。";
-  return { practiceDays: [previewDay], audioTracks: audioTracks.slice(0, 1), examEvents, access: "preview" as const };
+  return { practiceDays: [previewDay], audioTracks: audioTracks.slice(0, 1), examEvents, examNotices, jobPositions: jobPositions.slice(0, 12), access: "preview" as const };
 }
 
 async function bootstrap(request: Request) {
@@ -1533,7 +1632,7 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     const contentKey = String(item.contentKey ?? "").trim();
     const title = String(item.title ?? "").trim().slice(0, 120);
     const status = item.status === "published" ? "published" : "draft";
-    if (!new Set(["practice_day", "audio_track", "exam_event"]).has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
+    if (!new Set(["practice_day", "audio_track", "exam_event", "exam_notice", "job_position"]).has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
     if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(contentKey) || !title) return json({ error: "内容标识或标题无效" }, 400);
     const payloadJson = JSON.stringify(item.payload ?? {});
     if (payloadJson.length > 120_000) return json({ error: `${contentKey} 内容过大` }, 400);

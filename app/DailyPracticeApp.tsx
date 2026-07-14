@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { practiceDays, type Question } from "./data/content";
+import AudioHub from "./AudioHub";
 
-type Tab = "today" | "wrong" | "report" | "me";
+type Tab = "today" | "audio" | "wrong" | "report" | "me";
 type Module = "morning" | "quiz" | "affairs" | "essay" | null;
 
 type Progress = {
@@ -86,7 +87,6 @@ export default function DailyPracticeApp() {
     progress.submittedDays[dayKey],
     progress.completed[`${dayKey}-essay`],
   ].filter(Boolean).length;
-  const allQuestions = useMemo(() => practiceDays.flatMap((item) => item.questions), []);
   const wrongQuestions = progress.wrongIds.map(findQuestion).filter(Boolean) as Question[];
 
   const notify = useCallback((message: string) => {
@@ -117,7 +117,8 @@ export default function DailyPracticeApp() {
   }, [notify]);
 
   useEffect(() => {
-    void loadBootstrap();
+    const timer = window.setTimeout(() => void loadBootstrap(), 0);
+    return () => window.clearTimeout(timer);
   }, [loadBootstrap]);
 
   const persist = useCallback(async (next: Progress) => {
@@ -346,12 +347,15 @@ export default function DailyPracticeApp() {
                 <section className="tool-section">
                   <div className="section-heading"><div><span>随时巩固</span><h2>今日学习工具</h2></div></div>
                   <div className="tool-grid">
+                    <button className="audio-tool" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤也能练</small></button>
                     <button onClick={() => setActiveModule("affairs")}><span>政</span><b>时政常识</b><small>5张知识卡</small></button>
                     <button onClick={() => setTab("wrong")}><span>错</span><b>错题回炉</b><small>{wrongQuestions.length} 道待复习</small></button>
                   </div>
                 </section>
               </div>
             )}
+
+            {tab === "audio" && <AudioHub wrongQuestions={wrongQuestions} notify={notify} />}
 
             {tab === "wrong" && (
               <div className="page-content subpage">
@@ -381,7 +385,7 @@ export default function DailyPracticeApp() {
           </>
         )}
 
-        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "wrong" ? "active" : ""} onClick={() => setTab("wrong")}><span>错</span>错题</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}><span>报</span>报告</button><button className={tab === "me" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
+        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>听</span>听练</button><button className={tab === "wrong" ? "active" : ""} onClick={() => setTab("wrong")}><span>错</span>错题</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}><span>报</span>报告</button><button className={tab === "me" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
         {toast && <div className="toast" role="status">{toast}</div>}
       </div>
     </main>

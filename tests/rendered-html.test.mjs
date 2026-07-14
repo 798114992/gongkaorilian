@@ -37,3 +37,21 @@ test("database migrations include durable membership and redemption records", as
   assert.match(migration, /CREATE TABLE `invite_relations`/);
   assert.match(migration, /redemptions_code_user_uq/);
 });
+
+test("the 日练电台 supports the requested listening controls", async () => {
+  const [hub, audioData, serviceWorker] = await Promise.all([
+    readFile(new URL("../app/AudioHub.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/data/audio.ts", import.meta.url), "utf8"),
+    readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(hub, /时政电台/);
+  assert.match(hub, /申论晨读/);
+  assert.match(hub, /错题语音朗读/);
+  assert.match(hub, /0\.75/);
+  assert.match(hub, /1\.5/);
+  assert.match(hub, /循环中/);
+  assert.match(hub, /定时/);
+  assert.match(hub, /gongkao-audio-v1/);
+  assert.match(audioData, /新法解读/);
+  assert.match(serviceWorker, /caches\.open/);
+});

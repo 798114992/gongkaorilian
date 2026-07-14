@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import QuestionBankManager, { type QuestionBankItem, type QuestionImportItem } from "./QuestionBankManager";
 
 type CodeItem = {
   id: number;
@@ -55,6 +56,8 @@ export default function AdminPage() {
   const [redemptions, setRedemptions] = useState<Redemption[]>([]);
   const [content, setContent] = useState<ContentItem[]>([]);
   const [analytics, setAnalytics] = useState<Analytics>({ activeUsers: 0, eventCounts: [] });
+  const [questionBanks, setQuestionBanks] = useState<QuestionBankItem[]>([]);
+  const [questionImports, setQuestionImports] = useState<QuestionImportItem[]>([]);
   const [generated, setGenerated] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [batchName, setBatchName] = useState("渠道体验码");
@@ -85,6 +88,8 @@ export default function AdminPage() {
       setRedemptions((data.redemptions ?? []) as Redemption[]);
       setContent((data.content ?? []) as ContentItem[]);
       setAnalytics((data.analytics ?? { activeUsers: 0, eventCounts: [] }) as Analytics);
+      setQuestionBanks((data.questionBanks ?? []) as QuestionBankItem[]);
+      setQuestionImports((data.questionImports ?? []) as QuestionImportItem[]);
       const config = data.config as { rewardDays?: number; monthlyCap?: number } | undefined;
       setRewardDays(config?.rewardDays ?? 3);
       setMonthlyCap(config?.monthlyCap ?? 30);
@@ -167,6 +172,14 @@ export default function AdminPage() {
         <article><span>音频播放</span><strong>{metric("audio_play")}</strong></article>
         <article><span>兑换成功</span><strong>{metric("redeem_success")}</strong></article>
       </section>
+
+      <QuestionBankManager
+        adminToken={token}
+        banks={questionBanks}
+        imports={questionImports}
+        onReload={load}
+        onMessage={setMessage}
+      />
 
       <div className="admin-grid">
         <section className="admin-panel">

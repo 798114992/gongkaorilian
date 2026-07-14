@@ -33,8 +33,9 @@ test("account sync and redemption protections are server side", async () => {
 });
 
 test("the admin surface includes codes, content publishing and analytics", async () => {
-  const [admin, envExample] = await Promise.all([
+  const [admin, bankManager, envExample] = await Promise.all([
     readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/QuestionBankManager.tsx", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
   ]);
   assert.match(admin, /运营管理后台/);
@@ -43,14 +44,21 @@ test("the admin surface includes codes, content publishing and analytics", async
   assert.match(admin, /adminUpsertContentBatch/);
   assert.match(admin, /adminDisableContent/);
   assert.match(admin, /7日活跃用户/);
+  assert.match(bankManager, /下载Excel模板/);
+  assert.match(bankManager, /\.xlsx,\.xls,\.csv/);
+  assert.match(bankManager, /adminUpsertQuestionBank/);
+  assert.match(bankManager, /adminStartQuestionImport/);
+  assert.match(bankManager, /adminImportQuestionBatch/);
+  assert.match(bankManager, /offset \+= 40/);
   assert.match(envExample, /replace-with-a-long-random-admin-secret/);
   assert.doesNotMatch(admin, /gkrl-admin-7pX2mQ9vL4sN8cK6/);
 });
 
-test("database migrations include durable product, content and analytics records", async () => {
-  const [baseMigration, contentMigration] = await Promise.all([
+test("database migrations include durable product, content, analytics and question bank records", async () => {
+  const [baseMigration, contentMigration, questionMigration] = await Promise.all([
     readFile(new URL("../drizzle/0000_sweet_may_parker.sql", import.meta.url), "utf8"),
     readFile(new URL("../drizzle/0001_even_azazel.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0002_lyrical_goblin_queen.sql", import.meta.url), "utf8"),
   ]);
   assert.match(baseMigration, /CREATE TABLE `redemption_codes`/);
   assert.match(baseMigration, /CREATE TABLE `membership_ledger`/);
@@ -59,6 +67,11 @@ test("database migrations include durable product, content and analytics records
   assert.match(contentMigration, /CREATE TABLE `content_items`/);
   assert.match(contentMigration, /CREATE TABLE `analytics_events`/);
   assert.match(contentMigration, /analytics_events_name_time_idx/);
+  assert.match(questionMigration, /CREATE TABLE `question_banks`/);
+  assert.match(questionMigration, /CREATE TABLE `questions`/);
+  assert.match(questionMigration, /CREATE TABLE `question_bank_items`/);
+  assert.match(questionMigration, /CREATE TABLE `question_imports`/);
+  assert.match(questionMigration, /question_bank_items_bank_question_uq/);
 });
 
 test("the 日练电台 uses fixed audio and supports the requested controls", async () => {

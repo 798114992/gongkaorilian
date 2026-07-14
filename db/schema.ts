@@ -98,3 +98,73 @@ export const analyticsEvents = sqliteTable(
     index("analytics_events_user_time_idx").on(table.userId, table.createdAt),
   ],
 );
+
+export const questionBanks = sqliteTable("question_banks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  bankCode: text("bank_code").notNull().unique(),
+  name: text("name").notNull(),
+  examType: text("exam_type").notNull(),
+  province: text("province"),
+  examYear: integer("exam_year"),
+  subject: text("subject").notNull(),
+  description: text("description").notNull().default(""),
+  coverColor: text("cover_color").notNull().default("blue"),
+  status: text("status").notNull().default("draft"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const questions = sqliteTable(
+  "questions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    questionCode: text("question_code").notNull().unique(),
+    subject: text("subject").notNull(),
+    module: text("module").notNull(),
+    subType: text("sub_type").notNull().default(""),
+    stem: text("stem").notNull(),
+    optionsJson: text("options_json").notNull().default("[]"),
+    answer: text("answer"),
+    explanation: text("explanation").notNull().default(""),
+    technique: text("technique").notNull().default(""),
+    material: text("material").notNull().default(""),
+    prompt: text("prompt").notNull().default(""),
+    wordLimit: integer("word_limit"),
+    scoringPointsJson: text("scoring_points_json").notNull().default("[]"),
+    difficulty: text("difficulty").notNull().default("中等"),
+    source: text("source").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("questions_subject_module_idx").on(table.subject, table.module)],
+);
+
+export const questionBankItems = sqliteTable(
+  "question_bank_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    bankId: integer("bank_id").notNull(),
+    questionId: integer("question_id").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("question_bank_items_bank_question_uq").on(table.bankId, table.questionId),
+    index("question_bank_items_bank_idx").on(table.bankId, table.sortOrder),
+  ],
+);
+
+export const questionImports = sqliteTable("question_imports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  bankId: integer("bank_id").notNull(),
+  fileName: text("file_name").notNull(),
+  fileSize: integer("file_size").notNull().default(0),
+  totalRows: integer("total_rows").notNull().default(0),
+  importedRows: integer("imported_rows").notNull().default(0),
+  failedRows: integer("failed_rows").notNull().default(0),
+  status: text("status").notNull().default("processing"),
+  errorSummary: text("error_summary").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  completedAt: text("completed_at"),
+});

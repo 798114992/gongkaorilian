@@ -46,6 +46,24 @@ type Identity = {
   displayName: string;
 };
 
+type ImportedQuestion = {
+  questionCode: string;
+  subject: string;
+  module: string;
+  subType?: string;
+  stem: string;
+  options?: string[];
+  answer?: string | null;
+  explanation?: string;
+  technique?: string;
+  material?: string;
+  prompt?: string;
+  wordLimit?: number | null;
+  scoringPoints?: string[];
+  difficulty?: string;
+  source?: string;
+};
+
 function json(data: unknown, status = 200, cookie?: string) {
   const headers = new Headers({
     "content-type": "application/json; charset=utf-8",
@@ -402,13 +420,21 @@ function isAdmin(payload: Record<string, unknown>) {
 async function adminList(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const db = getD1();
-  const [codes, redemptions, content, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
+  const [codes, redemptions, content, questionBanks, questionImports, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
     db.prepare(`SELECT id, code_preview, batch_name, duration_days, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 100`).all(),
     db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 100`).all(),
     db.prepare(`SELECT id, content_type, content_key, title, status, publish_at, updated_at
       FROM content_items ORDER BY id DESC LIMIT 100`).all(),
+    db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
+      b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
+      FROM question_banks b LEFT JOIN question_bank_items i ON i.bank_id = b.id
+      GROUP BY b.id ORDER BY b.id DESC LIMIT 200`).all(),
+    db.prepare(`SELECT qi.id, qi.bank_id, qb.name AS bank_name, qi.file_name, qi.total_rows,
+      qi.imported_rows, qi.failed_rows, qi.status, qi.error_summary, qi.created_at, qi.completed_at
+      FROM question_imports qi JOIN question_banks qb ON qb.id = qi.bank_id
+      ORDER BY qi.id DESC LIMIT 50`).all(),
     db.prepare(`SELECT event_name, COUNT(*) AS count FROM analytics_events
       WHERE created_at >= datetime('now', '-7 days') GROUP BY event_name ORDER BY count DESC`).all(),
     db.prepare(`SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events
@@ -420,6 +446,8 @@ async function adminList(payload: Record<string, unknown>) {
     codes: codes.results,
     redemptions: redemptions.results,
     content: content.results,
+    questionBanks: questionBanks.results,
+    questionImports: questionImports.results,
     analytics: { activeUsers: Number(activeUsers?.count ?? 0), eventCounts: eventCounts.results },
     config: { rewardDays, monthlyCap },
   });
@@ -509,6 +537,172 @@ async function adminDisableContent(payload: Record<string, unknown>) {
   return json({ ok: true });
 }
 
+function trimmed(value: unknown, maxLength: number) {
+  return String(value ?? "").trim().slice(0, maxLength);
+}
+
+async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const bankCode = trimmed(payload.bankCode, 60).toUpperCase();
+  const name = trimmed(payload.name, 80);
+  const examType = trimmed(payload.examType, 20);
+  const province = trimmed(payload.province, 20) || null;
+  const subject = trimmed(payload.subject, 10);
+  const description = trimmed(payload.description, 500);
+  const coverColor = new Set(["blue", "orange", "green", "purple"]).has(String(payload.coverColor)) ? String(payload.coverColor) : "blue";
+  const status = payload.status === "published" ? "published" : "draft";
+  const bankIdValue = Math.floor(Number(payload.bankId));
+  const bankId = Number.isFinite(bankIdValue) && bankIdValue > 0 ? bankIdValue : null;
+  const yearValue = Number(payload.examYear);
+  const examYear = Number.isInteger(yearValue) && yearValue >= 2020 && yearValue <= 2100 ? yearValue : null;
+  if (!/^[A-Z0-9][A-Z0-9_-]{2,59}$/.test(bankCode)) return json({ error: "题库编码需使用3—60位大写字母、数字、横线或下划线" }, 400);
+  if (!name) return json({ error: "请输入题库名称" }, 400);
+  if (!new Set(["national", "provincial", "special"]).has(examType)) return json({ error: "考试类型无效" }, 400);
+  if (examType === "provincial" && !province) return json({ error: "省考题库必须填写省份" }, 400);
+  if (!new Set(["行测", "申论", "综合"]).has(subject)) return json({ error: "题库科目无效" }, 400);
+  const db = getD1();
+  const duplicate = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?").bind(bankCode).first<{ id: number }>();
+  if (duplicate && duplicate.id !== bankId) return json({ error: "题库编码已被其他题库使用" }, 409);
+  if (bankId) {
+    const updated = await db.prepare(`UPDATE question_banks SET bank_code = ?, name = ?, exam_type = ?, province = ?,
+      exam_year = ?, subject = ?, description = ?, cover_color = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`).bind(bankCode, name, examType, province, examYear, subject, description, coverColor, status, bankId).run();
+    if (!updated.meta.changes) return json({ error: "要编辑的题库不存在" }, 404);
+  } else {
+    await db.prepare(`INSERT INTO question_banks
+      (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`)
+      .bind(bankCode, name, examType, province, examYear, subject, description, coverColor, status).run();
+  }
+  const bank = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?").bind(bankCode).first<{ id: number }>();
+  return json({ ok: true, id: bank?.id, bankCode });
+}
+
+async function adminSetQuestionBankStatus(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const id = Math.floor(Number(payload.id));
+  const status = payload.status === "published" ? "published" : "draft";
+  if (!Number.isFinite(id) || id < 1) return json({ error: "题库不存在" }, 400);
+  await getD1().prepare("UPDATE question_banks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id).run();
+  return json({ ok: true });
+}
+
+async function adminStartQuestionImport(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const bankId = Math.floor(Number(payload.bankId));
+  const fileName = trimmed(payload.fileName, 160);
+  const fileSize = Math.max(0, Math.floor(Number(payload.fileSize ?? 0)));
+  const totalRows = Math.max(0, Math.floor(Number(payload.totalRows ?? 0)));
+  if (!Number.isFinite(bankId) || bankId < 1) return json({ error: "请先选择目标题库" }, 400);
+  if (!/\.(xlsx|xls|csv)$/i.test(fileName)) return json({ error: "仅支持 XLSX、XLS 或 CSV 文件" }, 400);
+  if (fileSize > 20 * 1024 * 1024) return json({ error: "单个文件不能超过20MB" }, 400);
+  if (totalRows < 1 || totalRows > 50_000) return json({ error: "每个文件需包含1—50000道题" }, 400);
+  const db = getD1();
+  const bank = await db.prepare("SELECT id FROM question_banks WHERE id = ?").bind(bankId).first();
+  if (!bank) return json({ error: "目标题库不存在" }, 404);
+  const result = await db.prepare(`INSERT INTO question_imports
+    (bank_id, file_name, file_size, total_rows, status) VALUES (?, ?, ?, ?, 'processing')`)
+    .bind(bankId, fileName, fileSize, totalRows).run();
+  return json({ ok: true, importId: Number(result.meta.last_row_id) });
+}
+
+function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; error?: string } {
+  const item = raw as Record<string, unknown>;
+  const questionCode = trimmed(item.questionCode, 80).toUpperCase();
+  const subject = trimmed(item.subject, 10);
+  const questionModule = trimmed(item.module, 40);
+  const stem = trimmed(item.stem, 12_000);
+  const prompt = trimmed(item.prompt, 2_000);
+  const options = Array.isArray(item.options) ? item.options.map((value) => trimmed(value, 2_000)).filter(Boolean).slice(0, 8) : [];
+  const scoringPoints = Array.isArray(item.scoringPoints) ? item.scoringPoints.map((value) => trimmed(value, 500)).filter(Boolean).slice(0, 30) : [];
+  const answer = trimmed(item.answer, 8).toUpperCase() || null;
+  if (!/^[A-Z0-9][A-Z0-9_-]{2,79}$/.test(questionCode)) return { error: "题目编号格式错误" };
+  if (!new Set(["行测", "申论"]).has(subject)) return { error: "科目只能是行测或申论" };
+  if (!questionModule) return { error: "模块不能为空" };
+  if (!stem) return { error: "题干/材料不能为空" };
+  if (subject === "行测" && (options.length < 2 || !answer || !/^[A-H]$/.test(answer))) return { error: "行测题必须填写至少2个选项及A—H正确答案" };
+  if (subject === "申论" && !prompt) return { error: "申论题必须填写申论任务" };
+  const wordValue = Number(item.wordLimit);
+  const wordLimit = Number.isInteger(wordValue) && wordValue > 0 && wordValue <= 5000 ? wordValue : null;
+  return { question: {
+    questionCode,
+    subject,
+    module: questionModule,
+    subType: trimmed(item.subType, 40),
+    stem,
+    options,
+    answer,
+    explanation: trimmed(item.explanation, 8_000),
+    technique: trimmed(item.technique, 4_000),
+    material: trimmed(item.material, 12_000),
+    prompt,
+    wordLimit,
+    scoringPoints,
+    difficulty: new Set(["简单", "中等", "较难"]).has(String(item.difficulty)) ? String(item.difficulty) : "中等",
+    source: trimmed(item.source, 120),
+  } };
+}
+
+async function adminImportQuestionBatch(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const bankId = Math.floor(Number(payload.bankId));
+  const importId = Math.floor(Number(payload.importId));
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)));
+  if (!Array.isArray(payload.rows) || payload.rows.length < 1 || payload.rows.length > 40) return json({ error: "每批需包含1—40道题" }, 400);
+  const db = getD1();
+  const job = await db.prepare("SELECT id FROM question_imports WHERE id = ? AND bank_id = ? AND status = 'processing'").bind(importId, bankId).first();
+  if (!job) return json({ error: "导入任务不存在或已经结束" }, 409);
+  const valid: ImportedQuestion[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+  payload.rows.forEach((raw, index) => {
+    const result = validateImportedQuestion(raw);
+    if (result.question) valid.push(result.question);
+    else errors.push({ row: offset + index + 2, message: result.error ?? "未知错误" });
+  });
+  if (valid.length) {
+    const statements: D1PreparedStatement[] = [];
+    valid.forEach((item, index) => {
+      statements.push(
+        db.prepare(`INSERT INTO questions
+          (question_code, subject, module, sub_type, stem, options_json, answer, explanation, technique,
+           material, prompt, word_limit, scoring_points_json, difficulty, source, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+          ON CONFLICT(question_code) DO UPDATE SET subject = excluded.subject, module = excluded.module,
+            sub_type = excluded.sub_type, stem = excluded.stem, options_json = excluded.options_json,
+            answer = excluded.answer, explanation = excluded.explanation, technique = excluded.technique,
+            material = excluded.material, prompt = excluded.prompt, word_limit = excluded.word_limit,
+            scoring_points_json = excluded.scoring_points_json, difficulty = excluded.difficulty,
+            source = excluded.source, status = 'active', updated_at = CURRENT_TIMESTAMP`)
+          .bind(item.questionCode, item.subject, item.module, item.subType ?? "", item.stem,
+            JSON.stringify(item.options ?? []), item.answer ?? null, item.explanation ?? "", item.technique ?? "",
+            item.material ?? "", item.prompt ?? "", item.wordLimit ?? null, JSON.stringify(item.scoringPoints ?? []),
+            item.difficulty ?? "中等", item.source ?? ""),
+        db.prepare(`INSERT OR IGNORE INTO question_bank_items (bank_id, question_id, sort_order)
+          SELECT ?, id, ? FROM questions WHERE question_code = ?`).bind(bankId, offset + index, item.questionCode),
+      );
+    });
+    await db.batch(statements);
+  }
+  await db.prepare(`UPDATE question_imports SET imported_rows = imported_rows + ?, failed_rows = failed_rows + ?
+    WHERE id = ?`).bind(valid.length, errors.length, importId).run();
+  return json({ ok: true, imported: valid.length, failed: errors.length, errors });
+}
+
+async function adminFinishQuestionImport(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const importId = Math.floor(Number(payload.importId));
+  const errorSummary = trimmed(payload.errorSummary, 8_000);
+  if (payload.aborted === true) {
+    await getD1().prepare(`UPDATE question_imports SET status = 'failed', error_summary = ?, completed_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'processing'`).bind(errorSummary || "导入中断", importId).run();
+    return json({ ok: true });
+  }
+  await getD1().prepare(`UPDATE question_imports SET status = CASE WHEN failed_rows > 0 THEN 'completed_with_errors' ELSE 'completed' END,
+    error_summary = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'`)
+    .bind(errorSummary, importId).run();
+  return json({ ok: true });
+}
+
 export async function GET(request: Request) {
   try { return await bootstrap(request); } catch (error) { return json({ error: error instanceof Error ? error.message : "初始化失败" }, 500); }
 }
@@ -526,6 +720,11 @@ export async function POST(request: Request) {
       if (action === "adminUpdateConfig") return adminUpdateConfig(payload);
       if (action === "adminUpsertContentBatch") return adminUpsertContentBatch(payload);
       if (action === "adminDisableContent") return adminDisableContent(payload);
+      if (action === "adminUpsertQuestionBank") return adminUpsertQuestionBank(payload);
+      if (action === "adminSetQuestionBankStatus") return adminSetQuestionBankStatus(payload);
+      if (action === "adminStartQuestionImport") return adminStartQuestionImport(payload);
+      if (action === "adminImportQuestionBatch") return adminImportQuestionBatch(payload);
+      if (action === "adminFinishQuestionImport") return adminFinishQuestionImport(payload);
       return json({ error: "未知管理操作" }, 400);
     }
     const identity = await ensureUser(request);

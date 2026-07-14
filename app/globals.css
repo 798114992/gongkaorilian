@@ -415,13 +415,39 @@ button { color: inherit; }
 .admin-header a { border: 1px solid #ccd7e1; border-radius: 12px; padding: 9px 13px; color: var(--blue); background: #fff; font-size: 12px; font-weight: 800; text-decoration: none; }
 .admin-auth { display: grid; grid-template-columns: 1fr auto; gap: 10px; max-width: 620px; border: 1px solid var(--line); border-radius: 18px; padding: 15px; background: #fff; }
 .admin-auth label, .form-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
-.admin-auth input, .form-grid input, .form-grid select { min-height: 42px; border: 1px solid #d9e1e8; border-radius: 10px; padding: 9px 11px; background: #fbfcfd; outline: none; }
+.admin-auth input, .form-grid input, .form-grid select, .form-grid textarea { min-height: 42px; border: 1px solid #d9e1e8; border-radius: 10px; padding: 9px 11px; background: #fbfcfd; outline: none; }
+.form-grid textarea { min-height: 86px; resize: vertical; font: inherit; }
 .admin-auth button, .admin-primary { border: 0; border-radius: 11px; padding: 0 18px; color: #fff; background: var(--blue); font-weight: 800; }
 .admin-message { margin-top: 11px; border-radius: 10px; padding: 10px 12px; color: #315b4d; background: #e8f4ef; font-size: 11px; }
 .analytics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 14px; }
 .analytics-grid article { border: 1px solid var(--line); border-radius: 16px; padding: 14px; background: #fff; box-shadow: 0 8px 22px rgba(25,49,74,0.04); }
 .analytics-grid span { display: block; color: var(--muted); font-size: 10px; }
 .analytics-grid strong { display: block; margin-top: 5px; color: var(--navy); font-size: 25px; }
+.bank-config-panel, .question-upload-panel { margin-top: 14px; }
+.bank-form-grid { grid-template-columns: repeat(4, 1fr); }
+.upload-toolbar { display: grid; grid-template-columns: minmax(220px, 0.65fr) minmax(320px, 1.35fr); gap: 12px; }
+.upload-toolbar > label:first-child { display: grid; align-content: start; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.upload-toolbar select { min-height: 48px; border: 1px solid #d9e1e8; border-radius: 12px; padding: 9px 11px; background: #fbfcfd; }
+.upload-dropzone { position: relative; display: grid; min-height: 92px; place-items: center; align-content: center; border: 1.5px dashed #a9bfd2; border-radius: 15px; padding: 14px; color: var(--blue); background: #f5f9fc; text-align: center; cursor: pointer; }
+.upload-dropzone:hover { border-color: var(--blue); background: #eef5fa; }
+.upload-dropzone input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.upload-dropzone span { max-width: 100%; overflow: hidden; font-size: 12px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
+.upload-dropzone small { margin-top: 5px; color: var(--muted); font-size: 9px; }
+.import-preview { margin-top: 15px; border-top: 1px solid var(--line); padding-top: 15px; }
+.import-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+.import-summary span { border-radius: 12px; padding: 10px; color: var(--muted); background: #f2f5f7; font-size: 9px; text-align: center; }
+.import-summary b { display: block; margin-bottom: 3px; color: var(--navy); font-size: 18px; }
+.import-summary .has-errors { color: #9d5b51; background: #fff1ef; }
+.import-summary .has-errors b { color: #bd594d; }
+.preview-text { overflow: hidden; max-width: 270px; text-overflow: ellipsis; }
+.issue-list { margin-top: 10px; border-radius: 11px; padding: 9px 11px; color: #9d5b51; background: #fff4f2; font-size: 10px; }
+.issue-list summary { font-weight: 900; cursor: pointer; }
+.issue-list p { margin: 7px 0 0; }
+.import-progress { display: grid; grid-template-columns: 1fr 40px; align-items: center; gap: 9px; margin-top: 13px; }
+.import-progress > div { overflow: hidden; height: 8px; border-radius: 999px; background: #e9edf1; }
+.import-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), #5f9bca); transition: width 0.2s ease; }
+.import-progress span { color: var(--muted); font-size: 10px; }
+.import-button:disabled { opacity: 0.55; cursor: not-allowed; }
 .admin-grid { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 14px; margin-top: 14px; }
 .admin-panel { border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fff; box-shadow: 0 10px 28px rgba(25, 49, 74, 0.05); }
 .admin-panel-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
@@ -449,10 +475,17 @@ button { color: inherit; }
 .admin-table-wrap th, .admin-table-wrap td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
 .admin-table-wrap th { color: var(--muted); font-size: 9px; letter-spacing: 0.08em; }
 .admin-table-wrap td button { border: 0; color: #bd594d; background: transparent; font-size: 10px; font-weight: 800; }
+.admin-table-wrap td button + button { margin-left: 8px; }
+.admin-table-wrap td > b { display: block; font-size: 11px; }
+.admin-table-wrap td > small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
 .status { border-radius: 999px; padding: 4px 8px; color: #2d6b57; background: #e4f3ed; font-size: 9px; }
 .status.disabled { color: #8b6b68; background: #f2e9e8; }
 .status.draft { color: #8b6b68; background: #f2e9e8; }
 .status.published { color: #2d6b57; background: #e4f3ed; }
+.status.processing { color: #715d2b; background: #f8f0d8; }
+.status.completed { color: #2d6b57; background: #e4f3ed; }
+.status.completed_with_errors { color: #9d5b51; background: #fff1ef; }
+.status.failed { color: #9d5b51; background: #fff1ef; }
 
 @media (max-width: 760px) {
   .admin-shell { padding: 20px 12px 50px; }
@@ -462,6 +495,7 @@ button { color: inherit; }
   .admin-header p { max-width: 220px; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid .wide { grid-column: auto; }
+  .bank-form-grid, .upload-toolbar { grid-template-columns: 1fr; }
   .content-editor-actions { align-items: stretch; flex-direction: column; }
   .content-editor-actions .admin-primary { min-height: 42px; }
 }

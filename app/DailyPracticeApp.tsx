@@ -1538,6 +1538,38 @@ export default function DailyPracticeApp() {
 
   const weakestModule = insights.modules.length ? [...insights.modules].sort((a, b) => a.accuracy - b.accuracy)[0] : null;
   const tomorrowPlan = insights.tomorrowPlan;
+  const nextStepText = nextDailyStep === "morning" ? "晨读 5分钟" : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? "申论微练 5分钟" : "今日已完成";
+  const primaryTaskTitle = allDailyDone
+    ? "今日已完成，可以安心收工"
+    : activeDailySession
+      ? `继续行测日练，还剩${dailyRemaining}题`
+      : nextDailyStep === "morning"
+        ? "先完成晨读，进入学习状态"
+        : nextDailyStep === "practice"
+          ? `智能刷题${dailyPlan.questionCount}道`
+          : nextDailyStep === "essay"
+            ? "申论表达微练"
+            : "今日已完成";
+  const primaryTaskDetail = allDailyDone
+    ? `已完成${doneCount}/${enabledDailySteps.length}个有效动作，明日建议：${tomorrowPlan.taskText}`
+    : nextDailyStep === "morning"
+      ? `读完《${day.morning.title}》，记住3个规范表达。`
+      : nextDailyStep === "practice"
+        ? `${primaryBank ? `主攻${primaryBank.name}` : "按已加入题库"} · 到期复习优先 · 主攻与兼顾均衡。`
+        : nextDailyStep === "essay"
+          ? "独立改写一句表达，再用四维标准自评。"
+          : "完成今天的训练闭环。";
+  const dailyStepItems = [
+    ...(dailyPlan.minutes !== 10 ? [{ key: "morning" as const, icon: "读", title: "晨读", minutes: dailyPlan.morningMinutes, detail: "记住3个规范表达", done: stepDone.morning, action: () => setActiveModule("morning") }] : []),
+    { key: "practice" as const, icon: "练", title: "行测日练", minutes: dailyPlan.practiceMinutes, detail: activeDailySession ? `断点已保存，还剩${dailyRemaining}题` : `${dailyPlan.questionCount}道 · 到期错题优先`, done: stepDone.practice, action: runDailyAction },
+    ...(dailyPlan.minutes !== 10 ? [{ key: "essay" as const, icon: "写", title: "申论微练", minutes: dailyPlan.essayMinutes, detail: "改写一句规范表达", done: stepDone.essay, action: () => setActiveModule("essay") }] : []),
+  ];
+  const todayAlertItems = [
+    nextCalendarEvent ? { id: "radar", label: dueReminder ? "报名提醒" : "公考雷达", title: `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}`, detail: nextCalendarEvent.days === 0 ? "今天处理" : `还有${nextCalendarEvent.days}天 · ${shortDate(nextCalendarEvent.eventDate)}`, action: () => setTab("calendar") } : { id: "radar", label: "公考雷达", title: "补全公告、职位表和报名节点", detail: "多考试报名别只记笔试日期", action: () => setTab("calendar") },
+    ...(profile.onboarded && missingTargets.length > 0 ? [{ id: "banks", label: "题库提醒", title: `${missingTargets[0].label}题库未加入`, detail: missingTargets.length > 1 ? `还有${missingTargets.length}个目标待补题库` : "加入后才会进入综合练习", action: () => setTab("banks") }] : []),
+    { id: "streak", label: "连续打卡", title: `${streak}天 · 完成今日任务自动打卡`, detail: allDailyDone ? "今日已打卡，明天继续" : `距${nextStreakMilestone}天还差${nextStreakMilestone - streak}天`, action: () => setTab("today") },
+  ].slice(0, 3);
+  const quickBank = activeLearningBanks.find((bank) => bank.questionCount > 0);
 
   return (
     <main className="app-shell">
@@ -1545,30 +1577,45 @@ export default function DailyPracticeApp() {
         <header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天30–60分钟，高效完成今日训练</span></div><button className="member-chip" onClick={() => setTab("me")}>{membershipText(bootstrap?.user, hasExtendedMembership)}</button></header>
 
         {activeModule ? renderModule() : <>
-          {tab === "today" && <div className="page-content">
-            <section className="goal-strip"><div className="target-summary"><span>我的备考组合 · 主攻优先</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}</b><p>{nextExam ? `最近考试：${nextExam.target.label}，还有 ${nextExam.days} 天` : `${profile.targets.length}个目标可同时备考，主攻目标优先推荐题库`}</p></div><div className="goal-actions"><button onClick={() => setTab("calendar")}>公考雷达</button><button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整目标</button></div></section>
-            <section className="hero-card learning-hero"><div className="hero-top"><span>今日日练</span><span>{new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "long", day: "numeric", weekday: "short" }).format(new Date())}</span></div><div className="hero-main"><div><p>{dailyPlan.minutes === 10 ? "忙碌保底" : "今日安排"}</p><h1>{dailyPlan.minutes}<small> 分钟</small></h1><span>{primaryBank ? `主攻 ${primaryBank.name}` : `${addedBanks.length} 本题库已加入`} · 到期 {insights.dueCount} 题</span></div><div className="progress-ring" style={{ "--progress": `${doneCount * (360 / enabledDailySteps.length)}deg` } as React.CSSProperties}><strong>{doneCount}/{enabledDailySteps.length}</strong><span>有效动作</span></div></div><button className="hero-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel} <span>{allDailyDone ? "明日安排已生成" : "到期优先 · 主攻与兼顾均衡"}</span></button><div className="hero-mode-row"><button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复默认${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？切换10分钟保底"}</button>{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}</div></section>
-
-            <section className="retention-strip">
-              <div className="streak-summary"><div><span>连续打卡</span><strong>{streak}<small> 天</small></strong><p>{allDailyDone ? "今日已打卡，明天继续" : `完成今日日练自动打卡 · 距${nextStreakMilestone}天还差${nextStreakMilestone - streak}天`}</p></div><div className="week-checkins">{recentCheckinKeys.map((key) => <span key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""}><i>{progress.checkins.includes(key) ? "✓" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", weekday: "narrow" }).format(new Date(`${key}T12:00:00+08:00`))}</i></span>)}</div></div>
-              <button className={`radar-summary${dueReminder ? " urgent" : ""}`} onClick={() => setTab("calendar")}><span>{dueReminder ? "报名提醒" : "公考雷达"}</span><b>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "补全公告、职位表和报名节点"}</b><small>{nextCalendarEvent ? nextCalendarEvent.days === 0 ? "今天处理" : `还有 ${nextCalendarEvent.days} 天 · ${shortDate(nextCalendarEvent.eventDate)}` : "公告、职位表、筛选、报名、笔试"}</small><i>›</i></button>
+          {tab === "today" && <div className="page-content today-redesign">
+            <section className="today-focus-strip">
+              <div><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
+              <button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
             </section>
 
-            {bootstrap?.content.access === "preview" && <section className="access-card"><div><span>当前为免费版</span><h3>每天可练5题，完整体验学习闭环</h3><p>激活后解锁完整题量、多考试题库和全部音频。</p></div><button onClick={() => setTab("me")}>去激活</button></section>}
-
-            {profile.onboarded && missingTargets.length > 0 && <section className="province-warning"><div><span>还有目标未加题库</span><h3>把需要备考的题库加入书架</h3><p>综合练习只使用你已添加的题库；未添加的省份不会进入练习队列。</p><ul className="target-missing-list">{missingTargets.map((target) => <li key={target.code}>{target.label}</li>)}</ul></div><button onClick={() => setTab("banks")}>去添加</button></section>}
-
-            <section className="today-plan"><div className="section-heading"><div><span>今日安排</span><h2>{dailyPlan.minutes === 10 ? "忙碌日只完成一个保底动作" : "按顺序完成三个有效动作"}</h2></div><em>{allDailyDone ? "今日已完成" : `还剩 ${enabledDailySteps.length - doneCount} 项`}</em></div>
-              {dailyPlan.minutes !== 10 && <button className="plan-item" onClick={() => setActiveModule("morning")}><span className="plan-icon blue">读</span><div><b>晨读：记住3个规范表达</b><p>{day.morning.title}</p></div><i>{progress.completed[`${dayKey}-morning`] ? "✓" : `${dailyPlan.morningMinutes}分钟`}</i></button>}
-              <button className="plan-item featured-plan" onClick={runDailyAction}><span className="plan-icon orange">练</span><div><b>智能刷题{dailyPlan.questionCount}道</b><p>{activeDailySession ? `已保存断点，还剩${dailyRemaining}题` : "到期复习优先，自动补充薄弱题和新题"}</p></div><i>{practiceDone ? "✓" : `${dailyPlan.practiceMinutes}分钟`}</i></button>
-              {dailyPlan.minutes !== 10 && <button className="plan-item" onClick={() => setActiveModule("essay")}><span className="plan-icon green">写</span><div><b>申论表达微练</b><p>独立改写＋参考对比＋四维自评</p></div><i>{progress.completed[`${dayKey}-essay`] ? "✓" : `${dailyPlan.essayMinutes}分钟`}</i></button>}
+            <section className={`today-command-card${allDailyDone ? " completed" : ""}`}>
+              <div className="today-command-top"><span>{dailyPlan.minutes === 10 ? "忙碌保底" : "今日最该做"}</span><em>{new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "long", day: "numeric", weekday: "short" }).format(new Date())}</em></div>
+              <div className="today-command-main">
+                <div><p>{nextStepText}</p><h1>{primaryTaskTitle}</h1><small>{primaryTaskDetail}</small></div>
+                <div className="today-progress-orb" style={{ "--progress": `${doneCount * (360 / enabledDailySteps.length)}deg` } as React.CSSProperties}><strong>{doneCount}/{enabledDailySteps.length}</strong><span>完成</span></div>
+              </div>
+              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
+              <div className="today-secondary-row"><button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}{quickBank && <button onClick={() => void startPractice("mixed", [quickBank.code], { kind: "bank" })}>单本加练</button>}</div>
             </section>
 
-            <section className="micro-section"><div className="section-heading"><div><span>专项微练</span><h2>卡在哪，就用5–10分钟专攻哪里</h2></div><em>不限次加练</em></div><div className="micro-grid">{microDrills.map((drill) => <button key={drill.id} onClick={() => startMicroDrill(drill)}><span>{drill.icon}</span><div><b>{drill.title}</b><small>{drill.detail}</small></div><i>约5题 · {drill.minutes}分钟</i></button>)}</div></section>
+            {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天可练5题，完整体验学习闭环</h3></div><button onClick={() => setTab("me")}>去激活</button></section>}
 
-            <section className="my-banks-preview"><div className="section-heading"><div><span>我的备考组合 · {addedBanks.length}本</span><h2>主攻优先混练，也可以单本加练</h2></div><button onClick={() => setTab("banks")}>管理书架</button></div><div className="mini-bank-row">{activeLearningBanks.filter((bank) => bank.questionCount > 0).slice(0, 3).map((bank) => <button key={bank.code} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}><span>{bank.subject}</span><div><b>{bank.name}{bank.code === primaryBank?.code ? " · 主攻" : ""}</b><small>{bank.scopeLabel} · 已练 {bank.studiedCount}/{bank.questionCount}</small></div><i>开始</i></button>)}</div></section>
+            <section className="daily-timeline-card"><div className="compact-section-heading"><div><span>今日三步</span><h2>{allDailyDone ? "已完成，明天继续" : "按顺序做，不用自己想"}</h2></div><em>{allDailyDone ? "收工" : `还剩${enabledDailySteps.length - doneCount}步`}</em></div>
+              <div className="daily-timeline">{dailyStepItems.map((item, index) => {
+                const active = !item.done && item.key === nextDailyStep;
+                return <button key={item.key} className={`${item.done ? "done" : active ? "active" : "pending"}`} onClick={item.action}>
+                  <span className="timeline-index">{item.done ? "✓" : index + 1}</span>
+                  <i>{item.icon}</i>
+                  <div><b>{item.title}</b><small>{item.detail}</small></div>
+                  <em>{item.done ? "已完成" : active ? "下一步" : `${item.minutes}分钟`}</em>
+                </button>;
+              })}</div>
+            </section>
 
-            <section className="tool-section"><div className="section-heading"><div><span>通勤与复盘</span><h2>把走路、坐车也变成有效学习</h2></div></div><div className="tool-grid refreshed-tools"><button className="audio-tool differentiated" onClick={() => setTab("audio")}><span>听</span><div><b>日练电台</b><small>时政电台 · 申论晨读 · 错题盲听</small></div><i>0.75–1.5倍速</i></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount} 道今天该复习</small></button><button onClick={() => setTab("report")}><span>报</span><b>提分诊断</b><small>{weakestModule ? `${weakestModule.module}需加强` : "完成练习后生成"}</small></button></div></section>
+            <section className="today-alert-card"><div className="compact-section-heading"><div><span>今日提醒</span><h2>只保留会影响今天决策的事</h2></div></div>
+              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
+              <div className="week-mini-row">{recentCheckinKeys.map((key) => <span key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""}>{progress.checkins.includes(key) ? "✓" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", weekday: "narrow" }).format(new Date(`${key}T12:00:00+08:00`))}</span>)}</div>
+            </section>
+
+            <section className="quick-practice-card"><div className="compact-section-heading"><div><span>加练一下</span><h2>有余力再点，不打断今日主线</h2></div><button onClick={() => setTab("banks")}>题库书架</button></div>
+              <div className="quick-practice-grid">{microDrills.map((drill) => <button key={drill.id} onClick={() => startMicroDrill(drill)}><span>{drill.icon}</span><b>{drill.title}</b><small>{drill.minutes}分钟</small></button>)}</div>
+              <div className="quick-tool-row"><button onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤/睡前</small></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount}道</small></button><button onClick={() => setTab("report")}><span>报</span><b>提分诊断</b><small>{weakestModule ? weakestModule.module : "完成后生成"}</small></button></div>
+            </section>
           </div>}
 
           {tab === "banks" && <div className="page-content subpage">

@@ -11,7 +11,9 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(page, /公考日练/);
-  assert.match(app, /今日安排/);
+  assert.match(app, /今日最该做/);
+  assert.match(app, /today-command-card/);
+  assert.match(app, /daily-timeline-card/);
   assert.match(app, /当前为免费版/);
   assert.match(app, /signin-with-chatgpt/);
   assert.doesNotMatch(app, /DEMO-/);

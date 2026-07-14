@@ -153,7 +153,7 @@ export async function ensureSchema() {
       province TEXT NOT NULL DEFAULT '',
       exam_year INTEGER NOT NULL DEFAULT 2027,
       exam_date TEXT,
-      daily_minutes INTEGER NOT NULL DEFAULT 20,
+      daily_minutes INTEGER NOT NULL DEFAULT 30,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_exam_targets (

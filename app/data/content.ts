@@ -29,6 +29,7 @@ export type PracticeDay = {
     expressions: Array<{ phrase: string; scene: string }>;
     prompt: string;
     reference: string;
+    wordLimit?: number;
   };
 };
 
@@ -153,6 +154,7 @@ export const practiceDays: PracticeDay[] = [
       ],
       prompt: "将“要认真听取群众意见，把事情办好”改写成一条更规范的申论表达，不超过 60 字。",
       reference: "畅通群众诉求表达渠道，健全意见收集、办理反馈和跟踪问效机制，以闭环管理推动群众急难愁盼问题有效解决。",
+      wordLimit: 60,
     },
   },
   {
@@ -195,6 +197,7 @@ export const practiceDays: PracticeDay[] = [
       ],
       prompt: "围绕“老年人不会使用线上办事系统”，提出两条对策，不超过 80 字。",
       reference: "一是优化平台适老化设计，简化操作流程并提供清晰指引；二是保留线下窗口和人工帮办服务，组织社区志愿者开展数字技能辅导。",
+      wordLimit: 80,
     },
   },
   {
@@ -237,6 +240,7 @@ export const practiceDays: PracticeDay[] = [
       ],
       prompt: "以“抓落实”为主题，写一句 50 字以内的规范表达。",
       reference: "健全任务分解、跟踪督办和结果反馈机制，以责任到人、时限到天推动各项部署落地见效。",
+      wordLimit: 50,
     },
   },
 ];

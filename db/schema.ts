@@ -175,7 +175,7 @@ export const userExamProfiles = sqliteTable("user_exam_profiles", {
   province: text("province").notNull().default(""),
   examYear: integer("exam_year").notNull().default(2027),
   examDate: text("exam_date"),
-  dailyMinutes: integer("daily_minutes").notNull().default(20),
+  dailyMinutes: integer("daily_minutes").notNull().default(30),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 

@@ -30,8 +30,8 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
     readFile(new URL("../drizzle/0003_clammy_rick_jones.sql", import.meta.url), "utf8"),
   ]);
   assert.match(app, /题库中心/);
-  assert.match(app, /智能刷题10道/);
-  assert.match(app, /按1、3、7天节奏/);
+  assert.match(app, /buildDailyPlan/);
+  assert.match(app, /错题、超时与没把握/);
   assert.match(app, /不确定（即使答对也会复习）/);
   assert.match(route, /getPracticeBatch/);
   assert.match(route, /submitPracticeAnswer/);
@@ -39,6 +39,49 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(migration, /CREATE TABLE `user_exam_profiles`/);
   assert.match(migration, /CREATE TABLE `user_question_progress`/);
   assert.match(migration, /CREATE TABLE `practice_attempts`/);
+});
+
+test("daily practice adapts to 30, 45 or 60 minutes and survives refreshes", async () => {
+  const [page, layout, app, route, content, schema] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/data/content.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(`${page}\n${layout}`, /30–60 分钟/);
+  assert.doesNotMatch(`${page}\n${layout}`, /每天\s*20\s*分钟/);
+  assert.match(schema, /dailyMinutes:[\s\S]*?\.default\(30\)/);
+
+  assert.match(app, /buildDailyPlan/);
+  for (const questionCount of [10, 15, 20]) {
+    assert.match(app, new RegExp(`questionCount:\\s*${questionCount}\\b`));
+  }
+  assert.match(app, /todayKey/);
+  assert.match(route, /chinaDateKey/);
+  assert.match(route, /resumeQuestionCodes/);
+  assert.match(app, /activePractice/);
+
+  assert.match(content, /wordLimit\?: number/);
+  assert.match(content, /wordLimit: 60/);
+  assert.match(app, /wordLimit/);
+});
+
+test("the compact loop exposes review, honest bank states and a finite session summary", async () => {
+  const [app, route] = await Promise.all([
+    readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /tab === "review"/);
+  assert.match(app, /setTab\("review"\)/);
+  assert.match(app, /今天学够了/);
+  assert.match(app, /申论微练建设中/);
+  assert.match(app, /bank\.subject === "行测"/);
+  assert.match(route, /wrongAudioQuestions/);
+  assert.match(app, /wrongAudioQuestions/);
 });
 
 test("learners can combine national and multiple provincial exam targets and banks", async () => {

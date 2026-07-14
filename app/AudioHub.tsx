@@ -69,8 +69,11 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const loopRef = useRef(loop);
   const timerRef = useRef<number | null>(null);
 
-  const selectedTrack = tracks.find((track) => track.id === selectedId) ?? tracks[0];
-  const visibleTracks = filter === "all" ? tracks : tracks.filter((track) => track.category === filter);
+  const visibleTracks = useMemo(
+    () => filter === "all" ? tracks : tracks.filter((track) => track.category === filter),
+    [filter, tracks],
+  );
+  const selectedTrack = visibleTracks.find((track) => track.id === selectedId) ?? visibleTracks[0];
 
   useEffect(() => {
     speedRef.current = speed;
@@ -111,6 +114,21 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setProgress(0);
     if (message) notify(message);
   }, [notify]);
+
+  useEffect(() => {
+    const firstVisibleId = visibleTracks[0]?.id ?? "";
+    if (selectedId && visibleTracks.some((track) => track.id === selectedId)) return;
+    if (selectedId || firstVisibleId) stop();
+    setSelectedId(firstVisibleId);
+  }, [selectedId, stop, visibleTracks]);
+
+  const changeFilter = (nextFilter: Filter) => {
+    if (nextFilter === filter) return;
+    const nextTracks = nextFilter === "all" ? tracks : tracks.filter((track) => track.category === nextFilter);
+    stop();
+    setFilter(nextFilter);
+    setSelectedId(nextTracks[0]?.id ?? "");
+  };
 
   const startSpeech = useCallback((track: AudioTrack) => {
     if (!("speechSynthesis" in window)) {
@@ -287,8 +305,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
   };
 
-  if (!selectedTrack) return null;
-
   return (
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
       <audio ref={audioRef} preload="metadata" onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
@@ -297,31 +313,37 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
       </div>
 
-      <section className="audio-hero">
-        <div className="audio-live"><i /> 精选更新 · 支持锁屏播放</div>
-        <h2>{selectedTrack.title}</h2>
-        <p>{selectedTrack.description}</p>
-        <div className={`waveform ${playing && !paused ? "playing" : ""}`} aria-hidden="true">
-          {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
-        </div>
-        <button onClick={togglePlayback}>{playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
-      </section>
+      {selectedTrack ? (
+        <section className="audio-hero">
+          <div className="audio-live"><i /> 精选更新 · 支持锁屏播放</div>
+          <h2>{selectedTrack.title}</h2>
+          <p>{selectedTrack.description}</p>
+          <div className={`waveform ${playing && !paused ? "playing" : ""}`} aria-hidden="true">
+            {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
+          </div>
+          <button onClick={togglePlayback}>{playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
+        </section>
+      ) : null}
 
       <div className="audio-filters" aria-label="音频分类">
-        {filterOptions.map((option) => <button key={option.id} className={filter === option.id ? "active" : ""} onClick={() => setFilter(option.id)}>{option.label}</button>)}
+        {filterOptions.map((option) => <button key={option.id} className={filter === option.id ? "active" : ""} onClick={() => changeFilter(option.id)}>{option.label}</button>)}
       </div>
 
       <section className="audio-list" aria-label="音频节目列表">
         {visibleTracks.length === 0 ? (
-          <div className="audio-empty"><span>错</span><div><h3>完成行测后再来听</h3><p>系统会把错题题干、答案和解析自动生成听练内容。</p></div></div>
+          filter === "wrong" ? (
+            <div className="audio-empty"><span>错</span><div><h3>完成行测后再来听</h3><p>系统会把真实错题的题干、答案和解析生成 AI 听练内容。</p></div></div>
+          ) : (
+            <div className="audio-empty"><span>新</span><div><h3>本栏目内容准备中</h3><p>新的时政与申论音频会按内容计划陆续更新。</p></div></div>
+          )
         ) : visibleTracks.map((track) => {
-          const selected = selectedTrack.id === track.id;
+          const selected = selectedTrack?.id === track.id;
           const cached = cachedIds.includes(track.id);
           return (
             <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
               <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
               <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
-                <span>{track.kicker}{track.audioUrl ? " · 固定音频" : " · 即时朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
+                <span>{track.kicker}{track.audioUrl ? " · 真人/固定音频" : " · AI合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
               </button>
               <button className={`cache-button ${cached ? "cached" : ""}`} onClick={() => void cacheTrack(track)} aria-label={`离线缓冲${track.title}`}>{cached ? "✓ 已缓冲" : "↓ 离线"}</button>
             </article>
@@ -329,16 +351,18 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         })}
       </section>
 
-      <section className="audio-player" aria-label="播放控制器">
-        <div className="player-top"><div><span>正在播放</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop()}>停止</button></div>
-        <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
-        <div className="player-controls">
-          <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
-          <label>倍速<select value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option><option value={2}>2.0×</option></select></label>
-          <label>定时<select value={sleepMinutes} onChange={(event) => setSleepTimer(Number(event.target.value))}><option value={0}>关闭</option><option value={10}>10分钟</option><option value={20}>20分钟</option><option value={30}>30分钟</option><option value={60}>60分钟</option></select></label>
-          <button className="player-main" onClick={togglePlayback}>{playing && !paused ? "Ⅱ" : "▶"}</button>
-        </div>
-      </section>
+      {selectedTrack ? (
+        <section className="audio-player" aria-label="播放控制器">
+          <div className="player-top"><div><span>正在播放</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop()}>停止</button></div>
+          <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
+          <div className="player-controls">
+            <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
+            <label>倍速<select value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></label>
+            <label>定时<select value={sleepMinutes} onChange={(event) => setSleepTimer(Number(event.target.value))}><option value={0}>关闭</option><option value={10}>10分钟</option><option value={20}>20分钟</option><option value={30}>30分钟</option><option value={60}>60分钟</option></select></label>
+            <button className="player-main" onClick={togglePlayback}>{playing && !paused ? "Ⅱ" : "▶"}</button>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

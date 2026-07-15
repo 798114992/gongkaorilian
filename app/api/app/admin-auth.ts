@@ -242,6 +242,31 @@ async function passwordMatches(password: string, row: AdminUserRow) {
   return constantTimeEqual(actual, row.password_hash);
 }
 
+async function ensureBootstrapAdmin(db: AdminDatabase, configuredSecret: string) {
+  if (!configuredSecret) return;
+  const existing = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
+    password_iterations, role, status FROM admin_users WHERE username = 'admin'`).first<AdminUserRow>();
+  if (existing && existing.status === "active" && existing.role === "super_admin" && await passwordMatches(configuredSecret, existing)) return;
+
+  const record = await createPasswordRecord(configuredSecret);
+  await db.batch([
+    db.prepare(`INSERT INTO admin_users
+      (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
+      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)
+      ON CONFLICT(username) DO UPDATE SET
+        display_name = '超级管理员',
+        password_hash = excluded.password_hash,
+        password_salt = excluded.password_salt,
+        password_iterations = excluded.password_iterations,
+        role = 'super_admin',
+        status = 'active',
+        updated_at = CURRENT_TIMESTAMP`)
+      .bind(record.hash, record.salt, record.iterations),
+    db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
+      WHERE admin_user_id = (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`),
+  ]);
+}
+
 function readCookie(request: Request, name: string) {
   const raw = request.headers.get("cookie") ?? "";
   for (const part of raw.split(";")) {
@@ -291,14 +316,7 @@ export async function authenticateAdmin(
   const password = String(passwordValue ?? "");
   if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(username) || !password || password.length > 512) return null;
 
-  const total = await db.prepare("SELECT COUNT(*) AS count FROM admin_users").first<{ count: number }>();
-  if (Number(total?.count ?? 0) === 0 && username === "admin" && configuredSecret && constantTimeEqual(password, configuredSecret)) {
-    const record = await createPasswordRecord(password);
-    await db.prepare(`INSERT OR IGNORE INTO admin_users
-      (username, display_name, password_hash, password_salt, password_iterations, role, status)
-      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active')`)
-      .bind(record.hash, record.salt, record.iterations).run();
-  }
+  if (username === "admin") await ensureBootstrapAdmin(db, configuredSecret);
 
   const row = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
     password_iterations, role, status FROM admin_users WHERE username = ?`).bind(username).first<AdminUserRow>();

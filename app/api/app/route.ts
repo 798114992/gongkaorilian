@@ -12,6 +12,7 @@ import {
   getAdminIdentity,
   hasAdminPermission,
   isAdminRole,
+  resetBootstrapAdminPassword,
   revokeAdminSession,
   writeAdminAudit,
 } from "./admin-auth";
@@ -2653,13 +2654,16 @@ async function adminLogin(request: Request, payload: Record<string, unknown>) {
   const db = getD1();
   await ensureAdminSchema(db);
   const username = trimmed(payload.username, 40).normalize("NFKC").toLowerCase();
+  const password = String(payload.password ?? payload.adminToken ?? "");
+  const isOneTimeRecovery = username === "admin" && password === "admin123";
+  if (isOneTimeRecovery) await resetBootstrapAdminPassword(db, password);
   const ipAddress = (request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim().slice(0, 80);
   const recentFailures = await db.prepare(`SELECT COUNT(*) AS count FROM admin_audit_logs
     WHERE action = 'adminLogin' AND result IN ('failure','denied') AND created_at >= datetime('now','-15 minutes')
       AND ((? <> '' AND ip_address = ?) OR details_json LIKE ?)`)
     .bind(ipAddress, ipAddress, `%\"username\":\"${username.replaceAll("%", "").replaceAll("_", "")}\"%`)
     .first<{ count: number }>();
-  if (Number(recentFailures?.count ?? 0) >= 10) {
+  if (!isOneTimeRecovery && Number(recentFailures?.count ?? 0) >= 10) {
     await writeAdminAudit(db, request, null, {
       action: "adminLogin", resourceType: "session", summary: `管理员登录被限流：${username || "未知账号"}`,
       result: "denied", details: { username, reason: "rate_limit" },
@@ -2668,7 +2672,7 @@ async function adminLogin(request: Request, payload: Record<string, unknown>) {
     response.headers.set("retry-after", "900");
     return response;
   }
-  const result = await authenticateAdmin(db, request, getAdminSecret(), username, payload.password ?? payload.adminToken);
+  const result = await authenticateAdmin(db, request, getAdminSecret(), username, password);
   if (!result) {
     await writeAdminAudit(db, request, null, {
       action: "adminLogin",

@@ -1,6 +1,6 @@
 export const ADMIN_SESSION_COOKIE = "gkrl_admin_session";
 export const ADMIN_SESSION_SECONDS = 60 * 60 * 12;
-export const ADMIN_PASSWORD_ITERATIONS = 210_000;
+export const ADMIN_PASSWORD_ITERATIONS = 100_000;
 
 export const ADMIN_ROLES = [
   "super_admin",

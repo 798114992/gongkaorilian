@@ -273,6 +273,8 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /循环中/);
   assert.match(hub, /定时/);
   assert.match(hub, /<audio/);
+  assert.match(hub, /audio-floating-player/);
+  assert.match(hub, /关闭播放/);
   assert.match(hub, /MediaMetadata/);
   assert.match(hub, /gongkao-audio-v2/);
   assert.match(audioData, /audioUrl/);

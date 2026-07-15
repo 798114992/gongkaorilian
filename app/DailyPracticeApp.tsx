@@ -1608,8 +1608,7 @@ export default function DailyPracticeApp() {
             </section>
 
             <section className="today-alert-card"><div className="compact-section-heading"><div><span>今日提醒</span><h2>只保留会影响今天决策的事</h2></div></div>
-              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
-              <div className="week-mini-row">{recentCheckinKeys.map((key) => <span key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""}>{progress.checkins.includes(key) ? "✓" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", weekday: "narrow" }).format(new Date(`${key}T12:00:00+08:00`))}</span>)}</div>
+              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small>{item.id === "streak" && <div className="streak-dot-row">{recentCheckinKeys.map((key) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""}>{progress.checkins.includes(key) ? "✓" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", weekday: "narrow" }).format(new Date(`${key}T12:00:00+08:00`))}</em>)}</div>}</div><i>›</i></button>)}</div>
             </section>
 
             <section className="quick-practice-card"><div className="compact-section-heading"><div><span>加练一下</span><h2>有余力再点，不打断今日主线</h2></div><button onClick={() => setTab("banks")}>题库书架</button></div>

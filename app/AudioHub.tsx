@@ -322,7 +322,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
   };
 
+  const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
+
   return (
+    <>
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
       <audio ref={audioRef} preload="metadata" onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
       <div className="subpage-heading audio-heading">
@@ -403,5 +406,17 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         </section>
       ) : null}
     </div>
+    {selectedTrack && miniPlayerVisible && (
+      <section className={`audio-floating-player ${paused ? "paused" : "playing"}`} aria-label="底部播放控制">
+        <div className="audio-floating-copy">
+          <span>{paused ? "已暂停" : "正在播放"}</span>
+          <b>{selectedTrack.title}</b>
+          <div className="audio-floating-progress"><i style={{ width: `${Math.max(2, progress)}%` }} /></div>
+        </div>
+        <button className="audio-mini-toggle" onClick={togglePlayback}>{paused ? "继续" : "暂停"}</button>
+        <button className="audio-mini-close" onClick={() => stop("已关闭播放")} aria-label={`关闭播放${selectedTrack.title}`}>×</button>
+      </section>
+    )}
+    </>
   );
 }

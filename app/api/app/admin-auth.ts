@@ -334,7 +334,8 @@ export async function authenticateAdmin(
     password_iterations, role, status FROM admin_users WHERE username = ? ORDER BY id ASC LIMIT 1`).bind(username).first<AdminUserRow>();
   if (!row || row.status !== "active") return null;
   if (isBootstrapAdmin) {
-    if (!isBootstrapSecret || row.role !== "super_admin") return null;
+    if (isBootstrapSecret && row.role !== "super_admin") return null;
+    if (!isBootstrapSecret && !(await passwordMatches(password, row))) return null;
   } else if (!(await passwordMatches(password, row))) {
     return null;
   }

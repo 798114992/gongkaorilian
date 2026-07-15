@@ -1933,33 +1933,7 @@ async function trackEvent(userId: string, payload: Record<string, unknown>) {
 }
 
 function getAdminSecret() {
-  return "admin123";
-}
-
-async function adminBootstrapReset(request: Request) {
-  const key = new URL(request.url).searchParams.get("adminReset");
-  if (key !== "admin123") return json({ error: "not found" }, 404);
-  const db = getD1();
-  await ensureAdminSchema(db);
-  const record = await createPasswordRecord("admin123");
-  const existing = await db.prepare("SELECT id FROM admin_users WHERE username = 'admin' ORDER BY id ASC LIMIT 1").first<{ id: number }>();
-  if (existing) {
-    await db.batch([
-      db.prepare(`UPDATE admin_users SET display_name = '超级管理员',
-        password_hash = ?, password_salt = ?, password_iterations = ?,
-        role = 'super_admin', status = 'active', updated_at = CURRENT_TIMESTAMP
-        WHERE username = 'admin'`)
-        .bind(record.hash, record.salt, record.iterations),
-      db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
-        WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`),
-    ]);
-  } else {
-    await db.prepare(`INSERT INTO admin_users
-      (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
-      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)`)
-      .bind(record.hash, record.salt, record.iterations).run();
-  }
-  return json({ ok: true, admin: "admin" });
+  return (env as unknown as { ADMIN_TOKEN?: string }).ADMIN_TOKEN ?? process.env.ADMIN_TOKEN ?? "";
 }
 
 const ADMIN_CONTEXT = Symbol("admin-context");
@@ -3277,7 +3251,6 @@ export async function GET(request: Request) {
   try {
     await ensureSchema();
     const url = new URL(request.url);
-    if (url.searchParams.has("adminReset")) return adminBootstrapReset(request);
     const mediaId = url.searchParams.get("media");
     if (mediaId) return serveMedia(mediaId, request);
     return await bootstrap(request);

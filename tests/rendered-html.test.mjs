@@ -57,7 +57,7 @@ test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defa
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(`${page}\n${layout}`, /30–60 分钟/);
+  assert.match(`${page}\n${layout}`, /10–60 分钟/);
   assert.doesNotMatch(`${page}\n${layout}`, /每天\s*20\s*分钟/);
   assert.match(schema, /dailyMinutes:[\s\S]*?\.default\(30\)/);
 
@@ -86,8 +86,10 @@ test("the compact loop exposes review, honest bank states and a finite session s
   assert.match(app, /tab === "review"/);
   assert.match(app, /setTab\("review"\)/);
   assert.match(app, /今天学够了/);
-  assert.match(app, /申论微练建设中/);
-  assert.match(app, /bank\.subject !== "申论"/);
+  assert.match(app, /startEssayPractice/);
+  assert.match(app, /材料作答 · 采分点自评/);
+  assert.match(route, /getEssayPracticeBatch/);
+  assert.doesNotMatch(app, /申论微练建设中/);
   assert.match(route, /wrongAudioQuestions/);
   assert.match(app, /wrongAudioQuestions/);
 });
@@ -116,7 +118,7 @@ test("learners can combine national and multiple provincial exam targets and ban
 
   assert.match(practiceBatch, /const selected = await selectedBankCodes\(userId\)/);
   assert.match(practiceBatch, /requested\.length \? requested : selected/);
-  assert.match(practiceBatch, /const profile = await loadExamProfile\(userId\)/);
+  assert.match(practiceBatch, /loadExamProfile\(userId\)/);
   assert.match(practiceBatch, /urgentTargets/);
   assert.match(practiceBatch, /takeBalanced/);
   assert.match(route, /共通题可复用编号/);
@@ -201,16 +203,23 @@ test("account sync and redemption protections are server side", async () => {
 });
 
 test("the admin surface includes codes, content publishing and analytics", async () => {
-  const [admin, bankManager, envExample] = await Promise.all([
+  const [admin, contentManager, bankManager, envExample] = await Promise.all([
     readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/AdminContentManager.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/QuestionBankManager.tsx", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
   ]);
+  const adminSurface = `${admin}\n${contentManager}`;
   assert.match(admin, /运营管理后台/);
   assert.match(admin, /adminCreateCodes/);
   assert.match(admin, /adminUpdateConfig/);
-  assert.match(admin, /adminUpsertContentBatch/);
-  assert.match(admin, /adminDisableContent/);
+  assert.match(adminSurface, /adminUpsertContentBatch/);
+  assert.match(adminSurface, /adminDisableContent/);
+  assert.match(adminSurface, /adminListContentVersions/);
+  assert.match(adminSurface, /adminRollbackContent/);
+  assert.match(adminSurface, /adminUploadMedia/);
+  assert.match(adminSurface, /定时发布/);
+  assert.match(adminSurface, /职位表/);
   assert.match(admin, /7日活跃用户/);
   assert.match(bankManager, /下载Excel模板/);
   assert.match(bankManager, /\.xlsx,\.xls,\.csv/);
@@ -257,7 +266,7 @@ test("database migrations include durable product, content, analytics and questi
   assert.match(allMigrations, /ADD `review_stage`/);
 });
 
-test("the 日练电台 uses fixed audio and supports the requested controls", async () => {
+test("the 日练电台 supports dynamic series, fixed audio fallback and the requested controls", async () => {
   const [hub, audioData, serviceWorker, audioFile] = await Promise.all([
     readFile(new URL("../app/AudioHub.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/data/audio.ts", import.meta.url), "utf8"),
@@ -268,7 +277,9 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /申论晨读/);
   assert.match(hub, /错题语音朗读/);
   assert.match(hub, /audio-category-board/);
-  assert.match(hub, /categoryMeta/);
+  assert.match(hub, /builtInCategoryMeta/);
+  assert.match(hub, /trackSeriesId/);
+  assert.match(hub, /tracksBySeries/);
   assert.match(hub, /音频精选分类/);
   assert.match(hub, /请先暂停十秒/);
   assert.match(hub, /0\.75/);

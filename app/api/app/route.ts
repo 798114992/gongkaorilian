@@ -35,6 +35,31 @@ const EVENT_NAMES = new Set([
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
+const CONTENT_TYPES = new Set([
+  "practice_day",
+  "morning_read",
+  "current_affairs",
+  "essay_micro",
+  "audio_track",
+  "exam_event",
+  "exam_notice",
+  "job_position",
+  "drill_preset",
+  "strategy_config",
+]);
+const CONTENT_STATUSES = new Set(["draft", "scheduled", "published", "archived"]);
+const DEFAULT_STRATEGY = {
+  timePlans: {
+    10: { morning: 0, practice: 10, essay: 0, questionCount: 5 },
+    30: { morning: 5, practice: 20, essay: 5, questionCount: 10 },
+    45: { morning: 5, practice: 30, essay: 10, questionCount: 15 },
+    60: { morning: 10, practice: 35, essay: 15, questionCount: 20 },
+  },
+  reviewIntervals: [1, 3, 7, 14, 30],
+  scoreRateSweetSpot: [40, 80],
+  dueShare: 0.6,
+  urgentDays: 30,
+};
 const allowedWrongReasons = new Set(["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足", "蒙对了"]);
 const allowedConfidence = new Set(["confident", "hesitant", "guessed"]);
 
@@ -79,6 +104,14 @@ type ImportedQuestion = {
   scoringPoints?: string[];
   difficulty?: string;
   source?: string;
+  region: string;
+  examYear: number;
+  frequency: string;
+  importanceStars: number;
+  scoreRate: number;
+  suggestedSeconds: number;
+  imageUrl: string;
+  resourceUrl: string;
 };
 
 type QuestionProgressRow = {
@@ -112,6 +145,14 @@ type ResolvedQuestion = {
   scopeLabel: string;
   reviewedAt: string | null;
   targetCode: string | null;
+  region: string;
+  examYear: number | null;
+  frequency: string;
+  importanceStars: number;
+  scoreRate: number;
+  suggestedSeconds: number;
+  imageUrl: string;
+  resourceUrl: string;
 };
 
 type ExamTargetProfile = {
@@ -419,12 +460,113 @@ async function seedDefaults() {
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
       VALUES ('public-institution', '事业单位职测', 'special', '全国', NULL, '综合', '事业单位职测与综合应用能力日练入口。', 'blue', 'published')`),
   ]);
+  await seedDefaultContentOnce();
+}
+
+async function seedDefaultContentOnce() {
+  const db = getD1();
+  const marker = await db.prepare("SELECT value FROM configs WHERE key = 'default_content_seed_version'").first<{ value: string }>();
+  if (marker) return;
+  const presets = [
+    { id: "data-analysis", title: "资料分析速算", subtitle: "5—10分钟一组", icon: "📊", color: "blue", subject: "行测", module: "资料分析", subTypes: [], questionCount: 5, minutes: 8, sortOrder: 10, enabled: true },
+    { id: "graphic-reasoning", title: "图形判断", subtitle: "高频规律微练", icon: "🧩", color: "purple", subject: "行测", module: "判断推理", subTypes: ["图形推理"], questionCount: 5, minutes: 8, sortOrder: 20, enabled: true },
+    { id: "idiom", title: "言语易错成语", subtitle: "易混词精练", icon: "📖", color: "orange", subject: "行测", module: "言语理解", subTypes: ["选词填空"], questionCount: 5, minutes: 6, sortOrder: 30, enabled: true },
+    { id: "current-affairs", title: "常识时政", subtitle: "高频真题快练", icon: "📰", color: "red", subject: "行测", module: "常识判断", subTypes: ["时政"], questionCount: 5, minutes: 5, sortOrder: 40, enabled: true },
+    { id: "essay-expression", title: "申论规范表达", subtitle: "从材料到得分词", icon: "✍️", color: "green", subject: "申论", module: "规范表达", subTypes: [], questionCount: 1, minutes: 10, sortOrder: 50, enabled: true },
+  ];
+  const statements: D1PreparedStatement[] = [];
+  for (const day of defaultPracticeDays) {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
+      (content_type, content_key, title, payload_json, status, version)
+      VALUES ('practice_day', ?, ?, ?, 'published', 1)`)
+      .bind(`day-${day.day}`, `第${day.day}天日练`, JSON.stringify({ ...day, questions: [] })));
+  }
+  for (const track of defaultAudioTracks) {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
+      (content_type, content_key, title, payload_json, status, version)
+      VALUES ('audio_track', ?, ?, ?, 'published', 1)`)
+      .bind(track.id, track.title, JSON.stringify(track)));
+  }
+  for (const preset of presets) {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
+      (content_type, content_key, title, payload_json, status, version)
+      VALUES ('drill_preset', ?, ?, ?, 'published', 1)`)
+      .bind(`drill-${preset.id}`, preset.title, JSON.stringify(preset)));
+  }
+  statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
+    (content_type, content_key, title, payload_json, status, version)
+    VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'published', 1)`)
+    .bind(JSON.stringify(DEFAULT_STRATEGY)));
+  statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_content_seed_version', '1')"));
+  await db.batch(statements);
 }
 
 async function getConfigNumber(key: string, fallback: number) {
   const row = await getD1().prepare("SELECT value FROM configs WHERE key = ?").bind(key).first<{ value: string }>();
   const value = Number(row?.value);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function mergeStrategyConfig(base: Record<string, unknown>, incoming: Record<string, unknown>) {
+  const basePlans = base.timePlans && typeof base.timePlans === "object" ? base.timePlans as Record<string, unknown> : {};
+  const incomingPlans = incoming.timePlans && typeof incoming.timePlans === "object" ? incoming.timePlans as Record<string, unknown> : {};
+  const timePlans: Record<string, unknown> = { ...basePlans, ...incomingPlans };
+  for (const minutes of [10, 30, 45, 60]) {
+    const key = String(minutes);
+    const current = timePlans[key] && typeof timePlans[key] === "object" ? timePlans[key] as Record<string, unknown> : {};
+    const plan: Record<string, unknown> = { ...current };
+    const aliases: Array<[string, string]> = [
+      [`morning${minutes}`, "morning"],
+      [`practice${minutes}`, "practice"],
+      [`essay${minutes}`, "essay"],
+      [`questions${minutes}`, "questionCount"],
+    ];
+    for (const [sourceKey, targetKey] of aliases) {
+      const value = Number(incoming[sourceKey]);
+      if (Number.isFinite(value) && value >= 0) plan[targetKey] = Math.round(value);
+    }
+    timePlans[key] = plan;
+  }
+  const merged: Record<string, unknown> = { ...base, ...incoming, timePlans };
+  const reviewRatio = Number(incoming.reviewRatio);
+  if (Number.isFinite(reviewRatio)) merged.dueShare = Math.max(0, Math.min(1, reviewRatio / 100));
+  const urgentExamDays = Number(incoming.urgentExamDays);
+  if (Number.isFinite(urgentExamDays)) merged.urgentDays = Math.max(1, Math.min(180, Math.round(urgentExamDays)));
+  const scoreRateMin = Number(incoming.scoreRateMin);
+  const scoreRateMax = Number(incoming.scoreRateMax);
+  if (Number.isFinite(scoreRateMin) && Number.isFinite(scoreRateMax) && scoreRateMin < scoreRateMax) {
+    merged.scoreRateSweetSpot = [Math.max(0, scoreRateMin), Math.min(100, scoreRateMax)];
+  }
+  return merged;
+}
+
+async function loadStrategyConfig() {
+  const rows = await getD1().prepare(`SELECT payload_json FROM content_items
+    WHERE content_type = 'strategy_config' AND status IN ('published', 'scheduled')
+      AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
+    ORDER BY id`).all<{ payload_json: string }>();
+  let merged: Record<string, unknown> = clone(DEFAULT_STRATEGY);
+  for (const row of rows.results) {
+    try {
+      const incoming = JSON.parse(row.payload_json) as Record<string, unknown>;
+      merged = mergeStrategyConfig(merged, incoming);
+    } catch {
+      // Invalid strategy drafts must not affect the safe defaults.
+    }
+  }
+  const reviewIntervals = Array.isArray(merged.reviewIntervals)
+    ? merged.reviewIntervals.map(Number).filter((value) => Number.isInteger(value) && value >= 1 && value <= 365).slice(0, 10)
+    : [];
+  const sweetSpot = Array.isArray(merged.scoreRateSweetSpot) ? merged.scoreRateSweetSpot.map(Number).slice(0, 2) : [];
+  return {
+    ...DEFAULT_STRATEGY,
+    ...merged,
+    reviewIntervals: reviewIntervals.length ? reviewIntervals : DEFAULT_STRATEGY.reviewIntervals,
+    scoreRateSweetSpot: sweetSpot.length === 2 && sweetSpot[0] >= 0 && sweetSpot[1] <= 100 && sweetSpot[0] < sweetSpot[1]
+      ? sweetSpot : DEFAULT_STRATEGY.scoreRateSweetSpot,
+    dueShare: Math.max(0, Math.min(1, Number(merged.dueShare ?? DEFAULT_STRATEGY.dueShare))),
+    urgentDays: Math.max(1, Math.min(180, Math.floor(Number(merged.urgentDays ?? DEFAULT_STRATEGY.urgentDays)))),
+  };
 }
 
 function clone<T>(value: T): T {
@@ -442,6 +584,14 @@ function starterQuestionList(): ResolvedQuestion[] {
     scopeLabel: "国省共通基础",
     reviewedAt: "2026-07-14",
     targetCode: null,
+    region: "全国",
+    examYear: 2026,
+    frequency: "中频",
+    importanceStars: 3,
+    scoreRate: 60,
+    suggestedSeconds: 60,
+    imageUrl: "",
+    resourceUrl: "",
   })));
 }
 
@@ -476,6 +626,15 @@ function publicQuestion(question: ResolvedQuestion, progress?: QuestionProgressR
     bankName: question.bankName,
     scopeLabel: question.scopeLabel,
     reviewedAt: question.reviewedAt,
+    region: question.region,
+    examYear: question.examYear,
+    frequency: question.frequency,
+    importanceStars: question.importanceStars,
+    scoreRate: question.scoreRate,
+    suggestedSeconds: question.suggestedSeconds,
+    imageUrl: question.imageUrl,
+    resourceUrl: question.resourceUrl,
+    truthLabel: question.region && question.examYear ? `${question.region}-${question.examYear}` : question.region || "真题",
     state: progress?.state ?? "new",
     due,
     favorite: Boolean(progress?.favorite),
@@ -489,6 +648,20 @@ function priorityFor(progress?: QuestionProgressRow) {
   if (!progress) return 2;
   if (progress.state === "learning") return 3;
   return 4;
+}
+
+function questionValueRank(
+  question: ResolvedQuestion,
+  sweetSpot: [number, number] = [40, 80],
+  weights: { frequency: number; importance: number; scoreRate: number } = { frequency: 25, importance: 25, scoreRate: 20 },
+) {
+  const scoreDistance = question.scoreRate >= sweetSpot[0] && question.scoreRate <= sweetSpot[1]
+    ? 0
+    : Math.min(Math.abs(question.scoreRate - sweetSpot[0]), Math.abs(question.scoreRate - sweetSpot[1]));
+  const normalizedScorePenalty = Math.min(1, scoreDistance / 40) * weights.scoreRate;
+  const normalizedFrequencyPenalty = (question.frequency === "高频" ? 0 : question.frequency === "中频" ? 0.5 : 1) * weights.frequency;
+  const normalizedImportancePenalty = ((5 - question.importanceStars) / 4) * weights.importance;
+  return normalizedScorePenalty + normalizedFrequencyPenalty + normalizedImportancePenalty;
 }
 
 function questionFingerprint(question: ResolvedQuestion) {
@@ -532,10 +705,7 @@ function takeBalanced(
 async function selectedBankCodes(userId: string) {
   const rows = await getD1().prepare("SELECT bank_code FROM user_question_banks WHERE user_id = ? ORDER BY added_at")
     .bind(userId).all<{ bank_code: string }>();
-  if (rows.results.length) return rows.results.map((row) => row.bank_code);
-  await getD1().prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)")
-    .bind(userId, STARTER_BANK_CODE).run();
-  return [STARTER_BANK_CODE];
+  return rows.results.map((row) => row.bank_code).filter((code) => code !== STARTER_BANK_CODE);
 }
 
 async function loadExamProfile(userId: string): Promise<LoadedExamProfile> {
@@ -635,33 +805,7 @@ async function loadQuestionBanks(userId: string) {
       }>(),
     loadExamProfile(userId),
   ]);
-  const starterCodes = starterQuestionList().map((question) => question.id);
-  const placeholders = starterCodes.map(() => "?").join(",");
-  const starterProgress = starterCodes.length
-    ? await db.prepare(`SELECT state, last_answered_at, next_review_at FROM user_question_progress WHERE user_id = ? AND question_code IN (${placeholders})`)
-      .bind(userId, ...starterCodes).all<{ state: string; last_answered_at: string | null; next_review_at: string | null }>()
-    : { results: [] as Array<{ state: string; last_answered_at: string | null; next_review_at: string | null }> };
-  const starter = {
-    code: STARTER_BANK_CODE,
-    name: "公考日练·行测基础",
-    examType: "通用",
-    province: "全国",
-    examYear: new Date().getFullYear(),
-    subject: "行测",
-    description: "覆盖言语、判断、资料、数量、政治理论和常识，适合建立日练节奏。",
-    coverColor: "blue",
-    questionCount: starterCodes.length,
-    studiedCount: starterProgress.results.filter((item) => item.last_answered_at).length,
-    masteredCount: starterProgress.results.filter((item) => item.state === "mastered").length,
-    weakCount: starterProgress.results.filter((item) => item.state === "weak").length,
-    dueCount: starterProgress.results.filter((item) => item.next_review_at && Date.parse(item.next_review_at) <= Date.now()).length,
-    added: selected.includes(STARTER_BANK_CODE),
-    targetMatch: true,
-    recommended: false,
-    scopeLabel: "通用基础 · 非国考/省考真题",
-    mismatchReason: "只用于练习基础题型，不代表目标考试的命题特点。",
-  };
-  return [starter, ...rows.results.map((row) => {
+  return rows.results.map((row) => {
     const targetMatch = bankMatchesTargets(row, profile);
     const matchingTarget = profile.targets.find((target) => row.exam_type === "national"
       ? target.examType === "国考"
@@ -690,7 +834,7 @@ async function loadQuestionBanks(userId: string) {
     recommended,
     scopeLabel,
     mismatchReason,
-  }; })];
+  }; });
 }
 
 async function loadStudyInsights(userId: string) {
@@ -818,20 +962,51 @@ async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
   return orderedCodes.map((code) => questionMap.get(code)).filter((question): question is Question => Boolean(question));
 }
 
-async function loadContent(membershipActive: boolean) {
-  const rows = await getD1().prepare(`SELECT content_type, content_key, payload_json
-    FROM content_items WHERE status = 'published' AND (publish_at IS NULL OR publish_at <= CURRENT_TIMESTAMP)
+async function loadContent(membershipActive: boolean, profile?: LoadedExamProfile) {
+  const rows = await getD1().prepare(`SELECT content_type, content_key, title, payload_json, version
+    FROM content_items WHERE status IN ('published', 'scheduled') AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
     ORDER BY id ASC`).all<{ content_type: string; content_key: string; payload_json: string }>();
-  const dayMap = new Map(defaultPracticeDays.map((day) => [`day-${day.day}`, clone(day)]));
-  const audioMap = new Map(defaultAudioTracks.map((track) => [track.id, clone(track)]));
+  const dayMap = new Map<string, PracticeDay>();
+  const audioMap = new Map<string, AudioTrack>();
   const examEventMap = new Map<string, PublishedExamEvent>();
   const examNoticeMap = new Map<string, PublishedExamNotice>();
   const jobPositionMap = new Map<string, PublishedJobPosition>();
+  const morningReads: Array<Record<string, unknown>> = [];
+  const currentAffairsContent: Array<Record<string, unknown>> = [];
+  const essayMicros: Array<Record<string, unknown>> = [];
+  const drillPresets: Array<Record<string, unknown>> = [];
+  let strategyConfig: Record<string, unknown> = clone(DEFAULT_STRATEGY);
+  const activeTargetCodes = new Set(profile?.targets.map((target) => target.code) ?? []);
+  const matchesTargets = (item: Record<string, unknown>) => {
+    const raw = Array.isArray(item.targetCodes)
+      ? item.targetCodes
+      : String(item.targetCodes ?? "").split(/[,，、|｜;；\n]+/);
+    const requested = raw.map((value) => String(value).trim()).filter(Boolean);
+    return !requested.length || requested.some((code) => activeTargetCodes.has(code));
+  };
   for (const row of rows.results) {
     try {
       const parsed = JSON.parse(row.payload_json) as PracticeDay | AudioTrack | Record<string, unknown>;
-      if (row.content_type === "practice_day") dayMap.set(row.content_key, parsed as PracticeDay);
+      if (row.content_type === "practice_day") {
+        const day = parsed as PracticeDay;
+        dayMap.set(`day-${Number(day.day) || dayMap.size + 1}`, day);
+      }
       if (row.content_type === "audio_track") audioMap.set(row.content_key, parsed as AudioTrack);
+      const envelope: Record<string, unknown> = {
+        id: row.content_key,
+        contentKey: row.content_key,
+        title: (row as { title?: string }).title ?? String((parsed as Record<string, unknown>).title ?? ""),
+        version: Number((row as { version?: number }).version ?? 1),
+        ...(parsed as Record<string, unknown>),
+      };
+      if (row.content_type === "morning_read" && matchesTargets(envelope)) morningReads.push(envelope);
+      if (row.content_type === "current_affairs" && matchesTargets(envelope)) currentAffairsContent.push(envelope);
+      if (row.content_type === "essay_micro" && matchesTargets(envelope)) essayMicros.push(envelope);
+      if (row.content_type === "drill_preset" && envelope.enabled !== false && matchesTargets(envelope)) drillPresets.push(envelope);
+      if (row.content_type === "strategy_config") {
+        const incoming = parsed as Record<string, unknown>;
+        strategyConfig = mergeStrategyConfig(strategyConfig, incoming);
+      }
       if (row.content_type === "exam_event") {
         const item = parsed as Record<string, unknown>;
         const targetCode = trimmed(item.targetCode, 60);
@@ -906,19 +1081,123 @@ async function loadContent(membershipActive: boolean) {
       // Invalid draft data never blocks the learner experience.
     }
   }
+  const scheduledDate = (item: Record<string, unknown>) => {
+    const value = String(item.publishDate ?? item.date ?? "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+  };
+  const matchDay = (item: Record<string, unknown>) => {
+    const day = Number(item.day);
+    if (Number.isInteger(day) && day > 0) return day;
+    const publishDate = scheduledDate(item);
+    if (publishDate && publishDate === chinaDateKey()) return Number(Array.from(dayMap.values())[0]?.day ?? 1);
+    return null;
+  };
+  const ensureDay = (day: number) => {
+    const key = `day-${day}`;
+    const existing = dayMap.get(key);
+    if (existing) return existing;
+    const created: PracticeDay = {
+      day,
+      label: "今日精练",
+      morning: { title: "", lead: "", paragraphs: [], keywords: [] },
+      questions: [],
+      currentAffairs: [],
+      essay: { expressions: [], prompt: "", reference: "" },
+    };
+    dayMap.set(key, created);
+    return created;
+  };
+  for (const item of morningReads) {
+    const day = matchDay(item);
+    if (!day) continue;
+    const existing = ensureDay(day);
+    const source = item.morning && typeof item.morning === "object" ? item.morning as Record<string, unknown> : item;
+    const rawParagraphs = Array.isArray(source.paragraphs)
+      ? source.paragraphs
+      : String(source.body ?? "").split(/\n+/);
+    const rawKeywords = Array.isArray(source.keywords)
+      ? source.keywords
+      : String(source.keywords ?? "").split(/[、,，|｜；;\n]+/);
+    existing.date = scheduledDate(item) || existing.date;
+    existing.label = trimmed(item.category, 40) || existing.label;
+    existing.morning = {
+      title: trimmed(source.title ?? item.title, 160),
+      lead: trimmed(source.lead ?? source.kicker ?? source.summary, 500),
+      paragraphs: rawParagraphs.map((value) => trimmed(value, 2_000)).filter(Boolean).slice(0, 20),
+      keywords: rawKeywords.map((value) => trimmed(value, 40)).filter(Boolean).slice(0, 12),
+    };
+  }
+  for (const item of currentAffairsContent) {
+    const day = matchDay(item);
+    if (!day) continue;
+    const existing = ensureDay(day);
+    existing.date = scheduledDate(item) || existing.date;
+    const entries = Array.isArray(item.items) ? item.items : [item];
+    existing.currentAffairs = entries.map((entry) => ({
+      tag: trimmed((entry as Record<string, unknown>).tag ?? (entry as Record<string, unknown>).category, 24) || "时政",
+      title: trimmed((entry as Record<string, unknown>).title, 120),
+      detail: trimmed((entry as Record<string, unknown>).detail
+        ?? [(entry as Record<string, unknown>).summary, (entry as Record<string, unknown>).body].filter(Boolean).join("\n"), 1_000),
+    })).filter((entry) => entry.title);
+  }
+  for (const item of essayMicros) {
+    const day = matchDay(item);
+    if (!day) continue;
+    const existing = ensureDay(day);
+    const source = item.essay && typeof item.essay === "object" ? item.essay as Record<string, unknown> : item;
+    const rawExpressions = Array.isArray(source.expressions) ? source.expressions : [];
+    const rawScoringPoints = Array.isArray(source.scoringPoints)
+      ? source.scoringPoints
+      : String(source.scoringPoints ?? "").split(/[|｜；;\n]+/);
+    existing.date = scheduledDate(item) || existing.date;
+    existing.label = trimmed(item.theme, 40) || existing.label;
+    existing.essay = {
+      expressions: rawExpressions.flatMap((value) => {
+        if (!value || typeof value !== "object") return [];
+        const expression = value as Record<string, unknown>;
+        const phrase = trimmed(expression.phrase, 300);
+        return phrase ? [{ phrase, scene: trimmed(expression.scene, 80) }] : [];
+      }).slice(0, 20),
+      material: trimmed(source.material, 12_000),
+      prompt: trimmed(source.prompt, 2_000),
+      reference: trimmed(source.reference ?? source.referenceAnswer, 8_000),
+      scoringPoints: rawScoringPoints.map((value) => trimmed(value, 500)).filter(Boolean).slice(0, 30),
+      wordLimit: Math.max(20, Math.min(5_000, Math.round(Number(source.wordLimit)) || 150)),
+    };
+  }
   const practiceDays = Array.from(dayMap.values()).sort((a, b) => a.day - b.day);
-  const audioTracks = Array.from(audioMap.values());
+  const audioTracks = Array.from(audioMap.values()).sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0));
   const examEvents = Array.from(examEventMap.values()).sort((a, b) => a.eventDate.localeCompare(b.eventDate));
   const examNotices = Array.from(examNoticeMap.values()).sort((a, b) => b.publishDate.localeCompare(a.publishDate));
   const jobPositions = Array.from(jobPositionMap.values()).sort((a, b) => a.targetLabel.localeCompare(b.targetLabel) || a.department.localeCompare(b.department));
-  if (membershipActive) return { practiceDays, audioTracks, examEvents, examNotices, jobPositions, access: "premium" as const };
+  const common = {
+    practiceDays,
+    audioTracks,
+    examEvents,
+    examNotices,
+    jobPositions,
+    morningReads,
+    currentAffairs: currentAffairsContent,
+    essayMicros,
+    drillPresets: drillPresets.sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0)),
+    strategyConfig,
+  };
+  if (membershipActive) return { ...common, access: "premium" as const };
 
-  const previewDay = clone(practiceDays[0]);
-  previewDay.questions = previewDay.questions.slice(0, 5).map((question) => ({ ...question, explanation: "会员可查看完整解析与解题技巧。" }));
-  previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
-  previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
-  previewDay.essay.reference = "兑换会员码后查看参考答案。";
-  return { practiceDays: [previewDay], audioTracks: audioTracks.slice(0, 1), examEvents, examNotices, jobPositions: jobPositions.slice(0, 12), access: "preview" as const };
+  const previewDay = practiceDays[0] ? clone(practiceDays[0]) : null;
+  if (previewDay) {
+    previewDay.questions = previewDay.questions.slice(0, 5).map((question) => ({ ...question, explanation: "会员可查看完整解析与解题技巧。" }));
+    previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
+    previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
+    previewDay.essay.reference = "兑换会员码后查看参考答案。";
+  }
+  return {
+    ...common,
+    practiceDays: previewDay ? [previewDay] : [],
+    audioTracks: audioTracks.slice(0, 1),
+    jobPositions: jobPositions.slice(0, 12),
+    access: "preview" as const,
+  };
 }
 
 async function bootstrap(request: Request) {
@@ -946,7 +1225,7 @@ async function bootstrap(request: Request) {
   let progress = {};
   try { progress = JSON.parse(state?.progress_json ?? "{}"); } catch { progress = {}; }
   const membershipActive = Boolean(user.membership_end && Date.parse(user.membership_end) > Date.now());
-  const content = await loadContent(membershipActive);
+  const content = await loadContent(membershipActive, examProfile);
   return json({
     user: {
       id: user.id,
@@ -1040,6 +1319,7 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
   const bankCode = trimmed(payload.bankCode, 80);
   const added = payload.added === true;
   if (!/^[a-zA-Z0-9_-]{3,80}$/.test(bankCode)) return json({ error: "题库编号无效" }, 400);
+  if (bankCode === STARTER_BANK_CODE) return json({ error: "演示题库已停用，请添加已发布的真题库" }, 410);
   const db = getD1();
   let bank: { id: number; exam_type: string; province: string | null; exam_year: number | null } | null = null;
   if (bankCode !== STARTER_BANK_CODE) {
@@ -1081,18 +1361,6 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
     await db.batch(statements);
   } else {
     await db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode).run();
-    const [remaining, available] = await Promise.all([
-      db.prepare("SELECT bank_code FROM user_question_banks WHERE user_id = ?").bind(userId).all<{ bank_code: string }>(),
-      db.prepare(`SELECT COUNT(DISTINCT q.id) AS total FROM user_question_banks uqb
-        JOIN question_banks qb ON qb.bank_code = uqb.bank_code AND qb.status = 'published'
-        JOIN question_bank_items qbi ON qbi.bank_id = qb.id
-        JOIN questions q ON q.id = qbi.question_id AND q.status = 'active'
-        WHERE uqb.user_id = ?`).bind(userId).first<{ total: number }>(),
-    ]);
-    const hasStarter = remaining.results.some((item) => item.bank_code === STARTER_BANK_CODE);
-    if (!hasStarter && !Number(available?.total ?? 0)) {
-      await db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, STARTER_BANK_CODE).run();
-    }
   }
   return json({ ok: true, banks: await loadQuestionBanks(userId), profile: await loadExamProfile(userId) });
 }
@@ -1103,6 +1371,8 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
   const rows = await getD1().prepare(`WITH candidates AS (
       SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json,
         q.answer, q.explanation, q.technique, q.difficulty, q.source, q.updated_at,
+        q.source_region, q.source_year, q.frequency, q.importance_stars, q.score_rate,
+        q.suggested_seconds, q.image_url, q.resource_url,
         qb.bank_code, qb.name AS bank_name, qb.exam_type AS bank_exam_type, qb.province AS bank_province,
         uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.review_stage, uqp.next_review_at,
         uqp.favorite, uqp.wrong_reason, uqp.last_answered_at, qbi.sort_order,
@@ -1117,7 +1387,10 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
     ), ranked AS (
       SELECT *, ROW_NUMBER() OVER (
         PARTITION BY bank_code
-        ORDER BY priority_rank, COALESCE(last_answered_at, '1970-01-01'), sort_order, question_code
+        ORDER BY priority_rank,
+          CASE WHEN score_rate BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
+          CASE frequency WHEN '高频' THEN 0 WHEN '中频' THEN 1 ELSE 2 END,
+          importance_stars DESC, COALESCE(last_answered_at, '1970-01-01'), sort_order, question_code
       ) AS bank_rank
       FROM candidates
     )
@@ -1159,6 +1432,14 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
           : String(row.bank_exam_type) === "provincial"
             ? `province:${normalizeProvince(row.bank_province)}`
             : null,
+        region: String(row.source_region || normalizeProvince(row.bank_province) || "全国"),
+        examYear: Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null,
+        frequency: String(row.frequency ?? "中频"),
+        importanceStars: Math.max(1, Math.min(5, Number(row.importance_stars ?? 3))),
+        scoreRate: Math.max(0, Math.min(100, Number(row.score_rate ?? 60))),
+        suggestedSeconds: Math.max(10, Number(row.suggested_seconds ?? 60)),
+        imageUrl: String(row.image_url ?? ""),
+        resourceUrl: String(row.resource_url ?? ""),
       },
       progress,
     };
@@ -1177,7 +1458,16 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   }
   const mode = payload.mode === "review" ? "review" : "mixed";
   const focusModule = trimmed(payload.focusModule, 40);
+  const focusSubTypes = Array.isArray(payload.focusSubTypes)
+    ? payload.focusSubTypes.map((value) => trimmed(value, 40)).filter(Boolean).slice(0, 12)
+    : [];
   const strictFocus = payload.strictFocus === true;
+  const requestedFrequency = new Set(["高频", "中频", "低频"]).has(String(payload.frequency)) ? String(payload.frequency) : "";
+  const minImportanceStars = Math.max(0, Math.min(5, Math.floor(Number(payload.importanceStars)) || 0));
+  const rawScoreRateMin = Math.max(0, Math.min(100, Number(payload.scoreRateMin) || 0));
+  const rawScoreRateMax = Math.max(0, Math.min(100, Number(payload.scoreRateMax) || 100));
+  const scoreRateMin = Math.min(rawScoreRateMin, rawScoreRateMax);
+  const scoreRateMax = Math.max(rawScoreRateMin, rawScoreRateMax);
   const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
   const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
   const requestedLimit = Math.max(1, Math.min(active ? 20 : 5, Math.floor(Number(payload.limit)) || 10));
@@ -1196,9 +1486,17 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     ? starter.map((question) => ({ question, progress: starterMap.get(question.id) }))
     : [];
   candidates.push(...await dbQuestionCandidates(userId, bankCodes.filter((code) => code !== STARTER_BANK_CODE)));
+  const [profile, strategy] = await Promise.all([loadExamProfile(userId), loadStrategyConfig()]);
+  const sweetSpot: [number, number] = [Number(strategy.scoreRateSweetSpot[0]), Number(strategy.scoreRateSweetSpot[1])];
+  const valueWeights = {
+    frequency: Math.max(0, Math.min(100, Number(strategy.frequencyWeight ?? 25))),
+    importance: Math.max(0, Math.min(100, Number(strategy.importanceWeight ?? 25))),
+    scoreRate: Math.max(0, Math.min(100, Number(strategy.scoreRateWeight ?? 20))),
+  };
   const bankOrder = new Map(bankCodes.map((code, index) => [code, index]));
   const allSorted = [...candidates].sort((a, b) => priorityFor(a.progress) - priorityFor(b.progress)
     || Number(bankOrder.get(a.question.bankCode) ?? 99) - Number(bankOrder.get(b.question.bankCode) ?? 99)
+    || questionValueRank(a.question, sweetSpot, valueWeights) - questionValueRank(b.question, sweetSpot, valueWeights)
     || (a.progress?.last_answered_at ?? "").localeCompare(b.progress?.last_answered_at ?? ""));
 
   const fingerprintBanks = new Map<string, Set<string>>();
@@ -1221,11 +1519,10 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     },
   }));
 
-  const profile = await loadExamProfile(userId);
   const urgentTargets = new Set(profile.targets.filter((target) => {
     if (!target.examDate) return false;
     const days = Math.ceil((Date.parse(`${target.examDate}T23:59:59+08:00`) - Date.now()) / 86_400_000);
-    return Number.isFinite(days) && days >= 0 && days <= 30;
+    return Number.isFinite(days) && days >= 0 && days <= strategy.urgentDays;
   }).map((target) => target.code));
   const targetByBank = new Map(candidates.map((item) => [item.question.bankCode, item.question.targetCode]));
   const urgentBankCodes = new Set(bankCodes.filter((code) => {
@@ -1233,7 +1530,9 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     return Boolean(targetCode && urgentTargets.has(targetCode));
   }));
   const otherBankCodes = bankCodes.filter((code) => code !== primaryBankCode);
-  const bankCycle = primaryBankCode ? [primaryBankCode, ...otherBankCodes, primaryBankCode] : [...bankCodes];
+  const regionWeight = Math.max(0, Math.min(100, Number(strategy.regionWeight ?? 30)));
+  const primaryRepeats = primaryBankCode ? Math.max(1, Math.min(3, 1 + Math.round(regionWeight / 50))) : 0;
+  const bankCycle = primaryBankCode ? [...Array(primaryRepeats).fill(primaryBankCode), ...otherBankCodes] : [...bankCodes];
   for (const code of otherBankCodes) if (urgentBankCodes.has(code)) bankCycle.push(code);
 
   let chosen: typeof sorted;
@@ -1245,7 +1544,18 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     const due = sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now()));
     takeBalanced(due, requestedLimit, chosen, bankCycle);
   } else if (strictFocus && focusModule) {
-    const focusPool = sorted.filter((item) => item.question.module.includes(focusModule) || item.question.knowledge.includes(focusModule));
+    const frequencyRank: Record<string, number> = { 低频: 1, 中频: 2, 高频: 3 };
+    const minimumFrequencyRank = requestedFrequency ? frequencyRank[requestedFrequency] : 0;
+    const focusPool = sorted.filter((item) => {
+      const moduleMatches = item.question.module.includes(focusModule)
+        || item.question.knowledge.includes(focusModule)
+        || focusSubTypes.some((subType) => item.question.module.includes(subType) || item.question.knowledge.includes(subType));
+      return moduleMatches
+        && (frequencyRank[item.question.frequency] ?? 0) >= minimumFrequencyRank
+        && item.question.importanceStars >= minImportanceStars
+        && item.question.scoreRate >= scoreRateMin
+        && item.question.scoreRate <= scoreRateMax;
+    });
     chosen = [];
     takeBalanced(focusPool, requestedLimit, chosen, bankCycle);
   } else {
@@ -1253,7 +1563,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     const fresh = sorted.filter((item) => !item.progress);
     const focusFresh = focusModule ? fresh.filter((item) => item.question.module.includes(focusModule) || item.question.knowledge.includes(focusModule)) : fresh;
     const selectedItems: typeof sorted = [];
-    takeBalanced(due, Math.ceil(requestedLimit * 0.6), selectedItems, bankCycle);
+    takeBalanced(due, Math.ceil(requestedLimit * strategy.dueShare), selectedItems, bankCycle);
     takeBalanced(focusFresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     takeBalanced(fresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     takeBalanced(due, requestedLimit - selectedItems.length, selectedItems, bankCycle);
@@ -1292,11 +1602,81 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   });
 }
 
+async function getEssayPracticeBatch(userId: string, payload: Record<string, unknown>) {
+  const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
+  const selected = (await selectedBankCodes(userId)).filter((code) => code !== STARTER_BANK_CODE);
+  const allowed = new Set(selected);
+  const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
+  if (!bankCodes.length) return json({ questions: [], mode: "essay", limit: 0, access: "preview" });
+  const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
+  const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
+  const limit = Math.max(1, Math.min(active ? 10 : 2, Math.floor(Number(payload.limit)) || 3));
+  const placeholders = bankCodes.map(() => "?").join(",");
+  const focusModule = trimmed(payload.focusModule, 40);
+  const moduleClause = focusModule ? "AND (q.module LIKE ? OR q.sub_type LIKE ?)" : "";
+  const bindings: unknown[] = [...bankCodes];
+  if (focusModule) bindings.push(`%${focusModule}%`, `%${focusModule}%`);
+  const rows = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.material, q.prompt,
+    q.word_limit, q.scoring_points_json, q.explanation, q.technique, q.source, q.source_region, q.source_year,
+    q.frequency, q.importance_stars, q.score_rate, q.suggested_seconds, q.image_url, q.resource_url,
+    qb.bank_code, qb.name AS bank_name, qb.exam_type, qb.province
+    FROM questions q
+    JOIN question_bank_items qbi ON qbi.question_id = q.id
+    JOIN question_banks qb ON qb.id = qbi.bank_id
+    WHERE q.status = 'active' AND q.subject = '申论' AND qb.status = 'published'
+      AND qb.bank_code IN (${placeholders}) ${moduleClause}
+    GROUP BY q.question_code
+    ORDER BY CASE WHEN q.score_rate BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
+      CASE q.frequency WHEN '高频' THEN 0 WHEN '中频' THEN 1 ELSE 2 END,
+      q.importance_stars DESC, q.source_year DESC, q.question_code
+    LIMIT ?`).bind(...bindings, limit).all<Record<string, unknown>>();
+  const questions = rows.results.map((row) => {
+    const region = String(row.source_region || normalizeProvince(row.province) || "全国");
+    const examYear = Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null;
+    let scoringPoints: string[] = [];
+    try {
+      const parsed = JSON.parse(String(row.scoring_points_json ?? "[]"));
+      if (Array.isArray(parsed)) scoringPoints = parsed.map(String);
+    } catch {
+      scoringPoints = [];
+    }
+    return {
+      id: String(row.question_code),
+      subject: "申论",
+      module: String(row.module),
+      subType: String(row.sub_type ?? ""),
+      stem: String(row.stem),
+      material: String(row.material ?? ""),
+      prompt: String(row.prompt ?? ""),
+      wordLimit: Number(row.word_limit ?? 0) || null,
+      scoringPoints,
+      reference: active ? String(row.explanation ?? "") : "会员可查看参考答案与得分点。",
+      technique: active ? String(row.technique ?? "") : "",
+      source: String(row.source ?? ""),
+      region,
+      examYear,
+      truthLabel: examYear ? `${region}-${examYear}` : region,
+      frequency: String(row.frequency ?? "中频"),
+      importanceStars: Number(row.importance_stars ?? 3),
+      scoreRate: Number(row.score_rate ?? 60),
+      suggestedSeconds: Number(row.suggested_seconds ?? 600),
+      imageUrl: String(row.image_url ?? ""),
+      resourceUrl: String(row.resource_url ?? ""),
+      bankCode: String(row.bank_code),
+      bankName: String(row.bank_name),
+      scopeLabel: questionScopeLabel(String(row.exam_type), row.province),
+    };
+  });
+  return json({ questions, mode: "essay", limit, access: active ? "premium" : "preview" });
+}
+
 async function resolveQuestion(questionCode: string, bankCode: string) {
   const starter = starterQuestionList().find((question) => question.id === questionCode && bankCode === STARTER_BANK_CODE);
   if (starter) return starter;
   const row = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json, q.answer,
-    q.explanation, q.technique, q.difficulty, q.source, q.updated_at, qb.bank_code, qb.name AS bank_name,
+    q.explanation, q.technique, q.difficulty, q.source, q.updated_at, q.source_region, q.source_year,
+    q.frequency, q.importance_stars, q.score_rate, q.suggested_seconds, q.image_url, q.resource_url,
+    qb.bank_code, qb.name AS bank_name,
     qb.exam_type AS bank_exam_type, qb.province AS bank_province
     FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
     JOIN question_banks qb ON qb.id = qbi.bank_id
@@ -1315,6 +1695,14 @@ async function resolveQuestion(questionCode: string, bankCode: string) {
       : String(row.bank_exam_type) === "provincial"
         ? `province:${normalizeProvince(row.bank_province)}`
         : null,
+    region: String(row.source_region || normalizeProvince(row.bank_province) || "全国"),
+    examYear: Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null,
+    frequency: String(row.frequency ?? "中频"),
+    importanceStars: Math.max(1, Math.min(5, Number(row.importance_stars ?? 3))),
+    scoreRate: Math.max(0, Math.min(100, Number(row.score_rate ?? 60))),
+    suggestedSeconds: Math.max(10, Number(row.suggested_seconds ?? 60)),
+    imageUrl: String(row.image_url ?? ""),
+    resourceUrl: String(row.resource_url ?? ""),
   } satisfies ResolvedQuestion;
 }
 
@@ -1333,20 +1721,22 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     .first<{ state: string; correct_count: number; wrong_count: number; uncertain_count: number; review_count: number;
       review_stage: number; next_review_at: string | null; last_answered_at: string | null }>();
   const correct = selectedAnswer === question.answer;
-  const targetSeconds = targetSecondsFor(question);
+  const strategy = await loadStrategyConfig();
+  const targetSeconds = question.suggestedSeconds || targetSecondsFor(question);
   const overtime = durationMs > targetSeconds * 1000;
   const needsReview = !correct || uncertain || overtime;
   const isDue = Boolean(previous?.next_review_at && Date.parse(previous.next_review_at) <= Date.now());
   const correctCount = Number(previous?.correct_count ?? 0) + (correct ? 1 : 0);
   const wrongCount = Number(previous?.wrong_count ?? 0) + (correct ? 0 : 1);
   const uncertainCount = Number(previous?.uncertain_count ?? 0) + (uncertain ? 1 : 0);
-  const previousStage = Math.max(0, Math.min(4, Number(previous?.review_stage ?? 0)));
+  const finalStage = Math.max(0, strategy.reviewIntervals.length - 1);
+  const previousStage = Math.max(0, Math.min(finalStage, Number(previous?.review_stage ?? 0)));
   const reviewStage = needsReview
     ? 0
     : previous
-      ? isDue ? Math.min(4, previousStage + 1) : Math.max(1, previousStage)
-      : 1;
-  const reviewDays = [1, 3, 7, 14, 30][reviewStage];
+      ? isDue ? Math.min(finalStage, previousStage + 1) : Math.max(Math.min(1, finalStage), previousStage)
+      : Math.min(1, finalStage);
+  const reviewDays = strategy.reviewIntervals[reviewStage] ?? 1;
   const state = needsReview ? "weak" : reviewStage >= 2 ? "mastered" : "learning";
   const nextReviewAt = reviewAtAfterChinaDays(reviewDays);
   const results = await db.batch([
@@ -1539,16 +1929,135 @@ function isAdmin(payload: Record<string, unknown>) {
   return Boolean(configured && supplied && configured === supplied);
 }
 
+function getMediaBucket() {
+  return (env as unknown as { MEDIA?: R2Bucket }).MEDIA ?? null;
+}
+
+async function digestBytes(value: ArrayBuffer) {
+  const digest = await crypto.subtle.digest("SHA-256", value);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function adminUploadMedia(request: Request) {
+  const form = await request.formData();
+  if (!isAdmin({ adminToken: form.get("adminToken") })) return json({ error: "管理员口令错误" }, 401);
+  const value = form.get("file");
+  if (!(value instanceof File)) return json({ error: "请选择要上传的文件" }, 400);
+  const allowed = /^(audio\/|image\/)|^application\/(pdf|octet-stream)$/i.test(value.type);
+  if (!allowed) return json({ error: "仅支持音频、图片或PDF文件" }, 400);
+  if (value.size < 1 || value.size > 25 * 1024 * 1024) return json({ error: "文件大小需在1B—25MB之间" }, 400);
+  const bytes = await value.arrayBuffer();
+  const id = crypto.randomUUID();
+  const safeName = value.name.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(-120) || "asset";
+  const objectKey = `${chinaDateKey().replaceAll("-", "/")}/${id}-${safeName}`;
+  const checksum = await digestBytes(bytes);
+  const bucket = getMediaBucket();
+  let storage = "r2";
+  let fallbackData: string | null = null;
+  if (bucket) {
+    await bucket.put(objectKey, bytes, { httpMetadata: { contentType: value.type || "application/octet-stream" } });
+  } else {
+    if (value.size > 2 * 1024 * 1024) {
+      return json({ error: "本地预览未绑定媒体存储，仅允许2MB以内文件；发布环境会自动使用R2存储。" }, 503);
+    }
+    storage = "d1-fallback";
+    fallbackData = bytesToBase64(new Uint8Array(bytes));
+  }
+  await getD1().prepare(`INSERT INTO media_assets
+    (id, object_key, file_name, content_type, byte_size, checksum, storage, fallback_data, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
+    .bind(id, objectKey, value.name.slice(0, 180), value.type || "application/octet-stream", value.size,
+      checksum, storage, fallbackData).run();
+  return json({
+    ok: true,
+    asset: { id, fileName: value.name, contentType: value.type, byteSize: value.size, storage, url: `/api/app?media=${id}` },
+  }, 201);
+}
+
+function requestedByteRange(header: string | null, size: number) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
+  if (!match) return { invalid: true as const };
+  let start = match[1] ? Number(match[1]) : NaN;
+  let end = match[2] ? Number(match[2]) : NaN;
+  if (!Number.isFinite(start) && Number.isFinite(end)) {
+    const suffixLength = Math.min(size, Math.max(0, end));
+    start = size - suffixLength;
+    end = size - 1;
+  } else {
+    if (!Number.isFinite(start)) start = 0;
+    if (!Number.isFinite(end)) end = size - 1;
+  }
+  start = Math.max(0, Math.floor(start));
+  end = Math.min(size - 1, Math.floor(end));
+  if (start > end || start >= size) return { invalid: true as const };
+  return { invalid: false as const, start, end, length: end - start + 1 };
+}
+
+async function serveMedia(assetId: string, request: Request) {
+  if (!/^[0-9a-f-]{36}$/i.test(assetId)) return json({ error: "媒体不存在" }, 404);
+  const row = await getD1().prepare(`SELECT object_key, file_name, content_type, byte_size, storage, fallback_data
+    FROM media_assets WHERE id = ? AND status = 'active'`).bind(assetId).first<{
+      object_key: string; file_name: string; content_type: string; byte_size: number; storage: string; fallback_data: string | null;
+    }>();
+  if (!row) return json({ error: "媒体不存在" }, 404);
+  const headers = new Headers({
+    "content-type": row.content_type,
+    "cache-control": "public, max-age=31536000, immutable",
+    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(row.file_name)}`,
+    "accept-ranges": "bytes",
+  });
+  const range = requestedByteRange(request.headers.get("range"), row.byte_size);
+  if (range?.invalid) {
+    headers.set("content-range", `bytes */${row.byte_size}`);
+    return new Response(null, { status: 416, headers });
+  }
+  const status = range ? 206 : 200;
+  headers.set("content-length", String(range?.length ?? row.byte_size));
+  if (range) headers.set("content-range", `bytes ${range.start}-${range.end}/${row.byte_size}`);
+  if (row.storage === "r2") {
+    const bucket = getMediaBucket();
+    if (!bucket) return json({ error: "媒体存储暂不可用" }, 503);
+    const object = await bucket.get(row.object_key, range ? { range: { offset: range.start, length: range.length } } : undefined);
+    if (!object) return json({ error: "媒体文件已丢失" }, 404);
+    object.writeHttpMetadata(headers);
+    return new Response(object.body, { status, headers });
+  }
+  if (!row.fallback_data) return json({ error: "媒体文件已丢失" }, 404);
+  const bytes = base64ToBytes(row.fallback_data);
+  const body = range ? bytes.slice(range.start, range.end + 1) : bytes;
+  return new Response(body, { status, headers });
+}
+
 async function adminList(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const db = getD1();
-  const [codes, redemptions, content, questionBanks, questionImports, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
+  const [codes, redemptions, content, mediaAssets, questionBanks, questionImports, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
     db.prepare(`SELECT id, code_preview, batch_name, duration_days, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 100`).all(),
     db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 100`).all(),
-    db.prepare(`SELECT id, content_type, content_key, title, status, publish_at, updated_at
-      FROM content_items ORDER BY id DESC LIMIT 100`).all(),
+    db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json, ci.status,
+      ci.publish_at, ci.version, ci.updated_at,
+      (SELECT COUNT(*) FROM content_item_versions civ WHERE civ.content_id = ci.id) AS version_count
+      FROM content_items ci ORDER BY ci.id DESC LIMIT 500`).all(),
+    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, status, created_at,
+      '/api/app?media=' || id AS url FROM media_assets ORDER BY created_at DESC LIMIT 200`).all(),
     db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
       b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
       FROM question_banks b LEFT JOIN question_bank_items i ON i.bank_id = b.id
@@ -1567,7 +2076,12 @@ async function adminList(payload: Record<string, unknown>) {
   return json({
     codes: codes.results,
     redemptions: redemptions.results,
-    content: content.results,
+    content: content.results.map((item) => {
+      let parsed: unknown = {};
+      try { parsed = JSON.parse(String((item as Record<string, unknown>).payload_json ?? "{}")); } catch { parsed = {}; }
+      return { ...item, payload: parsed };
+    }),
+    mediaAssets: mediaAssets.results,
     questionBanks: questionBanks.results,
     questionImports: questionImports.results,
     analytics: { activeUsers: Number(activeUsers?.count ?? 0), eventCounts: eventCounts.results },
@@ -1625,16 +2139,17 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   if (!Array.isArray(payload.items) || payload.items.length < 1 || payload.items.length > 100) return json({ error: "每次需导入 1—100 条内容" }, 400);
   const db = getD1();
-  const statements: D1PreparedStatement[] = [];
+  const saved: Array<{ id: number; contentKey: string; version: number }> = [];
   for (const raw of payload.items) {
     const item = raw as Record<string, unknown>;
     const contentType = String(item.contentType ?? "");
     const contentKey = String(item.contentKey ?? "").trim();
     const title = String(item.title ?? "").trim().slice(0, 120);
-    const status = item.status === "published" ? "published" : "draft";
-    if (!new Set(["practice_day", "audio_track", "exam_event", "exam_notice", "job_position"]).has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
+    let status = CONTENT_STATUSES.has(String(item.status)) ? String(item.status) : "draft";
+    if (!CONTENT_TYPES.has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
     if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(contentKey) || !title) return json({ error: "内容标识或标题无效" }, 400);
-    const payloadJson = JSON.stringify(item.payload ?? {});
+    if (!item.payload || typeof item.payload !== "object" || Array.isArray(item.payload)) return json({ error: `${contentKey} 内容必须是结构化对象` }, 400);
+    const payloadJson = JSON.stringify(item.payload);
     if (payloadJson.length > 120_000) return json({ error: `${contentKey} 内容过大` }, 400);
     let publishAt: string | null = null;
     if (item.publishAt) {
@@ -1642,21 +2157,139 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
       if (!Number.isFinite(value)) return json({ error: `${contentKey} 发布时间无效` }, 400);
       publishAt = new Date(value).toISOString();
     }
-    statements.push(db.prepare(`INSERT INTO content_items
-      (content_type, content_key, title, payload_json, status, publish_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(content_key) DO UPDATE SET content_type = excluded.content_type, title = excluded.title,
-        payload_json = excluded.payload_json, status = excluded.status, publish_at = excluded.publish_at, updated_at = CURRENT_TIMESTAMP`)
-      .bind(contentType, contentKey, title, payloadJson, status, publishAt));
+    if (status === "scheduled" && (!publishAt || Date.parse(publishAt) <= Date.now())) return json({ error: `${contentKey} 定时发布时间必须晚于当前时间` }, 400);
+    if (status === "published" && publishAt && Date.parse(publishAt) > Date.now()) status = "scheduled";
+    const existing = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
+      publish_at, version FROM content_items WHERE content_key = ?`).bind(contentKey).first<Record<string, unknown>>();
+    if (existing) {
+      const currentVersion = Math.max(1, Number(existing.version ?? 1));
+      const nextVersion = currentVersion + 1;
+      await db.batch([
+        db.prepare(`INSERT OR IGNORE INTO content_item_versions
+          (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+          .bind(Number(existing.id), currentVersion, String(existing.content_type), String(existing.content_key),
+            String(existing.title), String(existing.payload_json), String(existing.status), existing.publish_at ?? null),
+        db.prepare(`UPDATE content_items SET content_type = ?, title = ?, payload_json = ?, status = ?,
+          publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+          .bind(contentType, title, payloadJson, status, publishAt, nextVersion, Number(existing.id)),
+        db.prepare(`INSERT OR REPLACE INTO content_item_versions
+          (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'update')`)
+          .bind(Number(existing.id), nextVersion, contentType, contentKey, title, payloadJson, status, publishAt),
+      ]);
+      saved.push({ id: Number(existing.id), contentKey, version: nextVersion });
+    } else {
+      const inserted = await db.prepare(`INSERT INTO content_items
+        (content_type, content_key, title, payload_json, status, publish_at, version, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`)
+        .bind(contentType, contentKey, title, payloadJson, status, publishAt).run();
+      const id = Number(inserted.meta.last_row_id);
+      await db.prepare(`INSERT INTO content_item_versions
+        (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+        VALUES (?, 1, ?, ?, ?, ?, ?, ?, 'create')`)
+        .bind(id, contentType, contentKey, title, payloadJson, status, publishAt).run();
+      saved.push({ id, contentKey, version: 1 });
+    }
   }
-  await db.batch(statements);
-  return json({ ok: true, count: statements.length });
+  return json({ ok: true, count: saved.length, items: saved });
 }
 
 async function adminDisableContent(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  await getD1().prepare("UPDATE content_items SET status = 'draft', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(Number(payload.id)).run();
-  return json({ ok: true });
+  return adminSetContentStatus({ ...payload, status: "archived" });
+}
+
+async function adminSetContentStatus(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const id = Math.floor(Number(payload.id));
+  const status = String(payload.status ?? "draft");
+  if (!Number.isFinite(id) || id < 1 || !CONTENT_STATUSES.has(status)) return json({ error: "内容或状态无效" }, 400);
+  const db = getD1();
+  const current = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
+    publish_at, version FROM content_items WHERE id = ?`).bind(id).first<Record<string, unknown>>();
+  if (!current) return json({ error: "内容不存在" }, 404);
+  const nextVersion = Math.max(1, Number(current.version ?? 1)) + 1;
+  let publishAt = current.publish_at ? String(current.publish_at) : null;
+  if (status === "published") publishAt = null;
+  if (status === "scheduled" && (!publishAt || Date.parse(publishAt) <= Date.now())) return json({ error: "请先设置未来的发布时间" }, 400);
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+      .bind(id, Number(current.version ?? 1), String(current.content_type), String(current.content_key),
+        String(current.title), String(current.payload_json), String(current.status), current.publish_at ?? null),
+    db.prepare("UPDATE content_items SET status = ?, publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(status, publishAt, nextVersion, id),
+    db.prepare(`INSERT OR REPLACE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'status')`)
+      .bind(id, nextVersion, String(current.content_type), String(current.content_key), String(current.title),
+        String(current.payload_json), status, publishAt),
+  ]);
+  return json({ ok: true, id, status, version: nextVersion });
+}
+
+async function adminListContentVersions(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const id = Math.floor(Number(payload.id));
+  if (!Number.isFinite(id) || id < 1) return json({ error: "内容不存在" }, 400);
+  const rows = await getD1().prepare(`SELECT id, content_id, version, content_type, content_key, title,
+    payload_json, status, publish_at, change_type, created_at
+    FROM content_item_versions WHERE content_id = ? ORDER BY version DESC LIMIT 100`).bind(id).all();
+  return json({ ok: true, versions: rows.results });
+}
+
+async function adminRollbackContent(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const contentId = Math.floor(Number(payload.id));
+  const version = Math.floor(Number(payload.version));
+  const db = getD1();
+  const [current, snapshot] = await Promise.all([
+    db.prepare("SELECT * FROM content_items WHERE id = ?").bind(contentId).first<Record<string, unknown>>(),
+    db.prepare("SELECT * FROM content_item_versions WHERE content_id = ? AND version = ?")
+      .bind(contentId, version).first<Record<string, unknown>>(),
+  ]);
+  if (!current || !snapshot) return json({ error: "内容或历史版本不存在" }, 404);
+  const nextVersion = Math.max(1, Number(current.version ?? 1)) + 1;
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+      .bind(contentId, Number(current.version ?? 1), String(current.content_type), String(current.content_key),
+        String(current.title), String(current.payload_json), String(current.status), current.publish_at ?? null),
+    db.prepare(`UPDATE content_items SET content_type = ?, title = ?, payload_json = ?, status = ?,
+      publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(String(snapshot.content_type), String(snapshot.title), String(snapshot.payload_json), String(snapshot.status),
+        snapshot.publish_at ?? null, nextVersion, contentId),
+    db.prepare(`INSERT OR REPLACE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'rollback')`)
+      .bind(contentId, nextVersion, String(snapshot.content_type), String(current.content_key), String(snapshot.title),
+        String(snapshot.payload_json), String(snapshot.status), snapshot.publish_at ?? null),
+  ]);
+  return json({ ok: true, id: contentId, restoredFrom: version, version: nextVersion });
+}
+
+async function adminDuplicateContent(payload: Record<string, unknown>) {
+  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  const id = Math.floor(Number(payload.id));
+  const newKey = trimmed(payload.contentKey, 80);
+  const title = trimmed(payload.title, 120);
+  if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(newKey)) return json({ error: "新内容标识无效" }, 400);
+  const db = getD1();
+  const source = await db.prepare("SELECT * FROM content_items WHERE id = ?").bind(id).first<Record<string, unknown>>();
+  if (!source) return json({ error: "源内容不存在" }, 404);
+  const result = await db.prepare(`INSERT INTO content_items
+    (content_type, content_key, title, payload_json, status, publish_at, version, updated_at)
+    VALUES (?, ?, ?, ?, 'draft', NULL, 1, CURRENT_TIMESTAMP)`)
+    .bind(String(source.content_type), newKey, title || `${String(source.title)}（副本）`, String(source.payload_json)).run();
+  const newId = Number(result.meta.last_row_id);
+  await db.prepare(`INSERT INTO content_item_versions
+    (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
+    VALUES (?, 1, ?, ?, ?, ?, 'draft', NULL, 'duplicate')`)
+    .bind(newId, String(source.content_type), newKey, title || `${String(source.title)}（副本）`, String(source.payload_json)).run();
+  return json({ ok: true, id: newId, contentKey: newKey, version: 1 });
 }
 
 function trimmed(value: unknown, maxLength: number) {
@@ -1737,6 +2370,18 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   const prompt = trimmed(item.prompt, 2_000);
   const explanation = trimmed(item.explanation, 8_000);
   const source = trimmed(item.source, 120);
+  const region = trimmed(item.region ?? item.sourceRegion, 24).replace(/[·•]/g, "-");
+  const examYear = Math.floor(Number(item.examYear ?? item.sourceYear));
+  const frequency = new Set(["高频", "中频", "低频"]).has(String(item.frequency)) ? String(item.frequency) : "中频";
+  const importanceStars = Math.max(1, Math.min(5, Math.floor(Number(item.importanceStars)) || 3));
+  const scoreRate = Math.max(0, Math.min(100, Math.round(Number(item.scoreRate))));
+  const suggestedSeconds = Math.max(10, Math.min(subject === "申论" ? 3600 : 900, Math.round(Number(item.suggestedSeconds)) || 60));
+  const safeAssetUrl = (value: unknown) => {
+    const url = trimmed(value, 500);
+    return /^(https?:\/\/|\/api\/app\?media=)/i.test(url) ? url : "";
+  };
+  const imageUrl = safeAssetUrl(item.imageUrl);
+  const resourceUrl = safeAssetUrl(item.resourceUrl);
   const options = Array.isArray(item.options) ? item.options.map((value) => trimmed(value, 2_000)).filter(Boolean).slice(0, 8) : [];
   const scoringPoints = Array.isArray(item.scoringPoints) ? item.scoringPoints.map((value) => trimmed(value, 500)).filter(Boolean).slice(0, 30) : [];
   const answer = trimmed(item.answer, 8).toUpperCase() || null;
@@ -1744,7 +2389,10 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   if (!new Set(["行测", "申论"]).has(subject)) return { error: "科目只能是行测或申论" };
   if (!questionModule) return { error: "模块不能为空" };
   if (!stem) return { error: "题干/材料不能为空" };
-  if (!source) return { error: "来源不能为空，请填写考试、年份或原创说明" };
+  if (!source) return { error: "真题来源不能为空" };
+  if (!region) return { error: "真题必须填写地区" };
+  if (!Number.isInteger(examYear) || examYear < 1990 || examYear > new Date().getFullYear()) return { error: "真题年份无效" };
+  if (!Number.isFinite(Number(item.scoreRate)) || scoreRate < 0 || scoreRate > 100) return { error: "拿分率需为0—100" };
   if (!explanation) return { error: "解析/参考答案不能为空" };
   if (subject === "行测" && (options.length < 2 || !answer || !/^[A-H]$/.test(answer))) return { error: "行测题必须填写至少2个选项及A—H正确答案" };
   if (subject === "申论" && !prompt) return { error: "申论题必须填写申论任务" };
@@ -1766,6 +2414,14 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
     scoringPoints,
     difficulty: new Set(["简单", "中等", "较难"]).has(String(item.difficulty)) ? String(item.difficulty) : "中等",
     source,
+    region,
+    examYear,
+    frequency,
+    importanceStars,
+    scoreRate,
+    suggestedSeconds,
+    imageUrl,
+    resourceUrl,
   } };
 }
 
@@ -1827,18 +2483,24 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
       statements.push(
         db.prepare(`INSERT INTO questions
           (question_code, subject, module, sub_type, stem, options_json, answer, explanation, technique,
-           material, prompt, word_limit, scoring_points_json, difficulty, source, status, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+           material, prompt, word_limit, scoring_points_json, difficulty, source, source_region, source_year,
+           frequency, importance_stars, score_rate, suggested_seconds, image_url, resource_url, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
           ON CONFLICT(question_code) DO UPDATE SET subject = excluded.subject, module = excluded.module,
             sub_type = excluded.sub_type, stem = excluded.stem, options_json = excluded.options_json,
             answer = excluded.answer, explanation = excluded.explanation, technique = excluded.technique,
             material = excluded.material, prompt = excluded.prompt, word_limit = excluded.word_limit,
             scoring_points_json = excluded.scoring_points_json, difficulty = excluded.difficulty,
-            source = excluded.source, status = 'active', updated_at = CURRENT_TIMESTAMP`)
+            source = excluded.source, source_region = excluded.source_region, source_year = excluded.source_year,
+            frequency = excluded.frequency, importance_stars = excluded.importance_stars,
+            score_rate = excluded.score_rate, suggested_seconds = excluded.suggested_seconds,
+            image_url = excluded.image_url, resource_url = excluded.resource_url,
+            status = 'active', updated_at = CURRENT_TIMESTAMP`)
           .bind(item.questionCode, item.subject, item.module, item.subType ?? "", item.stem,
             JSON.stringify(item.options ?? []), item.answer ?? null, item.explanation ?? "", item.technique ?? "",
             item.material ?? "", item.prompt ?? "", item.wordLimit ?? null, JSON.stringify(item.scoringPoints ?? []),
-            item.difficulty ?? "中等", item.source ?? ""),
+            item.difficulty ?? "中等", item.source ?? "", item.region, item.examYear, item.frequency,
+            item.importanceStars, item.scoreRate, item.suggestedSeconds, item.imageUrl, item.resourceUrl),
         db.prepare(`INSERT OR IGNORE INTO question_bank_items (bank_id, question_id, sort_order)
           SELECT ?, id, ? FROM questions WHERE question_code = ?`).bind(bankId, offset + index, item.questionCode),
       );
@@ -1847,7 +2509,24 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
   }
   await db.prepare(`UPDATE question_imports SET imported_rows = imported_rows + ?, failed_rows = failed_rows + ?
     WHERE id = ?`).bind(accepted.length, errors.length, importId).run();
-  return json({ ok: true, imported: accepted.length, failed: errors.length, errors });
+  return json({
+    ok: true,
+    imported: accepted.length,
+    failed: errors.length,
+    errors,
+    importedQuestions: accepted.map(({ question }) => ({
+      questionCode: question.questionCode,
+      region: question.region,
+      examYear: question.examYear,
+      truthLabel: `${question.region}-${question.examYear}`,
+      frequency: question.frequency,
+      importanceStars: question.importanceStars,
+      scoreRate: question.scoreRate,
+      suggestedSeconds: question.suggestedSeconds,
+      imageUrl: question.imageUrl,
+      resourceUrl: question.resourceUrl,
+    })),
+  });
 }
 
 async function adminFinishQuestionImport(payload: Record<string, unknown>) {
@@ -1866,13 +2545,21 @@ async function adminFinishQuestionImport(payload: Record<string, unknown>) {
 }
 
 export async function GET(request: Request) {
-  try { return await bootstrap(request); } catch (error) { return json({ error: error instanceof Error ? error.message : "初始化失败" }, 500); }
+  try {
+    await ensureSchema();
+    const mediaId = new URL(request.url).searchParams.get("media");
+    if (mediaId) return serveMedia(mediaId, request);
+    return await bootstrap(request);
+  } catch (error) { return json({ error: error instanceof Error ? error.message : "初始化失败" }, 500); }
 }
 
 export async function POST(request: Request) {
   try {
     await ensureSchema();
     await seedDefaults();
+    if ((request.headers.get("content-type") ?? "").toLowerCase().includes("multipart/form-data")) {
+      return adminUploadMedia(request);
+    }
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action ?? "");
     if (action.startsWith("admin")) {
@@ -1882,6 +2569,10 @@ export async function POST(request: Request) {
       if (action === "adminUpdateConfig") return adminUpdateConfig(payload);
       if (action === "adminUpsertContentBatch") return adminUpsertContentBatch(payload);
       if (action === "adminDisableContent") return adminDisableContent(payload);
+      if (action === "adminSetContentStatus") return adminSetContentStatus(payload);
+      if (action === "adminListContentVersions") return adminListContentVersions(payload);
+      if (action === "adminRollbackContent") return adminRollbackContent(payload);
+      if (action === "adminDuplicateContent") return adminDuplicateContent(payload);
       if (action === "adminUpsertQuestionBank") return adminUpsertQuestionBank(payload);
       if (action === "adminSetQuestionBankStatus") return adminSetQuestionBankStatus(payload);
       if (action === "adminStartQuestionImport") return adminStartQuestionImport(payload);
@@ -1895,6 +2586,7 @@ export async function POST(request: Request) {
     else if (action === "saveExamProfile") response = await saveExamProfile(identity.userId, payload);
     else if (action === "toggleQuestionBank") response = await toggleQuestionBank(identity.userId, payload);
     else if (action === "getPracticeBatch") response = await getPracticeBatch(identity.userId, payload);
+    else if (action === "getEssayPracticeBatch") response = await getEssayPracticeBatch(identity.userId, payload);
     else if (action === "submitPracticeAnswer") response = await submitPracticeAnswer(identity.userId, payload);
     else if (action === "updateQuestionMeta") response = await updateQuestionMeta(identity.userId, payload);
     else if (action === "bindInvite") response = await bindInvite(identity.userId, payload);

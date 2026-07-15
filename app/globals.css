@@ -162,7 +162,7 @@ button { color: inherit; }
 .quick-practice-grid span { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 11px; color: var(--blue); background: var(--blue-soft); font-size: 11px; font-weight: 900; }
 .quick-practice-grid b { font-size: 10px; line-height: 1.25; }
 .quick-practice-grid small { color: var(--muted); font-size: 8px; }
-.quick-tool-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.quick-tool-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin-top: 10px; }
 .quick-tool-row button { display: grid; min-height: 66px; align-content: center; gap: 3px; border: 1px solid #edf1f4; border-radius: 16px; padding: 10px; background: linear-gradient(145deg, #fff, #f8fbfd); text-align: left; }
 .quick-tool-row span { color: var(--orange); font-size: 9px; font-weight: 900; }
 .quick-tool-row b { font-size: 11px; }
@@ -314,6 +314,8 @@ button { color: inherit; }
 .audio-category-card.essay header > span { background: linear-gradient(145deg, var(--orange), #f0a46b); }
 .audio-category-card.wrong { border-color: #c9e1d7; background: linear-gradient(145deg, #f0faf6, #fff); }
 .audio-category-card.wrong header > span { background: linear-gradient(145deg, var(--green), #65a78f); }
+.audio-category-card.dynamic { border-color: color-mix(in srgb, var(--series-color) 26%, #dce3ea); background: linear-gradient(145deg, color-mix(in srgb, var(--series-color) 8%, #fff), #fff); }
+.audio-category-card.dynamic header > span { background: var(--series-color); }
 .category-empty { display: block; padding: 6px 10px 10px; }
 .audio-track { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid var(--line); border-radius: 18px; padding: 12px; background: #fff; box-shadow: 0 7px 20px rgba(24, 48, 72, 0.035); }
 .audio-track.selected { border-color: #a9c4db; background: #f8fbfe; }
@@ -635,6 +637,21 @@ button { color: inherit; }
 .question-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .question-meta span { color: var(--blue); font-size: 10px; font-weight: 900; }
 .question-meta em { border-radius: 999px; padding: 4px 7px; color: var(--muted); background: #eef2f5; font-size: 8px; font-style: normal; }
+.truth-signal-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.truth-signal-row span { border: 1px solid #dbe6ee; border-radius: 999px; padding: 5px 8px; color: #52677a; background: #f7fafc; font-size: 8px; font-weight: 900; }
+.truth-signal-row .importance-stars { color: #c26a35; border-color: #f0d5c2; background: #fff7f1; letter-spacing: .04em; }
+.question-resource { overflow: hidden; margin: 12px 0; border: 1px solid #dce5ec; border-radius: 14px; background: #f8fafb; }
+.question-resource img { display: block; width: 100%; max-height: 420px; object-fit: contain; }
+.question-resource-link { display: inline-flex; min-height: 34px; align-items: center; margin: 0 0 12px; border-radius: 10px; padding: 0 10px; color: var(--blue); background: var(--blue-soft); font-size: 9px; font-weight: 900; text-decoration: none; }
+.essay-source-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.essay-source-row small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.essay-material { margin: 12px 0; border: 1px solid #dce5ec; border-radius: 14px; padding: 12px; background: #f8fafb; }
+.essay-material b { color: var(--blue); font-size: 9px; }
+.essay-material p { max-height: 260px; overflow-y: auto; margin: 8px 0 0; white-space: pre-wrap; color: #425265; font-size: 11px; line-height: 1.8; }
+.reference-answer ol { display: grid; gap: 6px; margin: 9px 0; padding-left: 20px; color: #425265; font-size: 10px; line-height: 1.65; }
+.essay-loading { min-height: 180px; }
+.reading-actions { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); }
+.inline-empty-note { border: 1px dashed #d4dee7; border-radius: 14px; padding: 14px; color: var(--muted); background: #fbfcfd; font-size: 9px; text-align: center; }
 .uncertain-button { width: 100%; min-height: 44px; margin-top: 12px; border: 1px dashed #c9d4de; border-radius: 12px; padding: 10px; color: var(--muted); background: #fafbfc; font-size: 10px; }
 .uncertain-button.active { border-color: #e4b18c; color: #9b582c; background: #fff4ec; font-weight: 800; }
 .answer-result { margin-top: 15px; border-radius: 15px; padding: 13px; background: #f2f7fb; }

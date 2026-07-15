@@ -1,6 +1,7 @@
 "use client";
 
 /* eslint-disable react-hooks/refs -- session snapshots and queued saves intentionally use refs inside event handlers */
+/* eslint-disable @next/next/no-img-element -- operator-uploaded question media can come from runtime-configured sources */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PracticeDay, Question } from "./data/content";
@@ -15,6 +16,67 @@ type PracticeKind = "daily" | "review" | "bank" | "bonus";
 type AnswerConfidence = "" | "confident" | "hesitant" | "guessed";
 type ReminderMode = "in_app" | "browser";
 type RadarMode = "notices" | "positions" | "tasks";
+type DailyStep = "morning" | "practice" | "essay";
+
+type DrillPreset = {
+  id: string;
+  title: string;
+  subtitle: string;
+  icon: string;
+  color: string;
+  subject: string;
+  module: string;
+  subTypes: string[];
+  bankCodes: string[];
+  questionCount: number;
+  minutes: number;
+  sortOrder: number;
+  enabled: boolean;
+  frequency?: string;
+  importanceStars?: number;
+  scoreRateMin?: number;
+  scoreRateMax?: number;
+};
+
+type StrategyConfig = {
+  timePlans?: Partial<Record<`${PlanMinutes}`, {
+    morning?: number;
+    practice?: number;
+    essay?: number;
+    questionCount?: number;
+  }>>;
+  reviewIntervals?: number[];
+  scoreRateSweetSpot?: [number, number];
+  dueShare?: number;
+  urgentDays?: number;
+  essayRubric?: string[];
+};
+
+type ContentEntry<T = Record<string, unknown>> = {
+  id?: string;
+  contentKey?: string;
+  title?: string;
+  payload?: T;
+} & Partial<T>;
+
+type EssayPracticeQuestion = {
+  id: string;
+  bankCode: string;
+  bankName: string;
+  material: string;
+  prompt: string;
+  wordLimit: number;
+  scoringPoints: string[];
+  reference: string;
+  region: string;
+  examYear: number | null;
+  frequency: string;
+  importanceStars: number;
+  scoreRate: number | null;
+  imageUrl: string;
+  resourceUrl: string;
+  truthLabel: string;
+};
 
 type ExamEvent = {
   id: string;
@@ -154,6 +216,9 @@ type QuestionBank = {
   recommended: boolean;
   scopeLabel: string;
   mismatchReason: string;
+  frequency?: string;
+  importanceStars?: number;
+  scoreRate?: number;
 };
 
 type StudyInsights = {
@@ -186,6 +251,15 @@ type PracticeQuestion = {
   planReason: string;
   scopeLabel: string;
   reviewedAt: string | null;
+  region?: string;
+  examYear?: number | null;
+  frequency?: string;
+  importanceStars?: number;
+  scoreRate?: number | null;
+  suggestedSeconds?: number;
+  imageUrl?: string;
+  resourceUrl?: string;
+  truthLabel?: string;
 };
 
 type AnswerFeedback = {
@@ -238,6 +312,11 @@ type Bootstrap = {
     examEvents: Array<Omit<ExamEvent, "reminderEnabled">>;
     examNotices: ExamNotice[];
     jobPositions: JobPosition[];
+    morningReads?: Array<ContentEntry>;
+    currentAffairs?: Array<ContentEntry>;
+    essayMicros?: Array<ContentEntry>;
+    drillPresets?: Array<ContentEntry<Partial<DrillPreset>>>;
+    strategyConfig?: StrategyConfig;
     access: "premium" | "preview";
   };
   progress: Partial<Progress>;
@@ -315,22 +394,37 @@ const loadingDay: PracticeDay = {
   essay: { expressions: [], prompt: "正在加载今日申论微练", reference: "", wordLimit: 60 },
 };
 
-const provinces = [
+const emptyPublishedDay: PracticeDay = {
+  day: 1,
+  label: "内容待发布",
+  morning: { title: "今日晨读尚未发布", lead: "", paragraphs: [], keywords: [] },
+  questions: [],
+  currentAffairs: [],
+  essay: { expressions: [], prompt: "", reference: "", wordLimit: 300 },
+};
+
+const defaultProvinces = [
   "北京", "天津", "上海", "重庆", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
   "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东",
   "广西", "海南", "四川", "贵州", "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆",
 ];
 const reasonOptions = ["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足"];
-const essayRubric = ["观点准确", "表达规范", "结构清晰", "语言简洁"];
+const defaultEssayRubric = ["观点准确", "表达规范", "结构清晰", "语言简洁"];
 const examEventTypes = ["公告发布", "职位表发布", "报考筛选", "报名开始", "报名截止", "资格审查", "缴费截止", "准考证打印", "笔试", "面试", "自定义"];
 const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
-const microDrills = [
-  { id: "data", icon: "算", title: "资料分析速算", detail: "增长率、比重、基期", minutes: 8, focus: "资料分析" },
-  { id: "graph", icon: "图", title: "图形判断", detail: "位置、样式、数量规律", minutes: 8, focus: "图形" },
-  { id: "idiom", icon: "词", title: "言语易错成语", detail: "语境辨析与高频误用", minutes: 6, focus: "逻辑填空" },
-  { id: "affairs", icon: "政", title: "常识时政", detail: "政策、法律与重要会议", minutes: 6, focus: "政治" },
-  { id: "essay", icon: "写", title: "申论规范表达", detail: "动词＋对象＋机制＋结果", minutes: 8, focus: "essay" },
-] as const;
+const legacyDrillPresets: DrillPreset[] = [
+  { id: "data", icon: "算", title: "资料分析速算", subtitle: "增长率、比重、基期", minutes: 8, subject: "行测", module: "资料分析", subTypes: [], bankCodes: [], questionCount: 5, color: "#245c92", sortOrder: 10, enabled: true },
+  { id: "graph", icon: "图", title: "图形判断", subtitle: "位置、样式、数量规律", minutes: 8, subject: "行测", module: "图形", subTypes: [], bankCodes: [], questionCount: 5, color: "#e27f42", sortOrder: 20, enabled: true },
+  { id: "idiom", icon: "词", title: "言语易错成语", subtitle: "语境辨析与高频误用", minutes: 6, subject: "行测", module: "逻辑填空", subTypes: [], bankCodes: [], questionCount: 5, color: "#2f8067", sortOrder: 30, enabled: true },
+  { id: "affairs", icon: "政", title: "常识时政", subtitle: "政策、法律与重要会议", minutes: 6, subject: "行测", module: "政治", subTypes: [], bankCodes: [], questionCount: 5, color: "#875da8", sortOrder: 40, enabled: true },
+  { id: "essay", icon: "写", title: "申论规范表达", subtitle: "真题材料与采分点自评", minutes: 8, subject: "申论", module: "申论", subTypes: [], bankCodes: [], questionCount: 1, color: "#b9634c", sortOrder: 50, enabled: true },
+];
+const drillColorMap: Record<string, string> = {
+  blue: "#245c92",
+  orange: "#e27f42",
+  green: "#2f8067",
+  purple: "#875da8",
+};
 
 const candidateOptions = {
   education: ["", "大专", "本科", "硕士研究生", "博士研究生"],
@@ -393,7 +487,7 @@ function safeCandidateProfile(input: unknown): CandidateProfile {
 
 function safeStringList(input: unknown, max = 160) {
   return Array.isArray(input)
-    ? Array.from(new Set(input.filter((item): item is string => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 120)))).slice(0, max)
+    ? Array.from(new Set(input.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 120)))).slice(0, max)
     : [];
 }
 
@@ -433,7 +527,12 @@ function normalizePlanMinutes(value: unknown): PlanMinutes {
   return value === 10 || value === 45 || value === 60 ? value : 30;
 }
 
-function buildDailyPlan(value: unknown, preview = false) {
+function boundedNumber(value: unknown, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.round(parsed))) : fallback;
+}
+
+function buildDailyPlan(value: unknown, preview = false, strategy?: StrategyConfig) {
   const minutes = normalizePlanMinutes(value);
   const plans = {
     10: { minutes: 10 as const, morningMinutes: 0, practiceMinutes: 10, essayMinutes: 0, questionCount: 5 },
@@ -441,7 +540,125 @@ function buildDailyPlan(value: unknown, preview = false) {
     45: { minutes: 45 as const, morningMinutes: 5, practiceMinutes: 30, essayMinutes: 10, questionCount: 15 },
     60: { minutes: 60 as const, morningMinutes: 10, practiceMinutes: 35, essayMinutes: 15, questionCount: 20 },
   };
-  return { ...plans[minutes], questionCount: preview ? 5 : plans[minutes].questionCount };
+  const fallback = plans[minutes];
+  const configured = strategy?.timePlans?.[String(minutes) as `${PlanMinutes}`];
+  const plan = {
+    minutes,
+    morningMinutes: boundedNumber(configured?.morning, fallback.morningMinutes, 0, minutes),
+    practiceMinutes: boundedNumber(configured?.practice, fallback.practiceMinutes, 0, minutes),
+    essayMinutes: boundedNumber(configured?.essay, fallback.essayMinutes, 0, minutes),
+    questionCount: boundedNumber(configured?.questionCount, fallback.questionCount, 1, 20),
+  };
+  return { ...plan, questionCount: preview ? Math.min(5, plan.questionCount) : plan.questionCount };
+}
+
+function unwrapContentPayload<T extends object>(entry: ContentEntry<T>): Partial<T> {
+  return entry && typeof entry === "object" && entry.payload && typeof entry.payload === "object"
+    ? { ...entry, ...entry.payload }
+    : entry;
+}
+
+function normalizeDrillPresets(entries?: Array<ContentEntry<Partial<DrillPreset>>>) {
+  // Only use the legacy presets for an older API that omits this field.
+  // An explicit empty array means operators intentionally hid every preset.
+  if (entries === undefined) return legacyDrillPresets;
+  if (!entries.length) return [];
+  return entries.flatMap((entry, index) => {
+    const item = unwrapContentPayload(entry);
+    if (item.enabled === false) return [];
+    const id = safeText(item.id ?? entry.contentKey, 80) || `drill-${index + 1}`;
+    const title = safeText(item.title ?? entry.title, 40);
+    if (!title) return [];
+    return [{
+      id,
+      title,
+      subtitle: safeText(item.subtitle, 80) || "精选真题，短时完成",
+      icon: safeText(item.icon, 4) || title.slice(0, 1),
+      color: /^#[0-9a-f]{6}$/i.test(String(item.color ?? "")) ? String(item.color) : drillColorMap[String(item.color ?? "")] ?? "#245c92",
+      subject: safeText(item.subject, 20) || "行测",
+      module: safeText(item.module, 40),
+      subTypes: Array.isArray(item.subTypes)
+        ? item.subTypes.map((value) => safeText(value, 40)).filter(Boolean).slice(0, 12)
+        : safeText(item.subType, 120).split(/[、,，|｜;；\n]+/).map((value) => value.trim()).filter(Boolean).slice(0, 12),
+      bankCodes: Array.isArray(item.bankCodes)
+        ? item.bankCodes.map((value) => safeText(value, 80)).filter(Boolean).slice(0, 32)
+        : safeText(item.bankCodes, 1_000).split(/[,，、|｜;；\n]+/).map((value) => value.trim()).filter(Boolean).slice(0, 32),
+      questionCount: boundedNumber(item.questionCount, 5, 1, 20),
+      minutes: boundedNumber(item.minutes, 8, 3, 30),
+      sortOrder: boundedNumber(item.sortOrder ?? item.sort, index * 10, -9999, 9999),
+      enabled: true,
+      frequency: safeText(item.frequency, 10),
+      importanceStars: boundedNumber(item.importanceStars, 0, 0, 5) || undefined,
+      scoreRateMin: boundedNumber(item.scoreRateMin, 0, 0, 100),
+      scoreRateMax: boundedNumber(item.scoreRateMax, 100, 0, 100),
+    } satisfies DrillPreset];
+  }).sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title));
+}
+
+function normalizeTruthLabel(region?: string, examYear?: number | null, fallback = "") {
+  const rawRegion = (region ?? "").trim().replace(/省考$|真题$/g, "");
+  const cleanRegion = rawRegion === "全国" ? "国考" : rawRegion;
+  if (cleanRegion && examYear) return `${cleanRegion}-${examYear}`;
+  return fallback
+    .replace(/([\u4e00-\u9fa5]{2,12})[·・](20\d{2})真题/g, "$1-$2")
+    .replace(/([\u4e00-\u9fa5]{2,12})[·・](20\d{2})/g, "$1-$2")
+    .replace(/真题/g, "")
+    .trim();
+}
+
+function starText(value?: number | null) {
+  const stars = boundedNumber(value, 0, 0, 5);
+  return stars ? `${"★".repeat(stars)}${"☆".repeat(5 - stars)}` : "";
+}
+
+function frequencyText(value?: string | null) {
+  const frequency = value?.trim();
+  if (!frequency) return "";
+  return frequency.includes("考频") ? frequency : `考频：${frequency}`;
+}
+
+function scoreRateText(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "";
+  const percent = Number(value) <= 1 ? Number(value) * 100 : Number(value);
+  return `拿分率${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+}
+
+function bankTruthLabel(bank: QuestionBank) {
+  const region = bank.examType === "国考" ? "国考" : bank.province || bank.scopeLabel || bank.examType;
+  return normalizeTruthLabel(region, bank.examYear, bank.scopeLabel || bank.name);
+}
+
+function normalizeEssayQuestion(raw: unknown, index: number): EssayPracticeQuestion | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const prompt = safeText(item.prompt ?? item.stem, 2000);
+  if (!prompt) return null;
+  const region = safeText(item.region, 40);
+  const examYear = Number.isFinite(Number(item.examYear)) ? Number(item.examYear) : null;
+  const rawPoints = Array.isArray(item.scoringPoints)
+    ? item.scoringPoints
+    : typeof item.scoringPoints === "string"
+      ? String(item.scoringPoints).split(/[\n；;]/)
+      : [];
+  const scoringPoints = rawPoints.map((value) => safeText(value, 240)).filter(Boolean).slice(0, 16);
+  return {
+    id: safeText(item.id ?? item.code, 80) || `essay-${index + 1}`,
+    bankCode: safeText(item.bankCode, 80),
+    bankName: safeText(item.bankName, 100) || "申论真题",
+    material: safeText(item.material, 8000),
+    prompt,
+    wordLimit: boundedNumber(item.wordLimit, 300, 30, 2000),
+    scoringPoints,
+    reference: safeText(item.reference ?? item.referenceAnswer ?? item.sampleAnswer ?? item.answer, 8000),
+    region,
+    examYear,
+    frequency: safeText(item.frequency, 20),
+    importanceStars: boundedNumber(item.importanceStars, 0, 0, 5),
+    scoreRate: item.scoreRate === null || item.scoreRate === undefined ? null : Number(item.scoreRate),
+    imageUrl: safeText(item.imageUrl, 500),
+    resourceUrl: safeText(item.resourceUrl, 500),
+    truthLabel: normalizeTruthLabel(region, examYear, safeText(item.truthLabel ?? item.source, 100)),
+  };
 }
 
 function localChinaDateKey() {
@@ -723,6 +940,10 @@ export default function DailyPracticeApp() {
   const [eventFormOpen, setEventFormOpen] = useState(false);
   const [eventDraft, setEventDraft] = useState({ targetCode: "", eventType: "报名截止", title: "报名截止", eventDate: "", reminderDays: 3, sourceUrl: "" });
   const [radarMode, setRadarMode] = useState<RadarMode>("notices");
+  const [essayPracticeQuestions, setEssayPracticeQuestions] = useState<EssayPracticeQuestion[]>([]);
+  const [essayPracticeIndex, setEssayPracticeIndex] = useState(0);
+  const [essayPracticeLoading, setEssayPracticeLoading] = useState(false);
+  const [essayCompletesDaily, setEssayCompletesDaily] = useState(true);
   const trackedUserRef = useRef("");
   const reminderShownRef = useRef("");
   const progressRef = useRef<Progress>(emptyProgress);
@@ -730,11 +951,14 @@ export default function DailyPracticeApp() {
 
   const practiceDays = bootstrap?.content.practiceDays ?? [];
   const dayKey = bootstrap?.todayKey ?? localChinaDateKey();
-  const day = practiceDays[contentDayIndex(dayKey, practiceDays.length)] ?? practiceDays[0] ?? loadingDay;
+  const scheduledDay = practiceDays.find((item) => item.date === dayKey);
+  const day = scheduledDay ?? practiceDays[contentDayIndex(dayKey, practiceDays.length)] ?? practiceDays[0] ?? (bootstrap ? emptyPublishedDay : loadingDay);
   const insights = bootstrap?.studyInsights ?? emptyInsights;
   const profile = bootstrap?.examProfile ?? profileDraft;
   const examNotices = bootstrap?.content.examNotices ?? [];
   const jobPositions = bootstrap?.content.jobPositions ?? [];
+  const strategyConfig = bootstrap?.content.strategyConfig;
+  const drillPresets = normalizeDrillPresets(bootstrap?.content.drillPresets);
   const activeTargetCodes = new Set(profile.targets.map((target) => target.code));
   const relevantNotices = examNotices
     .filter((notice) => !profile.targets.length || activeTargetCodes.has(notice.targetCode))
@@ -746,7 +970,7 @@ export default function DailyPracticeApp() {
     ? progress.activePractice
     : null;
   const todayPlanMinutes = dailySessionForPlan?.planMinutes ?? progress.planOverrides[dayKey] ?? profile.dailyMinutes;
-  const dailyPlan = buildDailyPlan(todayPlanMinutes, bootstrap?.content.access === "preview");
+  const dailyPlan = buildDailyPlan(todayPlanMinutes, bootstrap?.content.access === "preview", strategyConfig);
   const datedTargets = profile.targets
     .map((target) => ({ target, days: daysLeft(target.examDate) }))
     .filter((item): item is { target: ExamTarget; days: number } => item.days !== null)
@@ -754,7 +978,15 @@ export default function DailyPracticeApp() {
   const nextExam = datedTargets[0] ?? null;
   const hasExtendedMembership = Boolean(bootstrap?.ledger.some((item) => item.source_type !== "trial"));
   const addedBanks = bootstrap?.questionBanks.filter((bank) => bank.added) ?? [];
+  const availableProvinces = Array.from(new Set([
+    ...defaultProvinces,
+    ...(bootstrap?.questionBanks ?? []).map((bank) => bank.province).filter(Boolean),
+    ...profile.targets.map((target) => target.province).filter(Boolean),
+  ]));
   const activeLearningBanks = addedBanks.filter((bank) => bank.subject !== "申论");
+  const activeEssayBanks = addedBanks.filter((bank) => bank.subject === "申论");
+  const hasMorningContent = day.morning.paragraphs.length > 0 || Boolean(day.morning.lead.trim());
+  const hasEssayContent = activeEssayBanks.some((bank) => bank.questionCount > 0) || Boolean(day.essay.prompt.trim());
   const primaryTarget = profile.targets[0] ?? null;
   const savedPrimaryBank = addedBanks.find((bank) => bank.code === progress.primaryBankCode && bank.subject !== "申论");
   const primaryBank = savedPrimaryBank
@@ -767,7 +999,11 @@ export default function DailyPracticeApp() {
     ? `${profile.targets.slice(0, 3).map((target) => target.label).join("＋")}${profile.targets.length > 3 ? `等${profile.targets.length}项` : ""}`
     : "尚未设置报考目标";
   const practiceDone = Boolean(progress.completed[`${dayKey}-practice`]);
-  const enabledDailySteps = dailyPlan.minutes === 10 ? ["practice"] as const : ["morning", "practice", "essay"] as const;
+  const enabledDailySteps: DailyStep[] = [
+    ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? ["morning" as const] : []),
+    ...(dailyPlan.questionCount > 0 ? ["practice" as const] : []),
+    ...(dailyPlan.essayMinutes > 0 && hasEssayContent ? ["essay" as const] : []),
+  ];
   const stepDone = {
     morning: Boolean(progress.completed[`${dayKey}-morning`]),
     practice: practiceDone,
@@ -776,6 +1012,9 @@ export default function DailyPracticeApp() {
   const doneCount = enabledDailySteps.filter((step) => stepDone[step]).length;
   const allDailyDone = doneCount === enabledDailySteps.length;
   const nextDailyStep = enabledDailySteps.find((step) => !stepDone[step]) ?? null;
+  const essayQuestion = essayPracticeQuestions[essayPracticeIndex] ?? null;
+  const essayDraftKey = essayQuestion ? `essay:${essayQuestion.id}` : dayKey;
+  const essayRubric = strategyConfig?.essayRubric?.filter((item) => typeof item === "string" && item.trim()).slice(0, 8) ?? defaultEssayRubric;
   const audioWrongQuestions = Array.from(new Map([...(bootstrap?.wrongAudioQuestions ?? []), ...sessionWrongQuestions].map((question) => [question.id, question])).values());
   const currentPractice = practiceQuestions[practiceIndex];
   const activeDailySession = dailySessionForPlan;
@@ -1119,7 +1358,7 @@ export default function DailyPracticeApp() {
   const startPractice = async (
     mode: PracticeMode = "mixed",
     bankCodes?: string[],
-    options: { kind?: PracticeKind; limit?: number; forceNew?: boolean; focusModule?: string; strictFocus?: boolean; focusLabel?: string } = {},
+    options: { kind?: PracticeKind; limit?: number; forceNew?: boolean; focusModule?: string; focusSubTypes?: string[]; strictFocus?: boolean; focusLabel?: string; frequency?: string; importanceStars?: number; scoreRateMin?: number; scoreRateMax?: number } = {},
   ) => {
     let kind = options.kind ?? (mode === "review" ? "review" : bankCodes?.length === 1 ? "bank" : "daily");
     let activeSession = progressRef.current.activePractice;
@@ -1157,7 +1396,12 @@ export default function DailyPracticeApp() {
         primaryBankCode: primaryBank?.code ?? "",
         resumeQuestionCodes,
         focusModule: options.focusModule ?? "",
+        focusSubTypes: options.focusSubTypes ?? [],
         strictFocus: options.strictFocus === true,
+        frequency: options.frequency ?? "",
+        importanceStars: options.importanceStars ?? 0,
+        scoreRateMin: options.scoreRateMin ?? 0,
+        scoreRateMax: options.scoreRateMax ?? 100,
       });
       if (!result.questions.length) {
         setPracticeEmpty(true);
@@ -1203,14 +1447,56 @@ export default function DailyPracticeApp() {
     finally { setBusy(false); }
   };
 
-  const startMicroDrill = (drill: (typeof microDrills)[number]) => {
-    if (drill.focus === "essay") {
-      setActiveModule("essay");
-      trackEvent("micro_drill_open", { drill: drill.id });
+  const startEssayPractice = async (options: { bankCodes?: string[]; daily?: boolean; focusModule?: string; focusSubTypes?: string[] } = {}) => {
+    setEssayPracticeLoading(true);
+    setEssayPracticeQuestions([]);
+    setEssayPracticeIndex(0);
+    setEssayReference(false);
+    setEssayCompletesDaily(options.daily !== false);
+    setActiveModule("essay");
+    try {
+      const bankCodes = options.bankCodes?.length ? options.bankCodes : activeEssayBanks.map((bank) => bank.code);
+      const result = await api<{ questions?: unknown[] }>({
+        action: "getEssayPracticeBatch",
+        bankCodes,
+        limit: 1,
+        focusModule: options.focusModule ?? "",
+        focusSubTypes: options.focusSubTypes ?? [],
+      });
+      const questions = (result.questions ?? []).map(normalizeEssayQuestion).filter((item): item is EssayPracticeQuestion => Boolean(item));
+      if (questions.length) {
+        setEssayPracticeQuestions(questions);
+        trackEvent("essay_practice_open", { bankCodes, questionId: questions[0].id, daily: options.daily !== false });
+      } else if (options.daily === false) {
+        notify("该申论题库暂时没有已上架真题，先完成今日微练");
+      }
+    } catch (error) {
+      if (options.daily === false) notify(error instanceof Error ? error.message : "申论真题暂时无法加载");
+    } finally {
+      setEssayPracticeLoading(false);
+    }
+  };
+
+  const startMicroDrill = (drill: DrillPreset) => {
+    if (drill.subject === "申论" || drill.module === "申论") {
+      void startEssayPractice({ bankCodes: drill.bankCodes, daily: false, focusModule: drill.module, focusSubTypes: drill.subTypes });
+      trackEvent("micro_drill_open", { drill: drill.id, source: "cms" });
       return;
     }
     trackEvent("micro_drill_open", { drill: drill.id });
-    void startPractice("mixed", undefined, { kind: "bonus", limit: 5, forceNew: true, focusModule: drill.focus, strictFocus: true, focusLabel: drill.title });
+    void startPractice("mixed", drill.bankCodes.length ? drill.bankCodes : undefined, {
+      kind: "bonus",
+      limit: drill.questionCount,
+      forceNew: true,
+      focusModule: drill.module || drill.subTypes[0] || "",
+      focusSubTypes: drill.subTypes,
+      strictFocus: true,
+      focusLabel: drill.title,
+      frequency: drill.frequency,
+      importanceStars: drill.importanceStars,
+      scoreRateMin: drill.scoreRateMin,
+      scoreRateMax: drill.scoreRateMax,
+    });
   };
 
   const answerPractice = async (answer: number) => {
@@ -1358,24 +1644,25 @@ export default function DailyPracticeApp() {
 
   const toggleEssayCheck = (item: string) => {
     const currentProgress = progress;
-    const current = currentProgress.essayChecks[dayKey] ?? [];
+    const current = currentProgress.essayChecks[essayDraftKey] ?? [];
     const nextChecks = current.includes(item) ? current.filter((value) => value !== item) : [...current, item];
-    void persist({ ...currentProgress, essayChecks: { ...currentProgress.essayChecks, [dayKey]: nextChecks } });
+    void persist({ ...currentProgress, essayChecks: { ...currentProgress.essayChecks, [essayDraftKey]: nextChecks } });
   };
 
   const updateEssayDraft = (value: string) => {
     const current = progress;
-    const next = { ...current, essayDrafts: { ...current.essayDrafts, [dayKey]: value } };
+    const next = { ...current, essayDrafts: { ...current.essayDrafts, [essayDraftKey]: value } };
     progressRef.current = next;
     setProgress(next);
   };
 
   const submitEssay = async () => {
-    if ((progress.essayDrafts[dayKey] ?? "").trim().length < 10) return notify("先完成至少10个字的改写");
-    if ((progress.essayChecks[dayKey] ?? []).length < 2) return notify("请按标准完成至少两项自评");
-    await complete(`${dayKey}-essay`);
+    if ((progress.essayDrafts[essayDraftKey] ?? "").trim().length < 10) return notify("先完成至少10个字的作答");
+    if ((progress.essayChecks[essayDraftKey] ?? []).length < 2) return notify("请按标准完成至少两项自评");
+    if (essayCompletesDaily) await complete(`${dayKey}-essay`);
+    else notify("本题作答与自评已保存");
     setActiveModule(null);
-    setTab("report");
+    setTab(essayCompletesDaily ? "report" : "today");
   };
 
   const speakMorning = () => {
@@ -1423,7 +1710,7 @@ export default function DailyPracticeApp() {
     if (activeDailySession) return void startPractice("mixed", undefined, { kind: "daily" });
     if (nextDailyStep === "morning") return setActiveModule("morning");
     if (nextDailyStep === "practice") return void startPractice("mixed", undefined, { kind: "daily" });
-    if (nextDailyStep === "essay") return setActiveModule("essay");
+    if (nextDailyStep === "essay") return void startEssayPractice({ daily: true });
     setTab("report");
   };
 
@@ -1439,7 +1726,7 @@ export default function DailyPracticeApp() {
         setPracticeSummary(null);
         setActiveModule(null);
         if (practiceSummary.kind === "daily" && nextDailyStep === "morning") return setActiveModule("morning");
-        if (practiceSummary.kind === "daily" && nextDailyStep === "essay") return setActiveModule("essay");
+        if (practiceSummary.kind === "daily" && nextDailyStep === "essay") return void startEssayPractice({ daily: true });
         setTab(practiceSummary.kind === "review" ? "review" : practiceSummary.kind === "daily" ? "report" : "today");
         void loadBootstrap();
       };
@@ -1452,7 +1739,11 @@ export default function DailyPracticeApp() {
     if (!currentPractice) return <div className="empty-state"><span>练</span><h3>正在准备题目</h3></div>;
     const finished = feedback && practiceIndex === practiceQuestions.length - 1;
     const target = progress.activePractice?.questionTarget ?? practiceQuestions.length;
-    const targetSeconds = feedback?.targetSeconds ?? questionTargetSeconds(currentPractice);
+    const targetSeconds = feedback?.targetSeconds ?? currentPractice.suggestedSeconds ?? questionTargetSeconds(currentPractice);
+    const truthLabel = normalizeTruthLabel(currentPractice.region, currentPractice.examYear, currentPractice.truthLabel || currentPractice.scopeLabel || currentPractice.source);
+    const importance = starText(currentPractice.importanceStars);
+    const scoreRate = scoreRateText(currentPractice.scoreRate);
+    const valueSignals = [frequencyText(currentPractice.frequency), importance, scoreRate].filter(Boolean);
     return (
       <div className="smart-practice">
         <div className="practice-overview">
@@ -1462,9 +1753,12 @@ export default function DailyPracticeApp() {
         <div className="practice-composition"><span>到期 {practiceComposition.due}</span><span>其中薄弱 {practiceComposition.weak}</span><span>新题 {practiceComposition.new}</span><span>主攻 {practiceComposition.primary} · 兼顾 {practiceComposition.other}</span><b>还剩 {Math.max(0, target - sessionAnswered)} 题</b></div>
         <div className="practice-progress"><i style={{ width: `${Math.min(100, (sessionAnswered / Math.max(1, target)) * 100)}%` }} /></div>
         <article className="question-card smart-question-card">
-          <div className="question-context"><span>{currentPractice.scopeLabel}</span><b>推荐理由：{currentPractice.planReason}</b></div>
+          <div className="question-context"><span>{truthLabel || currentPractice.scopeLabel}</span><b>推荐理由：{[currentPractice.planReason, ...valueSignals].filter(Boolean).join(" · ")}</b></div>
+          {valueSignals.length > 0 && <div className="truth-signal-row" aria-label="真题价值标签">{frequencyText(currentPractice.frequency) && <span>{frequencyText(currentPractice.frequency)}</span>}{importance && <span className="importance-stars">{importance}</span>}{scoreRate && <span>{scoreRate}</span>}</div>}
           <div className="question-meta"><span>{currentPractice.module} · {currentPractice.knowledge}</span><em>{currentPractice.difficulty}</em></div>
           <h3>{currentPractice.stem}</h3>
+          {currentPractice.imageUrl && <figure className="question-resource"><img src={currentPractice.imageUrl} alt={`${truthLabel || "本题"}配图或图表`} loading="lazy" /></figure>}
+          {currentPractice.resourceUrl && <a className="question-resource-link" href={currentPractice.resourceUrl} target="_blank" rel="noreferrer">查看题目原始附件</a>}
           <div className="options-list">
             {currentPractice.options.map((option, index) => {
               const state = feedback && index === feedback.correctAnswer ? " correct" : feedback && index === selectedAnswer && !feedback.correct ? " wrong" : selectedAnswer === index ? " selected" : "";
@@ -1476,7 +1770,7 @@ export default function DailyPracticeApp() {
             <div><strong>{feedback.correct ? "回答正确" : `正确答案 ${String.fromCharCode(65 + feedback.correctAnswer)}`}</strong><span>{feedback.needsReview ? `${feedback.overtime ? "超时" : "需巩固"} · ${feedback.reviewDays}天后回炉` : feedback.state === "mastered" ? `已掌握 · ${feedback.reviewDays}天后抽查` : `学习中 · ${feedback.reviewDays}天后复习`}</span></div>
             <p>{feedback.explanation}</p>
             {feedback.technique && <aside><b>解题提示</b>{feedback.technique}</aside>}
-            <footer><span>题源：{currentPractice.source}{currentPractice.reviewedAt ? ` · 校验 ${currentPractice.reviewedAt.slice(0, 10)}` : ""}</span><button onClick={() => void updateQuestionMeta({ favorite: !currentPractice.favorite })}>{currentPractice.favorite ? "★ 已收藏" : "☆ 收藏"}</button></footer>
+            <footer><span>题源：{truthLabel || normalizeTruthLabel(undefined, undefined, currentPractice.source) || "已核验真题"}{currentPractice.reviewedAt ? ` · 校验 ${currentPractice.reviewedAt.slice(0, 10)}` : ""}</span><button onClick={() => void updateQuestionMeta({ favorite: !currentPractice.favorite })}>{currentPractice.favorite ? "★ 已收藏" : "☆ 收藏"}</button></footer>
           </div>}
         </article>
         {feedback && !feedback.correct && <div className="wrong-reason-box"><span>这次为什么错？</span><div>{reasonOptions.map((reason) => <button key={reason} className={currentPractice.wrongReason === reason ? "active" : ""} onClick={() => void updateQuestionMeta({ wrongReason: reason })}>{reason}</button>)}</div></div>}
@@ -1488,6 +1782,13 @@ export default function DailyPracticeApp() {
 
   const renderModule = () => {
     if (!activeModule) return null;
+    const essayPrompt = essayQuestion?.prompt ?? day.essay.prompt;
+    const essayMaterial = essayQuestion?.material ?? day.essay.material ?? "";
+    const essayWordLimit = essayQuestion?.wordLimit ?? day.essay.wordLimit ?? 60;
+    const essayReferenceText = essayQuestion?.reference ?? day.essay.reference;
+    const essayScoringPoints = essayQuestion?.scoringPoints ?? day.essay.scoringPoints ?? [];
+    const essayTruthLabel = essayQuestion?.truthLabel ?? "";
+    const essaySignals = essayQuestion ? [frequencyText(essayQuestion.frequency), starText(essayQuestion.importanceStars), scoreRateText(essayQuestion.scoreRate)].filter(Boolean) : [];
     return (
       <section className="module-page" aria-label="学习模块">
         <header className="module-header">
@@ -1503,21 +1804,29 @@ export default function DailyPracticeApp() {
           <span className="content-tag">今日晨读</span><h3>{day.morning.title}</h3><p className="lead">{day.morning.lead}</p>
           {day.morning.paragraphs.map((paragraph) => <p key={paragraph}>{hideKeywords ? day.morning.keywords.reduce((text, keyword) => text.replaceAll(keyword, "____"), paragraph) : paragraph}</p>)}
           <div className="keyword-training"><div><b>今天记住这3个表达</b><button onClick={() => setHideKeywords((value) => !value)}>{hideKeywords ? "显示关键词" : "挖空自测"}</button></div><div className="keyword-row">{day.morning.keywords.map((keyword) => <span key={keyword}>{hideKeywords ? "____" : keyword}</span>)}</div></div>
-          <div className="button-row"><button className="secondary-button" onClick={speakMorning}>▶ 逐段朗读</button><button className="primary-button" onClick={async () => { if (progress.completed[`${dayKey}-morning`]) return setActiveModule(null); await complete(`${dayKey}-morning`); setActiveModule(null); await startPractice("mixed", undefined, { kind: "daily" }); }}>{progress.completed[`${dayKey}-morning`] ? "✓ 已完成" : "完成并继续刷题"}</button></div>
+          <div className="button-row reading-actions"><button className="secondary-button" onClick={speakMorning}>▶ 逐段朗读</button>{day.currentAffairs.length > 0 && <button className="secondary-button" onClick={() => setActiveModule("affairs")}>今日时政 {day.currentAffairs.length}条</button>}<button className="primary-button" onClick={async () => { if (progress.completed[`${dayKey}-morning`]) return setActiveModule(null); await complete(`${dayKey}-morning`); setActiveModule(null); await startPractice("mixed", undefined, { kind: "daily" }); }}>{progress.completed[`${dayKey}-morning`] ? "✓ 已完成" : "完成并继续刷题"}</button></div>
         </div>}
 
-        {activeModule === "affairs" && <div className="affairs-grid">{day.currentAffairs.map((item, index) => <article className="affair-card" key={item.title}><div><span>{String(index + 1).padStart(2, "0")}</span><em>{item.tag}</em></div><h3>{item.title}</h3><p>{item.detail}</p></article>)}</div>}
+        {activeModule === "affairs" && (day.currentAffairs.length ? <div className="affairs-grid">{day.currentAffairs.map((item, index) => <article className="affair-card" key={`${item.title}-${index}`}><div><span>{String(index + 1).padStart(2, "0")}</span><em>{item.tag}</em></div><h3>{item.title}</h3><p>{item.detail}</p></article>)}</div> : <div className="empty-state compact"><span>政</span><h3>今日时政正在更新</h3><p>运营人员发布后会自动出现在这里，无需更新前端版本。</p></div>)}
 
-          {activeModule === "essay" && <div className="essay-wrap">
-            <div className="expression-list">{day.essay.expressions.map((item) => <article className="expression-card" key={item.phrase}><span>{item.scene}</span><p>{item.phrase}</p><button onClick={() => toggleFavoritePhrase(item.phrase)}>{progress.favorites.includes(item.phrase) ? "★ 已收藏" : "☆ 收藏"}</button></article>)}</div>
-          <article className="writing-card"><span className="content-tag">今日微练</span><h3>{day.essay.prompt}</h3>
-            <div className="essay-guidance">先找问题，再用“动词＋对象＋机制＋结果”完成闭环表达；不要堆砌金句。</div>
-            <textarea value={progress.essayDrafts[dayKey] ?? ""} onChange={(event) => updateEssayDraft(event.target.value)} onBlur={() => void persist(progress)} placeholder="先独立改写，再和参考表达比较……" maxLength={day.essay.wordLimit ?? 60} />
-            <div className="writing-meta"><span>{(progress.essayDrafts[dayKey] ?? "").length} / {day.essay.wordLimit ?? 60}</span><button onClick={() => setEssayReference((value) => !value)}>{essayReference ? "收起参考" : "对比参考表达"}</button></div>
-            {essayReference && <div className="reference-answer"><b>参考表达</b><p>{day.essay.reference}</p><small>不要逐字照抄，重点观察动词、逻辑和闭环表达。</small></div>}
-            <div className="essay-rubric"><span>按标准自评（至少选择2项）</span><div>{essayRubric.map((item) => <button key={item} className={(progress.essayChecks[dayKey] ?? []).includes(item) ? "active" : ""} onClick={() => toggleEssayCheck(item)}>{(progress.essayChecks[dayKey] ?? []).includes(item) ? "✓ " : ""}{item}</button>)}</div></div>
-            <button className="primary-button full-button" onClick={() => void submitEssay()}>{progress.completed[`${dayKey}-essay`] ? "✓ 已完成微练" : "完成自评并查看明日安排"}</button>
-          </article>
+        {activeModule === "essay" && <div className="essay-wrap">
+          {essayPracticeLoading ? <div className="empty-state compact essay-loading"><span>写</span><h3>正在从已加入题库选题</h3><p>优先匹配你的主攻地区、年份和高价值真题。</p></div> : <>
+            {!essayQuestion && day.essay.expressions.length > 0 && <div className="expression-list">{day.essay.expressions.map((item) => <article className="expression-card" key={item.phrase}><span>{item.scene}</span><p>{item.phrase}</p><button onClick={() => toggleFavoritePhrase(item.phrase)}>{progress.favorites.includes(item.phrase) ? "★ 已收藏" : "☆ 收藏"}</button></article>)}</div>}
+            <article className="writing-card essay-practice-card">
+              <div className="essay-source-row"><span className="content-tag">{essayTruthLabel || "今日申论练习"}</span>{essayQuestion?.bankName && <small>{essayQuestion.bankName}</small>}</div>
+              {essaySignals.length > 0 && <div className="truth-signal-row">{essaySignals.map((signal) => <span key={signal} className={signal.includes("★") ? "importance-stars" : ""}>{signal}</span>)}</div>}
+              {essayMaterial && <section className="essay-material"><b>给定材料</b><p>{essayMaterial}</p></section>}
+              {essayQuestion?.imageUrl && <figure className="question-resource"><img src={essayQuestion.imageUrl} alt={`${essayTruthLabel || "申论真题"}材料配图`} loading="lazy" /></figure>}
+              {essayQuestion?.resourceUrl && <a className="question-resource-link" href={essayQuestion.resourceUrl} target="_blank" rel="noreferrer">查看完整材料附件</a>}
+              <h3>{essayPrompt}</h3>
+              <div className="essay-guidance">先独立阅读材料、提炼要点，再作答；提交自评前不展示参考要点。</div>
+              <textarea value={progress.essayDrafts[essayDraftKey] ?? ""} onChange={(event) => updateEssayDraft(event.target.value)} onBlur={() => void persist(progressRef.current)} placeholder="根据材料独立作答……" maxLength={essayWordLimit} />
+              <div className="writing-meta"><span>{(progress.essayDrafts[essayDraftKey] ?? "").length} / {essayWordLimit}</span><button onClick={() => setEssayReference((value) => !value)}>{essayReference ? "收起参考" : "查看参考要点"}</button></div>
+              {essayReference && <div className="reference-answer"><b>参考要点</b>{essayScoringPoints.length ? <ol>{essayScoringPoints.map((point) => <li key={point}>{point}</li>)}</ol> : null}{essayReferenceText && <p>{essayReferenceText}</p>}<small>按采分点核对，不要求逐字一致。</small></div>}
+              <div className="essay-rubric"><span>按标准自评（至少选择2项）</span><div>{essayRubric.map((item) => <button key={item} className={(progress.essayChecks[essayDraftKey] ?? []).includes(item) ? "active" : ""} onClick={() => toggleEssayCheck(item)}>{(progress.essayChecks[essayDraftKey] ?? []).includes(item) ? "✓ " : ""}{item}</button>)}</div></div>
+              <button className="primary-button full-button" onClick={() => void submitEssay()}>{essayCompletesDaily && progress.completed[`${dayKey}-essay`] ? "✓ 已完成申论练习" : "完成作答与自评"}</button>
+            </article>
+          </>}
         </div>}
       </section>
     );
@@ -1545,7 +1854,7 @@ export default function DailyPracticeApp() {
 
   const weakestModule = insights.modules.length ? [...insights.modules].sort((a, b) => a.accuracy - b.accuracy)[0] : null;
   const tomorrowPlan = insights.tomorrowPlan;
-  const nextStepText = nextDailyStep === "morning" ? "晨读 5分钟" : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? "申论微练 5分钟" : "今日已完成";
+  const nextStepText = nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
   const primaryTaskTitle = allDailyDone
     ? "今日已完成，可以安心收工"
     : activeDailySession
@@ -1555,7 +1864,7 @@ export default function DailyPracticeApp() {
         : nextDailyStep === "practice"
           ? `智能刷题${dailyPlan.questionCount}道`
           : nextDailyStep === "essay"
-            ? "申论表达微练"
+          ? "申论真题微练"
             : "今日已完成";
   const primaryTaskDetail = allDailyDone
     ? `已完成${doneCount}/${enabledDailySteps.length}个有效动作，明日建议：${tomorrowPlan.taskText}`
@@ -1564,15 +1873,16 @@ export default function DailyPracticeApp() {
       : nextDailyStep === "practice"
         ? `${primaryBank ? `主攻${primaryBank.name}` : "按已加入题库"} · 到期复习优先 · 主攻与兼顾均衡。`
         : nextDailyStep === "essay"
-          ? "独立改写一句表达，再用四维标准自评。"
+          ? "根据材料独立作答，再按采分点与标准自评。"
           : "完成今天的训练闭环。";
   const dailyStepItems = [
-    ...(dailyPlan.minutes !== 10 ? [{ key: "morning" as const, icon: "读", title: "晨读", minutes: dailyPlan.morningMinutes, detail: "记住3个规范表达", done: stepDone.morning, action: () => setActiveModule("morning") }] : []),
+    ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? [{ key: "morning" as const, icon: "读", title: "晨读", minutes: dailyPlan.morningMinutes, detail: "记住3个规范表达", done: stepDone.morning, action: () => setActiveModule("morning") }] : []),
     { key: "practice" as const, icon: "练", title: "行测日练", minutes: dailyPlan.practiceMinutes, detail: activeDailySession ? `断点已保存，还剩${dailyRemaining}题` : `${dailyPlan.questionCount}道 · 到期错题优先`, done: stepDone.practice, action: runDailyAction },
-    ...(dailyPlan.minutes !== 10 ? [{ key: "essay" as const, icon: "写", title: "申论微练", minutes: dailyPlan.essayMinutes, detail: "改写一句规范表达", done: stepDone.essay, action: () => setActiveModule("essay") }] : []),
+    ...(dailyPlan.essayMinutes > 0 && hasEssayContent ? [{ key: "essay" as const, icon: "写", title: "申论真题", minutes: dailyPlan.essayMinutes, detail: activeEssayBanks.length ? "材料作答 · 采分点自评" : "今日表达练习", done: stepDone.essay, action: () => void startEssayPractice({ daily: true }) }] : []),
   ];
   const todayAlertItems = [
     nextCalendarEvent ? { id: "radar", label: dueReminder ? "报名提醒" : "公考雷达", title: `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}`, detail: nextCalendarEvent.days === 0 ? "今天处理" : `还有${nextCalendarEvent.days}天 · ${shortDate(nextCalendarEvent.eventDate)}`, action: () => setTab("calendar") } : { id: "radar", label: "公考雷达", title: "补全公告、职位表和报名节点", detail: "多考试报名别只记笔试日期", action: () => setTab("calendar") },
+    ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", label: "复习积压", title: `${insights.dueCount}道到期题等待回炉`, detail: `今日先按价值清理${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余自动顺延`, action: () => setTab("review") }] : []),
     ...(profile.onboarded && missingTargets.length > 0 ? [{ id: "banks", label: "题库提醒", title: `${missingTargets[0].label}题库未加入`, detail: missingTargets.length > 1 ? `还有${missingTargets.length}个目标待补题库` : "加入后才会进入综合练习", action: () => setTab("banks") }] : []),
     { id: "streak", label: "连续打卡", title: `${streak}天 · 完成今日任务自动打卡`, detail: allDailyDone ? "今日已打卡，明天继续" : `距${nextStreakMilestone}天还差${nextStreakMilestone - streak}天`, action: () => setTab("today") },
   ].slice(0, 3);
@@ -1615,12 +1925,13 @@ export default function DailyPracticeApp() {
             </section>
 
             <section className="today-alert-card"><div className="compact-section-heading"><div><span>今日提醒</span><h2>只保留会影响今天决策的事</h2></div></div>
-              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small>{item.id === "streak" && <div className="streak-dot-row" aria-label="本周打卡进度">{currentWeekCheckinKeys.map((key, index) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""} title={`${weekLabels[index]} ${key}`}>{weekLabels[index]}</em>)}</div>}</div><i>›</i></button>)}</div>
+              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={(item.id === "radar" && dueReminder) || item.id === "review-backlog" ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small>{item.id === "streak" && <div className="streak-dot-row" aria-label="本周打卡进度">{currentWeekCheckinKeys.map((key, index) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""} title={`${weekLabels[index]} ${key}`}>{weekLabels[index]}</em>)}</div>}</div><i>›</i></button>)}</div>
             </section>
 
             <section className="quick-practice-card"><div className="compact-section-heading"><div><span>加练一下</span><h2>有余力再点，不打断今日主线</h2></div><button onClick={() => setTab("banks")}>题库书架</button></div>
-              <div className="quick-practice-grid">{microDrills.map((drill) => <button key={drill.id} onClick={() => startMicroDrill(drill)}><span>{drill.icon}</span><b>{drill.title}</b><small>{drill.minutes}分钟</small></button>)}</div>
-              <div className="quick-tool-row"><button onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤/睡前</small></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount}道</small></button><button onClick={() => setTab("report")}><span>报</span><b>提分诊断</b><small>{weakestModule ? weakestModule.module : "完成后生成"}</small></button></div>
+              <div className="quick-practice-grid">{drillPresets.map((drill) => <button key={drill.id} onClick={() => startMicroDrill(drill)} title={drill.subtitle}><span style={{ color: drill.color, background: `${drill.color}18` }}>{drill.icon}</span><b>{drill.title}</b><small>{drill.minutes}分钟 · {drill.questionCount}{drill.subject === "申论" ? "题" : "道"}</small></button>)}</div>
+              {!drillPresets.length && <div className="inline-empty-note">专项微练发布后会自动出现在这里。</div>}
+              <div className="quick-tool-row"><button onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤/睡前</small></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount}道</small></button><button onClick={() => insights.total ? setTab("report") : void startPractice("mixed", undefined, { kind: "bonus", limit: 5, forceNew: true })}><span>报</span><b>{insights.total ? "提分诊断" : "首次诊断"}</b><small>{weakestModule ? weakestModule.module : "先做5题建基线"}</small></button>{day.currentAffairs.length > 0 && <button onClick={() => setActiveModule("affairs")}><span>政</span><b>今日时政</b><small>{day.currentAffairs.length}条速记</small></button>}</div>
             </section>
           </div>}
 
@@ -1635,10 +1946,10 @@ export default function DailyPracticeApp() {
               const isPrimary = bank.code === primaryBank?.code;
               const fit = bankFitMap.get(bank.code) ?? resolveBankFit(bank, profile, primaryTarget, primaryBank?.code);
               return <article className={`bank-card bank-${bank.coverColor}${isPrimary ? " is-primary" : ""}`} key={bank.code}>
-                <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bank.province}</small></div>
-                <div className="bank-copy"><div><span>{bank.examYear ? `${bank.examYear}年` : "持续更新"} · {bank.questionCount}题</span><h3>{bank.name}</h3>{isPrimary && <div className="primary-bank-badge">主攻题库</div>}<p>{bank.description}</p><div className={`scope-badge ${fit.tone}`}>{fit.badge}</div>{bankFilter === "适合我" && <small className="fit-reason">推荐依据：{fit.reason}</small>}</div>
+                <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bankTruthLabel(bank)}</small></div>
+                <div className="bank-copy"><div><span>{bankTruthLabel(bank)} · {bank.questionCount}题</span><h3>{bank.name}</h3>{isPrimary && <div className="primary-bank-badge">主攻题库</div>}<p>{bank.description}</p><div className={`scope-badge ${fit.tone}`}>{fit.badge}</div>{bankFilter === "适合我" && <small className="fit-reason">推荐依据：{[fit.reason, frequencyText(bank.frequency), starText(bank.importanceStars), scoreRateText(bank.scoreRate)].filter(Boolean).join(" · ")}</small>}</div>
                   <div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-                  <footer><small>{bank.questionCount === 0 ? "题库框架已建，等待后台上传题目；加入后不会影响基础日练" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 约${estimatedDays}天过一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">✓ 已加入</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "单本练" : "待上架"}</button> : bank.added && <span className="primary-bank-badge">申论微练建设中</span>}</div></footer>
+                  <footer><small>{bank.questionCount === 0 ? "题库框架已建，等待后台上传题目；加入后不会影响基础日练" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 约${estimatedDays}天过一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">✓ 已加入</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "单本练" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
                 </div>
               </article>;
             })}</section>
@@ -1802,7 +2113,7 @@ export default function DailyPracticeApp() {
               <div className="province-picker">
                 <label>省考地区（可多选）</label>
                 <div className="province-grid">
-                  {provinces.map((province) => {
+                  {availableProvinces.map((province) => {
                     const selected = profileDraft.targets.some((target) => target.code === `province:${province}`);
                     return <button key={province} className="province-option" aria-pressed={selected} onClick={() => toggleTarget("省考", province)}>{province}</button>;
                   })}

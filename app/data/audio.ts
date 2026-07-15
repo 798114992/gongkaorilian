@@ -1,4 +1,4 @@
-export type AudioCategory = "current" | "essay" | "wrong";
+export type AudioCategory = string;
 
 export type AudioTrack = {
   id: string;
@@ -10,6 +10,12 @@ export type AudioTrack = {
   description: string;
   text: string;
   audioUrl?: string;
+  seriesId?: string;
+  seriesTitle?: string;
+  seriesLabel?: string;
+  seriesColor?: string;
+  seriesIcon?: string;
+  sortOrder?: number;
 };
 
 export const audioTracks: AudioTrack[] = [

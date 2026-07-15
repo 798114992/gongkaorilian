@@ -10,6 +10,20 @@ export function getD1() {
   return db;
 }
 
+async function ensureColumns(
+  db: D1Database,
+  table: string,
+  columns: Array<{ name: string; definition: string }>,
+) {
+  const existing = await db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+  const names = new Set(existing.results.map((column) => column.name));
+  for (const column of columns) {
+    if (!names.has(column.name)) {
+      await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column.name} ${column.definition}`).run();
+    }
+  }
+}
+
 export async function ensureSchema() {
   if (schemaReady) return;
   const db = getD1();
@@ -76,10 +90,40 @@ export async function ensureSchema() {
       payload_json TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'draft',
       publish_at TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_items_key_uq ON content_items(content_key)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_item_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_id INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      content_type TEXT NOT NULL,
+      content_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      publish_at TEXT,
+      change_type TEXT NOT NULL DEFAULT 'update',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_item_versions_content_version_uq ON content_item_versions(content_id, version)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_item_versions_content_idx ON content_item_versions(content_id, created_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS media_assets (
+      id TEXT PRIMARY KEY,
+      object_key TEXT NOT NULL UNIQUE,
+      file_name TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      checksum TEXT NOT NULL,
+      storage TEXT NOT NULL DEFAULT 'r2',
+      fallback_data TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS media_assets_status_idx ON media_assets(status, created_at)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS analytics_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -120,6 +164,14 @@ export async function ensureSchema() {
       scoring_points_json TEXT NOT NULL DEFAULT '[]',
       difficulty TEXT NOT NULL DEFAULT '中等',
       source TEXT NOT NULL DEFAULT '',
+      source_region TEXT NOT NULL DEFAULT '全国',
+      source_year INTEGER,
+      frequency TEXT NOT NULL DEFAULT '中频',
+      importance_stars INTEGER NOT NULL DEFAULT 3,
+      score_rate INTEGER NOT NULL DEFAULT 60,
+      suggested_seconds INTEGER NOT NULL DEFAULT 60,
+      image_url TEXT NOT NULL DEFAULT '',
+      resource_url TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'active',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -212,6 +264,19 @@ export async function ensureSchema() {
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS practice_attempts_user_time_idx ON practice_attempts(user_id, answered_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS practice_attempts_user_module_idx ON practice_attempts(user_id, module)"),
+  ]);
+  await ensureColumns(db, "content_items", [
+    { name: "version", definition: "INTEGER NOT NULL DEFAULT 1" },
+  ]);
+  await ensureColumns(db, "questions", [
+    { name: "source_region", definition: "TEXT NOT NULL DEFAULT '全国'" },
+    { name: "source_year", definition: "INTEGER" },
+    { name: "frequency", definition: "TEXT NOT NULL DEFAULT '中频'" },
+    { name: "importance_stars", definition: "INTEGER NOT NULL DEFAULT 3" },
+    { name: "score_rate", definition: "INTEGER NOT NULL DEFAULT 60" },
+    { name: "suggested_seconds", definition: "INTEGER NOT NULL DEFAULT 60" },
+    { name: "image_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
   ]);
   schemaReady = true;
 }

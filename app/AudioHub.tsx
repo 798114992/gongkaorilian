@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Question } from "./data/content";
-import type { AudioCategory, AudioTrack } from "./data/audio";
+import type { AudioTrack } from "./data/audio";
 
-type Filter = "all" | AudioCategory;
+type Filter = string;
 type VoicePreset = "newsMale" | "newsFemale" | "youngMale" | "youngFemale";
 
 type AudioHubProps = {
@@ -15,18 +15,15 @@ type AudioHubProps = {
   trackEvent: (eventName: string, eventData?: Record<string, unknown>) => void;
 };
 
-const filterOptions: Array<{ id: Filter; label: string }> = [
-  { id: "all", label: "精选" },
-  { id: "current", label: "时政电台" },
-  { id: "essay", label: "申论晨读" },
-  { id: "wrong", label: "错题听练" },
-];
-
-const categoryMeta: Record<AudioCategory, { label: string; title: string; empty: string }> = {
-  current: { label: "时政", title: "时政电台", empty: "月度热点、重要会议和新法解读会在这里更新。" },
-  essay: { label: "申论", title: "申论晨读", empty: "人民日报评论拆解、规范表达和分主题金句会在这里更新。" },
-  wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，真实错题会自动生成听练内容。" },
+const builtInCategoryMeta: Record<string, { label: string; title: string; empty: string; color: string }> = {
+  current: { label: "时政", title: "时政电台", empty: "月度热点、重要会议和新法解读会在这里更新。", color: "#245c92" },
+  essay: { label: "申论", title: "申论晨读", empty: "人民日报评论拆解、规范表达和分主题金句会在这里更新。", color: "#e27f42" },
+  wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，真实错题会自动生成听练内容。", color: "#2f8067" },
 };
+
+function trackSeriesId(track: AudioTrack) {
+  return track.seriesId?.trim() || track.category || "other";
+}
 
 const voiceOptions: Array<{ id: VoicePreset; label: string; tone: string; pitch: number; rateOffset: number; hints: string[] }> = [
   { id: "newsMale", label: "新闻男", tone: "稳重播报", pitch: 0.82, rateOffset: -0.04, hints: ["yunyang", "yunxi", "kangkang", "male", "男"] },
@@ -95,10 +92,15 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     source: "我的错题本",
     duration: "约1分钟",
     description: question.stem,
+    seriesId: "wrong",
+    seriesTitle: "错题语音朗读",
+    seriesLabel: "错题",
+    seriesColor: "#2f8067",
+    sortOrder: 9999,
     text: `开始复习一道${question.module}错题。题目是：${question.stem}。选项分别是：${question.options.map((option, index) => `${String.fromCharCode(65 + index)}，${option}`).join("；")}。请先暂停十秒，独立回忆答案和解题思路，再继续播放。正确答案是${String.fromCharCode(65 + question.answer)}，${question.options[question.answer]}。解析：${question.explanation}。最后请复述本题考点和错误原因。`,
   })), [wrongQuestions]);
 
-  const tracks = useMemo(() => [...curatedTracks, ...wrongTracks], [curatedTracks, wrongTracks]);
+  const tracks = useMemo(() => [...curatedTracks, ...wrongTracks].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)), [curatedTracks, wrongTracks]);
   const [filter, setFilter] = useState<Filter>("all");
   const [selectedId, setSelectedId] = useState(curatedTracks[0]?.id ?? wrongTracks[0]?.id ?? "");
   const [playing, setPlaying] = useState(false);
@@ -121,15 +123,30 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const timerRef = useRef<number | null>(null);
 
+  const series = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; title: string; empty: string; color: string; icon: string; sortOrder: number }>();
+    for (const track of tracks) {
+      const id = trackSeriesId(track);
+      if (map.has(id)) continue;
+      const fallback = builtInCategoryMeta[track.category] ?? { label: "音频", title: "日练电台", empty: "栏目内容准备中。", color: "#6c7d8e" };
+      map.set(id, {
+        id,
+        label: track.seriesLabel?.trim() || fallback.label,
+        title: track.seriesTitle?.trim() || fallback.title,
+        empty: fallback.empty,
+        color: /^#[0-9a-f]{6}$/i.test(track.seriesColor ?? "") ? String(track.seriesColor) : fallback.color,
+        icon: track.seriesIcon?.trim().slice(0, 2) || (track.seriesLabel?.trim() || fallback.label).slice(0, 1),
+        sortOrder: track.sortOrder ?? 0,
+      });
+    }
+    return Array.from(map.values()).sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title));
+  }, [tracks]);
+  const filterOptions = useMemo(() => [{ id: "all", label: "精选" }, ...series.map((item) => ({ id: item.id, label: item.title }))], [series]);
   const visibleTracks = useMemo(
-    () => filter === "all" ? tracks : tracks.filter((track) => track.category === filter),
+    () => filter === "all" ? tracks : tracks.filter((track) => trackSeriesId(track) === filter),
     [filter, tracks],
   );
-  const tracksByCategory = useMemo(() => ({
-    current: tracks.filter((track) => track.category === "current"),
-    essay: tracks.filter((track) => track.category === "essay"),
-    wrong: tracks.filter((track) => track.category === "wrong"),
-  }), [tracks]);
+  const tracksBySeries = useMemo(() => new Map(series.map((item) => [item.id, tracks.filter((track) => trackSeriesId(track) === item.id)])), [series, tracks]);
   const selectedTrack = visibleTracks.find((track) => track.id === selectedId) ?? visibleTracks[0];
 
   useEffect(() => {
@@ -189,7 +206,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
   const changeFilter = (nextFilter: Filter) => {
     if (nextFilter === filter) return;
-    const nextTracks = nextFilter === "all" ? tracks : tracks.filter((track) => track.category === nextFilter);
+    const nextTracks = nextFilter === "all" ? tracks : tracks.filter((track) => trackSeriesId(track) === nextFilter);
     stop();
     setFilter(nextFilter);
     setSelectedId(nextTracks[0]?.id ?? "");
@@ -441,22 +458,22 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
       {filter === "all" ? (
         <section className="audio-category-board" aria-label="音频精选分类">
-          {(["current", "essay", "wrong"] as AudioCategory[]).map((category) => {
-            const categoryTracks = tracksByCategory[category];
-            const meta = categoryMeta[category];
+          {series.map((item) => {
+            const categoryTracks = tracksBySeries.get(item.id) ?? [];
             return (
-              <article className={`audio-category-card ${category}`} key={category}>
-                <header><span>{meta.label}</span><div><h3>{meta.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 可倍速/循环/离线缓冲` : meta.empty}</p></div></header>
+              <article className={`audio-category-card ${item.id === "current" || item.id === "essay" || item.id === "wrong" ? item.id : "dynamic"}`} style={{ "--series-color": item.color } as React.CSSProperties} key={item.id}>
+                <header><span>{item.icon}</span><div><h3>{item.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 可倍速/循环/离线缓冲` : item.empty}</p></div></header>
                 <div>
                   {categoryTracks.slice(0, 2).map((track) => {
                     const selected = selectedTrack?.id === track.id;
                     return <button className={selected ? "selected" : ""} data-track-id={track.id} onClick={selectTrackFromButton} key={track.id}><b>{track.title}</b><small>{track.kicker} · {track.duration}</small></button>;
                   })}
-                  {!categoryTracks.length && <small className="category-empty">{meta.empty}</small>}
+                  {!categoryTracks.length && <small className="category-empty">{item.empty}</small>}
                 </div>
               </article>
             );
           })}
+          {!series.length && <div className="audio-empty"><span>台</span><div><h3>栏目正在上架</h3><p>运营人员发布栏目和节目后会自动出现在这里。</p></div></div>}
         </section>
       ) : (
         <section className="audio-list" aria-label="音频节目列表">

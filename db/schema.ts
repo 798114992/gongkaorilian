@@ -78,10 +78,50 @@ export const contentItems = sqliteTable(
     payloadJson: text("payload_json").notNull(),
     status: text("status").notNull().default("draft"),
     publishAt: text("publish_at"),
+    version: integer("version").notNull().default(1),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [uniqueIndex("content_items_key_uq").on(table.contentKey)],
+);
+
+export const contentItemVersions = sqliteTable(
+  "content_item_versions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    contentId: integer("content_id").notNull(),
+    version: integer("version").notNull(),
+    contentType: text("content_type").notNull(),
+    contentKey: text("content_key").notNull(),
+    title: text("title").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    status: text("status").notNull(),
+    publishAt: text("publish_at"),
+    changeType: text("change_type").notNull().default("update"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("content_item_versions_content_version_uq").on(table.contentId, table.version),
+    index("content_item_versions_content_idx").on(table.contentId, table.createdAt),
+  ],
+);
+
+export const mediaAssets = sqliteTable(
+  "media_assets",
+  {
+    id: text("id").primaryKey(),
+    objectKey: text("object_key").notNull().unique(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    checksum: text("checksum").notNull(),
+    storage: text("storage").notNull().default("r2"),
+    fallbackData: text("fallback_data"),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("media_assets_status_idx").on(table.status, table.createdAt)],
 );
 
 export const analyticsEvents = sqliteTable(
@@ -133,6 +173,14 @@ export const questions = sqliteTable(
     scoringPointsJson: text("scoring_points_json").notNull().default("[]"),
     difficulty: text("difficulty").notNull().default("中等"),
     source: text("source").notNull().default(""),
+    sourceRegion: text("source_region").notNull().default("全国"),
+    sourceYear: integer("source_year"),
+    frequency: text("frequency").notNull().default("中频"),
+    importanceStars: integer("importance_stars").notNull().default(3),
+    scoreRate: integer("score_rate").notNull().default(60),
+    suggestedSeconds: integer("suggested_seconds").notNull().default(60),
+    imageUrl: text("image_url").notNull().default(""),
+    resourceUrl: text("resource_url").notNull().default(""),
     status: text("status").notNull().default("active"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),

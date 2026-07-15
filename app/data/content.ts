@@ -12,10 +12,21 @@ export type Question = {
   technique?: string;
   bankCode?: string;
   bankName?: string;
+  region?: string;
+  examYear?: number | null;
+  frequency?: string;
+  importanceStars?: number;
+  scoreRate?: number;
+  suggestedSeconds?: number;
+  imageUrl?: string;
+  resourceUrl?: string;
+  truthLabel?: string;
 };
 
 export type PracticeDay = {
   day: number;
+  /** Explicit operator-scheduled date. When present it wins over legacy rotation. */
+  date?: string;
   label: string;
   morning: {
     title: string;
@@ -27,8 +38,10 @@ export type PracticeDay = {
   currentAffairs: Array<{ tag: string; title: string; detail: string }>;
   essay: {
     expressions: Array<{ phrase: string; scene: string }>;
+    material?: string;
     prompt: string;
     reference: string;
+    scoringPoints?: string[];
     wordLimit?: number;
   };
 };

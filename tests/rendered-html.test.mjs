@@ -34,6 +34,11 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   ]);
   assert.match(app, /题库书架/);
   assert.match(app, /resolveBankFit/);
+  assert.match(app, /bankCanPowerDailyPractice/);
+  assert.match(app, /备考组合配置缺口/);
+  assert.match(app, /bank\.questionCount > 0/);
+  assert.match(app, /bank\.examYear === target\.examYear/);
+  assert.doesNotMatch(app, /label: "题库提醒"/);
   assert.match(app, /精选标准/);
   assert.match(app, /取消/);
   assert.match(app, /buildDailyPlan/);

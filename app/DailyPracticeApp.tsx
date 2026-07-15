@@ -831,6 +831,16 @@ function targetMatchesBank(target: ExamTarget, bank: QuestionBank) {
   return target.examType === bank.examType && (target.examType === "国考" || target.province === bank.province);
 }
 
+function bankCanPowerDailyPractice(target: ExamTarget, bank: QuestionBank) {
+  // The question-bank API only returns published banks. Here we validate the
+  // remaining signals that decide whether this bank can really enter daily practice.
+  return bank.code !== "starter-gk"
+    && targetMatchesBank(target, bank)
+    && (bank.subject === "行测" || bank.subject === "综合")
+    && bank.questionCount > 0
+    && (bank.examYear === null || bank.examYear === target.examYear);
+}
+
 type BankFit = {
   show: boolean;
   score: number;
@@ -994,7 +1004,7 @@ export default function DailyPracticeApp() {
     ?? activeLearningBanks[0]
     ?? null;
   const orderedBankCodes = activeLearningBanks.map((bank) => bank.code).sort((a, b) => Number(b === primaryBank?.code) - Number(a === primaryBank?.code));
-  const missingTargets = profile.targets.filter((target) => !addedBanks.some((bank) => bank.code !== "starter-gk" && targetMatchesBank(target, bank)));
+  const bankConfigGaps = profile.targets.filter((target) => !addedBanks.some((bank) => bankCanPowerDailyPractice(target, bank)));
   const targetSummary = profile.targets.length
     ? `${profile.targets.slice(0, 3).map((target) => target.label).join("＋")}${profile.targets.length > 3 ? `等${profile.targets.length}项` : ""}`
     : "尚未设置报考目标";
@@ -1883,7 +1893,6 @@ export default function DailyPracticeApp() {
   const todayAlertItems = [
     nextCalendarEvent ? { id: "radar", label: dueReminder ? "报名提醒" : "公考雷达", title: `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}`, detail: nextCalendarEvent.days === 0 ? "今天处理" : `还有${nextCalendarEvent.days}天 · ${shortDate(nextCalendarEvent.eventDate)}`, action: () => setTab("calendar") } : { id: "radar", label: "公考雷达", title: "补全公告、职位表和报名节点", detail: "多考试报名别只记笔试日期", action: () => setTab("calendar") },
     ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", label: "复习积压", title: `${insights.dueCount}道到期题等待回炉`, detail: `今日先按价值清理${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余自动顺延`, action: () => setTab("review") }] : []),
-    ...(profile.onboarded && missingTargets.length > 0 ? [{ id: "banks", label: "题库提醒", title: `${missingTargets[0].label}题库未加入`, detail: missingTargets.length > 1 ? `还有${missingTargets.length}个目标待补题库` : "加入后才会进入综合练习", action: () => setTab("banks") }] : []),
     { id: "streak", label: "连续打卡", title: `${streak}天 · 完成今日任务自动打卡`, detail: allDailyDone ? "今日已打卡，明天继续" : `距${nextStreakMilestone}天还差${nextStreakMilestone - streak}天`, action: () => setTab("today") },
   ].slice(0, 3);
   const quickBank = activeLearningBanks.find((bank) => bank.questionCount > 0);
@@ -1895,9 +1904,14 @@ export default function DailyPracticeApp() {
 
         {activeModule ? renderModule() : <>
           {tab === "today" && <div className="page-content today-redesign">
-            <section className="today-focus-strip">
-              <div><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
-              <button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
+            <section className={`today-focus-strip${profile.onboarded && bankConfigGaps.length > 0 ? " has-config-gap" : ""}`}>
+              <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
+              <button className="today-focus-adjust" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
+              {profile.onboarded && bankConfigGaps.length > 0 && <button className="bank-config-gap" onClick={() => { setBankFilter("适合我"); setTab("banks"); }}>
+                <span>备考组合配置缺口</span>
+                <div><b>{bankConfigGaps[0].label}还没有可练的行测题库</b><small>{bankConfigGaps.length > 1 ? `共${bankConfigGaps.length}个目标待补全；需匹配地区、适用年份且已上架有题` : "需加入适用年份匹配、已上架且有题的行测/综合题库"}</small></div>
+                <i>去补全 ›</i>
+              </button>}
             </section>
 
             <section className={`today-command-card${allDailyDone ? " completed" : ""}`}>

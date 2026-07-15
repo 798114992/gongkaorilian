@@ -277,38 +277,6 @@ async function ensureBootstrapAdmin(db: AdminDatabase, configuredSecret: string)
   ]);
 }
 
-export async function resetBootstrapAdminPassword(db: AdminDatabase, password: string) {
-  await ensureAdminSchema(db);
-  const existing = await db.prepare("SELECT id FROM admin_users WHERE username = 'admin' ORDER BY id ASC LIMIT 1")
-    .first<{ id: number }>();
-  const record = await createPasswordRecord(password);
-  const revokeSessions = db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
-    WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`);
-  if (existing) {
-    await db.batch([
-      db.prepare(`UPDATE admin_users SET
-        display_name = '超级管理员',
-        password_hash = ?,
-        password_salt = ?,
-        password_iterations = ?,
-        role = 'super_admin',
-        status = 'active',
-        updated_at = CURRENT_TIMESTAMP
-        WHERE username = 'admin'`)
-        .bind(record.hash, record.salt, record.iterations),
-      revokeSessions,
-    ]);
-    return;
-  }
-  await db.batch([
-    db.prepare(`INSERT INTO admin_users
-      (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
-      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)`)
-      .bind(record.hash, record.salt, record.iterations),
-    revokeSessions,
-  ]);
-}
-
 function readCookie(request: Request, name: string) {
   const raw = request.headers.get("cookie") ?? "";
   for (const part of raw.split(";")) {

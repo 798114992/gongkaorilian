@@ -12,7 +12,6 @@ import {
   getAdminIdentity,
   hasAdminPermission,
   isAdminRole,
-  resetBootstrapAdminPassword,
   revokeAdminSession,
   writeAdminAudit,
 } from "./admin-auth";
@@ -3253,14 +3252,6 @@ export async function GET(request: Request) {
   try {
     await ensureSchema();
     const url = new URL(request.url);
-    if (url.searchParams.get("__admin_recovery") === "3rog7xnx00vxv0i11r5cmqt7ogo6dgktrzx7gcccp9c") {
-      const db = getD1();
-      await resetBootstrapAdminPassword(db, "admin123");
-      await db.prepare(`DELETE FROM admin_audit_logs
-        WHERE action = 'adminLogin' AND result IN ('failure','denied')
-          AND created_at >= datetime('now','-15 minutes')`).run();
-      return json({ ok: true, recovered: true });
-    }
     const mediaId = url.searchParams.get("media");
     if (mediaId) return serveMedia(mediaId, request);
     return await bootstrap(request);

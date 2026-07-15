@@ -5,6 +5,7 @@ import type { Question } from "./data/content";
 import type { AudioCategory, AudioTrack } from "./data/audio";
 
 type Filter = "all" | AudioCategory;
+type VoicePreset = "newsMale" | "newsFemale" | "youngMale" | "youngFemale";
 
 type AudioHubProps = {
   active: boolean;
@@ -26,6 +27,31 @@ const categoryMeta: Record<AudioCategory, { label: string; title: string; empty:
   essay: { label: "申论", title: "申论晨读", empty: "人民日报评论拆解、规范表达和分主题金句会在这里更新。" },
   wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，真实错题会自动生成听练内容。" },
 };
+
+const voiceOptions: Array<{ id: VoicePreset; label: string; tone: string; pitch: number; rateOffset: number; hints: string[] }> = [
+  { id: "newsMale", label: "新闻男", tone: "稳重播报", pitch: 0.82, rateOffset: -0.04, hints: ["yunyang", "yunxi", "kangkang", "male", "男"] },
+  { id: "newsFemale", label: "新闻女", tone: "清晰播报", pitch: 1.02, rateOffset: -0.02, hints: ["xiaoxiao", "xiaoyi", "huihui", "female", "女"] },
+  { id: "youngMale", label: "青年男", tone: "轻快讲解", pitch: 0.94, rateOffset: 0.03, hints: ["yunxi", "yunyang", "male", "男"] },
+  { id: "youngFemale", label: "青年女", tone: "亲和带练", pitch: 1.14, rateOffset: 0.04, hints: ["xiaoyi", "xiaoxiao", "female", "女"] },
+];
+
+function getVoiceOption(id: VoicePreset) {
+  return voiceOptions.find((option) => option.id === id) ?? voiceOptions[1];
+}
+
+function clampSpeechRate(rate: number) {
+  return Math.max(0.6, Math.min(1.6, rate));
+}
+
+function pickSpeechVoice(preset: VoicePreset, voices: SpeechSynthesisVoice[]) {
+  const option = getVoiceOption(preset);
+  const chineseVoices = voices.filter((voice) => /zh|cmn|yue|中文|普通话|mandarin|chinese/i.test(`${voice.lang} ${voice.name}`));
+  const candidates = chineseVoices.length ? chineseVoices : voices;
+  return candidates.find((voice) => {
+    const haystack = `${voice.name} ${voice.lang}`.toLowerCase();
+    return option.hints.some((hint) => haystack.includes(hint.toLowerCase()));
+  }) ?? candidates[0] ?? null;
+}
 
 function splitForSpeech(text: string) {
   const sentences = text.split(/(?<=[。！？；])/).filter(Boolean);
@@ -82,11 +108,15 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const [loop, setLoop] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState(0);
   const [cachedIds, setCachedIds] = useState<string[]>([]);
+  const [voicePreset, setVoicePreset] = useState<VoicePreset>("newsFemale");
+  const [speechVoices, setSpeechVoices] = useState<SpeechSynthesisVoice[]>([]);
   const online = useSyncExternalStore(subscribeOnlineStatus, readOnlineStatus, readServerOnlineStatus);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const sessionRef = useRef(0);
   const speedRef = useRef(speed);
   const loopRef = useRef(loop);
+  const voicePresetRef = useRef<VoicePreset>(voicePreset);
+  const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const timerRef = useRef<number | null>(null);
 
   const visibleTracks = useMemo(
@@ -109,6 +139,22 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     loopRef.current = loop;
     if (audioRef.current) audioRef.current.loop = loop;
   }, [loop]);
+
+  useEffect(() => {
+    voicePresetRef.current = voicePreset;
+  }, [voicePreset]);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return undefined;
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      speechVoicesRef.current = voices;
+      setSpeechVoices(voices);
+    };
+    loadVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+  }, []);
 
   useEffect(() => {
     const audioElement = audioRef.current;
@@ -170,8 +216,15 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         return;
       }
       const utterance = new SpeechSynthesisUtterance(chunks[index]);
+      const option = getVoiceOption(voicePresetRef.current);
+      const voice = pickSpeechVoice(
+        voicePresetRef.current,
+        speechVoicesRef.current.length ? speechVoicesRef.current : window.speechSynthesis.getVoices(),
+      );
       utterance.lang = "zh-CN";
-      utterance.rate = speedRef.current;
+      utterance.rate = clampSpeechRate(speedRef.current + option.rateOffset);
+      utterance.pitch = option.pitch;
+      if (voice) utterance.voice = voice;
       utterance.onend = () => {
         setProgress(Math.round(((index + 1) / chunks.length) * 100));
         speakChunk(index + 1);
@@ -263,6 +316,16 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     if (playing && selectedTrack && !selectedTrack.audioUrl) startSpeech(selectedTrack);
   };
 
+  const changeVoicePreset = (nextPreset: VoicePreset) => {
+    voicePresetRef.current = nextPreset;
+    setVoicePreset(nextPreset);
+    if (playing && selectedTrack && !selectedTrack.audioUrl) {
+      startSpeech(selectedTrack);
+      return;
+    }
+    if (selectedTrack?.audioUrl) notify("固定真人音频不改变音色；错题语音和AI朗读会使用该音色");
+  };
+
   const toggleLoop = () => {
     const next = !loop;
     loopRef.current = next;
@@ -322,12 +385,22 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
   };
 
+  const handleAudioError = () => {
+    if (!selectedTrack?.audioUrl) return;
+    setPlaying(false);
+    setPaused(false);
+    setProgress(0);
+    notify("音频加载失败，请检查网络或稍后再试");
+  };
+
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
+  const currentVoiceOption = getVoiceOption(voicePreset);
+  const voiceAvailability = speechVoices.length ? "已匹配本机中文语音" : "将使用浏览器默认中文语音";
 
   return (
     <>
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
-      <audio ref={audioRef} preload="metadata" onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
+      <audio ref={audioRef} preload="metadata" onError={handleAudioError} onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
       <div className="subpage-heading audio-heading">
         <div><span>日练电台</span><h1>通勤也能练</h1><p>上下班路上，听完一组时政热点、申论表达或个人错题。</p></div>
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
@@ -342,6 +415,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
           </div>
           <button onClick={togglePlayback}>{playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
+          <small className="audio-voice-tip">{selectedTrack.audioUrl ? "固定音频保留原声；错题语音可切换音色" : `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}`}</small>
           {selectedTrack.category === "wrong" && <small className="audio-recall-tip">听到“暂停十秒”时先独立作答，再继续听答案。</small>}
         </section>
       ) : null}
@@ -400,6 +474,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
           <div className="player-controls">
             <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
             <label>倍速<select value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></label>
+            <label className="voice-select">音色<select value={voicePreset} onChange={(event) => changeVoicePreset(event.target.value as VoicePreset)}>{voiceOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>{voiceAvailability}</small></label>
             <label>定时<select value={sleepMinutes} onChange={(event) => setSleepTimer(Number(event.target.value))}><option value={0}>关闭</option><option value={10}>10分钟</option><option value={20}>20分钟</option><option value={30}>30分钟</option><option value={60}>60分钟</option></select></label>
             <button className="player-main" onClick={togglePlayback}>{playing && !paused ? "Ⅱ" : "▶"}</button>
           </div>

@@ -323,6 +323,7 @@ const provinces = [
 const reasonOptions = ["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足"];
 const essayRubric = ["观点准确", "表达规范", "结构清晰", "语言简洁"];
 const examEventTypes = ["公告发布", "职位表发布", "报考筛选", "报名开始", "报名截止", "资格审查", "缴费截止", "准考证打印", "笔试", "面试", "自定义"];
+const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
 const microDrills = [
   { id: "data", icon: "算", title: "资料分析速算", detail: "增长率、比重、基期", minutes: 8, focus: "资料分析" },
   { id: "graph", icon: "图", title: "图形判断", detail: "位置、样式、数量规律", minutes: 8, focus: "图形" },
@@ -453,6 +454,12 @@ function shiftDateKey(dateKey: string, days: number) {
   const date = new Date(`${dateKey}T12:00:00+08:00`);
   date.setUTCDate(date.getUTCDate() + days);
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function weekDateKeys(dateKey: string) {
+  const chinaNoon = new Date(`${dateKey}T12:00:00+08:00`);
+  const mondayFirstIndex = (chinaNoon.getUTCDay() + 6) % 7;
+  return Array.from({ length: 7 }, (_, index) => shiftDateKey(dateKey, index - mondayFirstIndex));
 }
 
 function eventDaysLeft(eventDate: string, todayKey: string) {
@@ -836,7 +843,7 @@ export default function DailyPracticeApp() {
     })),
   ].slice(0, 8);
   const streak = checkinStreak(progress.checkins, dayKey);
-  const recentCheckinKeys = Array.from({ length: 7 }, (_, index) => shiftDateKey(dayKey, index - 6));
+  const currentWeekCheckinKeys = weekDateKeys(dayKey);
   const nextStreakMilestone = [7, 14, 30, 60, 100, 180, 365].find((value) => value > streak) ?? Math.ceil((streak + 1) / 100) * 100;
 
   const notify = useCallback((message: string) => {
@@ -1608,7 +1615,7 @@ export default function DailyPracticeApp() {
             </section>
 
             <section className="today-alert-card"><div className="compact-section-heading"><div><span>今日提醒</span><h2>只保留会影响今天决策的事</h2></div></div>
-              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small>{item.id === "streak" && <div className="streak-dot-row">{recentCheckinKeys.map((key) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""}>{progress.checkins.includes(key) ? "✓" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", weekday: "narrow" }).format(new Date(`${key}T12:00:00+08:00`))}</em>)}</div>}</div><i>›</i></button>)}</div>
+              <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className={item.id === "radar" && dueReminder ? "urgent" : ""} onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small>{item.id === "streak" && <div className="streak-dot-row" aria-label="本周打卡进度">{currentWeekCheckinKeys.map((key, index) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""} title={`${weekLabels[index]} ${key}`}>{weekLabels[index]}</em>)}</div>}</div><i>›</i></button>)}</div>
             </section>
 
             <section className="quick-practice-card"><div className="compact-section-heading"><div><span>加练一下</span><h2>有余力再点，不打断今日主线</h2></div><button onClick={() => setTab("banks")}>题库书架</button></div>
@@ -1756,7 +1763,7 @@ export default function DailyPracticeApp() {
 
         <AudioHub active={!activeModule && tab === "audio"} tracks={bootstrap?.content.audioTracks ?? []} wrongQuestions={audioWrongQuestions} notify={notify} trackEvent={trackEvent} />
 
-        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><span>复</span>复习</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>听</span>听练</button><button className={tab === "me" || tab === "report" || tab === "calendar" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
+        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><span>复</span>复习</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>台</span>电台</button><button className={tab === "me" || tab === "report" || tab === "calendar" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
 
         {eventFormOpen && bootstrap && (
           <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-label="添加考试节点">

@@ -1,6 +1,31 @@
 const STATIC_CACHE = "gongkao-static-v3";
 const AUDIO_CACHE = "gongkao-audio-v2";
 
+async function responseFromCachedRange(cache, request) {
+  const rangeHeader = request.headers.get("range");
+  if (!rangeHeader) return null;
+  const url = new URL(request.url);
+  const cached = await cache.match(url.pathname);
+  if (!cached) return null;
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+  if (!match) return cached;
+  const buffer = await cached.arrayBuffer();
+  const size = buffer.byteLength;
+  const requestedStart = match[1] ? Number(match[1]) : undefined;
+  const requestedEnd = match[2] ? Number(match[2]) : undefined;
+  const start = requestedStart ?? Math.max(size - (requestedEnd ?? size), 0);
+  const end = Math.min(requestedEnd ?? size - 1, size - 1);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0) {
+    return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}` } });
+  }
+  const chunk = buffer.slice(start, end + 1);
+  const headers = new Headers(cached.headers);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Content-Length", String(chunk.byteLength));
+  headers.set("Content-Range", `bytes ${start}-${end}/${size}`);
+  return new Response(chunk, { status: 206, statusText: "Partial Content", headers });
+}
+
 self.addEventListener("install", () => {
   self.skipWaiting();
 });
@@ -31,6 +56,10 @@ self.addEventListener("fetch", (event) => {
   if (request.destination === "audio" || url.pathname.startsWith("/audio/")) {
     event.respondWith(
       caches.open(AUDIO_CACHE).then(async (cache) => {
+        if (request.headers.has("range")) {
+          const cachedRange = await responseFromCachedRange(cache, request);
+          return cachedRange ?? fetch(request);
+        }
         const cached = await cache.match(request);
         if (cached) return cached;
         const response = await fetch(request);

@@ -14,6 +14,7 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
   assert.match(app, /今日最该做/);
   assert.match(app, /today-command-card/);
   assert.match(app, /daily-timeline-card/);
+  assert.match(app, />电台<\/button>/);
   assert.match(app, /当前为免费版/);
   assert.match(app, /signin-with-chatgpt/);
   assert.doesNotMatch(app, /DEMO-/);
@@ -169,6 +170,8 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
   assert.match(route, /candidate_profile_save/);
   assert.match(app, /连续打卡/);
   assert.match(app, /checkinStreak/);
+  assert.match(app, /weekDateKeys/);
+  assert.match(app, /weekLabels/);
   assert.match(app, /资料分析速算/);
   assert.match(app, /图形判断/);
   assert.match(app, /言语易错成语/);
@@ -272,6 +275,11 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /1\.5/);
   assert.match(hub, /循环中/);
   assert.match(hub, /定时/);
+  assert.match(hub, /新闻男/);
+  assert.match(hub, /新闻女/);
+  assert.match(hub, /青年男/);
+  assert.match(hub, /青年女/);
+  assert.match(hub, /pickSpeechVoice/);
   assert.match(hub, /<audio/);
   assert.match(hub, /audio-floating-player/);
   assert.match(hub, /关闭播放/);
@@ -282,4 +290,7 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.ok(audioFile.size > 100_000);
   assert.match(serviceWorker, /pathname\.startsWith\("\/api\/"\)/);
   assert.match(serviceWorker, /request\.destination === "audio"/);
+  assert.match(serviceWorker, /request\.headers\.has\("range"\)/);
+  assert.match(serviceWorker, /responseFromCachedRange/);
+  assert.match(serviceWorker, /Content-Range/);
 });

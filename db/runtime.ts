@@ -940,12 +940,14 @@ async function deployedSchemaIsCurrent() {
       EXISTS(SELECT 1 FROM pragma_table_info('users') WHERE name = 'analytics_eligible') AS analytics_eligible,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_account_links') AS device_account_links,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_imports') AS content_imports,
-      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS content_chunks`)
-      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number }>();
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS content_chunks,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS daily_steps`)
+      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number; daily_steps: number }>();
     const current = Boolean(state && Number(state.content_access) === 1 && Number(state.media_access) === 1
       && Number(state.content_review_columns) === 5 && Number(state.analytics_eligible) === 1
       && Number(state.device_account_links) === 1
       && Number(state.content_imports) === 1 && Number(state.content_chunks) === 1
+      && Number(state.daily_steps) === 1
       && String(state.version ?? "") === RUNTIME_SCHEMA_VERSION);
     if (!current) return false;
     return true;
@@ -954,11 +956,44 @@ async function deployedSchemaIsCurrent() {
   }
 }
 
+async function upgradeRuntimeSchemaFrom17() {
+  const db = getD1();
+  const state = await db.prepare(`SELECT
+    COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS prior_schema_ready`)
+    .first<{ version: string; prior_schema_ready: number }>();
+  if (String(state?.version ?? "") !== "17" || Number(state?.prior_schema_ready ?? 0) !== 1) return false;
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS daily_step_completions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      step TEXT NOT NULL,
+      source_ref TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS daily_step_completions_user_date_step_uq
+      ON daily_step_completions(user_id, date_key, step)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS daily_step_completions_user_completed_idx
+      ON daily_step_completions(user_id, completed_at)`),
+    db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
+  ]);
+  return true;
+}
+
 export async function ensureSchema() {
   if (schemaReady) return;
   if (!schemaPromise) {
     schemaPromise = (async () => {
       if (await deployedSchemaIsCurrent()) {
+        schemaReady = true;
+        return;
+      }
+      // Sites deployments do not execute Drizzle SQL automatically. Keep each
+      // production upgrade bounded and explicit so a cold request can advance
+      // one known schema version without invoking the legacy full bootstrap.
+      if (await upgradeRuntimeSchemaFrom17()) {
         schemaReady = true;
         return;
       }

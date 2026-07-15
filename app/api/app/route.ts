@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { ensureSchema, getD1 } from "../../../db/runtime";
 import { practiceDays as defaultPracticeDays, type PracticeDay, type Question } from "../../data/content";
 import { audioTracks as defaultAudioTracks, type AudioTrack } from "../../data/audio";
+import { scheduleRequestTask } from "../../../worker/execution-context";
 import {
   type AdminIdentity,
   type AdminPermission,
@@ -20,6 +21,7 @@ export const dynamic = "force-dynamic";
 
 const USER_COOKIE = "gkrl_uid";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const USER_SESSION_SECONDS = 60 * 60 * 24 * 30;
 const TRIAL_DAYS = 3;
 const TRIAL_SOURCE = "welcome-trial-v1";
 const EVENT_NAMES = new Set([
@@ -29,9 +31,16 @@ const EVENT_NAMES = new Set([
   "redeem_success",
   "invite_copy",
   "audio_play",
+  "audio_pause",
+  "audio_close",
+  "audio_complete",
+  "audio_speed_change",
   "audio_cached",
   "paywall_view",
   "paywall_action",
+  "test_order_created",
+  "test_payment_completed",
+  "entitlement_granted",
   "practice_answer",
   "practice_confidence",
   "practice_batch",
@@ -45,6 +54,16 @@ const EVENT_NAMES = new Set([
   "position_save",
   "candidate_profile_save",
   "radar_todo_toggle",
+  "essay_practice_open",
+  "essay_draft_submit",
+  "essay_revision_submit",
+  "daily_practice_complete",
+  "daily_gain_view",
+  "three_day_report_view",
+  "three_day_report_share",
+  "trial_start",
+  "invite_bound",
+  "invite_rewarded",
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
@@ -75,23 +94,79 @@ const DEFAULT_STRATEGY = {
 };
 const allowedWrongReasons = new Set(["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足", "蒙对了"]);
 const allowedConfidence = new Set(["confident", "hesitant", "guessed"]);
+const CONTENT_REPORT_REASONS = new Set([
+  "stem_or_option",
+  "answer",
+  "explanation",
+  "asset",
+  "source_label",
+  "other",
+]);
+const CONTENT_REPORT_DAILY_LIMIT = 10;
+// D1 Free allows 50 queries per Worker invocation and 100 bound parameters per
+// statement. Keep imports in small, durable units so a retry never crosses
+// either limit. 800 rows = at most 10 x 80-row chunks. This deliberately leaves
+// several calls below Cloudflare's 16-Worker loop ceiling for the originating
+// admin request, the Sites access layer and safe retry headroom.
+const QUESTION_IMPORT_CHUNK_ROWS = 80;
+const QUESTION_IMPORT_MAX_FILE_ROWS = 800;
+const QUESTION_IMPORT_MAX_CHUNKS_PER_FILE = 10;
+const QUESTION_IMPORT_UPLOAD_BYTES = 480 * 1024;
+const QUESTION_IMPORT_MAX_BINDING_BYTES = 768 * 1024;
+const QUESTION_IMPORT_D1_QUERY_LIMIT = 50;
+const QUESTION_IMPORT_D1_QUERY_RESERVE = 24;
+const QUESTION_IMPORT_CHUNK_QUERY_BUDGET = 15;
+const QUESTION_IMPORT_MAX_CHUNKS_PER_INVOCATION = Math.max(1, Math.floor(
+  (QUESTION_IMPORT_D1_QUERY_LIMIT - QUESTION_IMPORT_D1_QUERY_RESERVE) / QUESTION_IMPORT_CHUNK_QUERY_BUDGET,
+));
 
 type UserRow = {
   id: string;
   invite_code: string;
   invited_by: string | null;
+  membership_type: string;
   membership_end: string | null;
 };
 
 type CodeRow = {
   id: number;
   code_preview: string;
+  grant_type: string;
   duration_days: number;
   max_uses: number;
   used_count: number;
   status: string;
   valid_from: string | null;
   valid_until: string | null;
+};
+
+type CommerceProductRow = {
+  id: string;
+  name: string;
+  description: string;
+  price_cents: number;
+  currency: string;
+  grant_type: "duration" | "lifetime";
+  duration_days: number | null;
+  public_promise: string;
+  status: string;
+};
+
+type CommerceOrderRow = {
+  id: string;
+  order_no: string;
+  user_id: string;
+  product_id: string;
+  product_name: string;
+  amount_cents: number;
+  currency: string;
+  status: string;
+  channel: string;
+  idempotency_key: string;
+  return_context_json: string;
+  entitlement_grant_id: string | null;
+  paid_at: string | null;
+  created_at: string;
 };
 
 type Identity = {
@@ -125,6 +200,21 @@ type ImportedQuestion = {
   suggestedSeconds: number;
   imageUrl: string;
   resourceUrl: string;
+  truthVerified?: boolean;
+  sourceExamType?: string;
+  sourceBatch?: string;
+  frequencyOccurrences?: number;
+  frequencyPapers?: number;
+  frequencyYears?: number[];
+  frequencyUpdatedAt?: string | null;
+  importanceRuleVersion?: string;
+  importanceReason?: string;
+  importanceOverrideReason?: string;
+  scoreRateCorrect?: number;
+  scoreRateAttempts?: number;
+  scoreRateScope?: string;
+  scoreRateSource?: string;
+  scoreRateUpdatedAt?: string | null;
 };
 
 type QuestionProgressRow = {
@@ -166,6 +256,22 @@ type ResolvedQuestion = {
   suggestedSeconds: number;
   imageUrl: string;
   resourceUrl: string;
+  truthVerified: boolean;
+  frequencyReliable: boolean;
+  frequencyOccurrences: number;
+  frequencyPapers: number;
+  frequencyYears: number[];
+  frequencyUpdatedAt: string | null;
+  importanceReliable: boolean;
+  importanceRuleVersion: string;
+  importanceReason: string;
+  importanceOverrideReason: string;
+  scoreRateReliable: boolean;
+  scoreRateCorrect: number;
+  scoreRateAttempts: number;
+  scoreRateScope: string;
+  scoreRateSource: string;
+  scoreRateUpdatedAt: string | null;
 };
 
 type ExamTargetProfile = {
@@ -225,6 +331,8 @@ type PublishedJobPosition = {
   remarks: string;
   phone: string;
   sourceUrl: string;
+  dataVersion: number;
+  updatedAt: string;
 };
 
 type LoadedExamProfile = {
@@ -241,9 +349,9 @@ type LoadedExamProfile = {
   examDate: string | null;
 };
 
-function normalizeDailyMinutes(value: unknown): 30 | 45 | 60 {
+function normalizeDailyMinutes(value: unknown): 10 | 30 | 45 | 60 {
   const minutes = Number(value);
-  if (minutes === 45 || minutes === 60) return minutes;
+  if (minutes === 10 || minutes === 45 || minutes === 60) return minutes;
   return 30;
 }
 
@@ -260,6 +368,12 @@ function reviewAtAfterChinaDays(days: number) {
   const target = new Date(`${chinaDateKey()}T05:00:00+08:00`);
   target.setUTCDate(target.getUTCDate() + Math.max(1, days));
   return target.toISOString();
+}
+
+function chinaDateKeyAfter(dateKey: string, days: number) {
+  const target = new Date(`${dateKey}T12:00:00+08:00`);
+  target.setUTCDate(target.getUTCDate() + Math.max(0, Math.floor(days)));
+  return chinaDateKey(target);
 }
 
 function targetSecondsFor(question: Pick<ResolvedQuestion, "module" | "knowledge">) {
@@ -292,9 +406,17 @@ function validUserId(value: string | null): value is string {
   return Boolean(value && (/^[0-9a-f-]{36}$/i.test(value) || /^acct_[0-9a-f]{32}$/i.test(value)));
 }
 
-function cookieHeader(request: Request, userId: string) {
+function validLegacyDeviceId(value: string | null): value is string {
+  return Boolean(value && /^[0-9a-f-]{36}$/i.test(value));
+}
+
+function validSessionToken(value: string | null): value is string {
+  return Boolean(value && /^[A-Za-z0-9_-]{40,96}$/.test(value));
+}
+
+function cookieHeader(request: Request, sessionToken: string) {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `${USER_COOKIE}=${encodeURIComponent(userId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure}`;
+  return `${USER_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure}`;
 }
 
 function normalizeCode(value: string) {
@@ -307,21 +429,78 @@ async function digestText(value: string) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function randomSessionToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+async function sessionUserId(token: string | null) {
+  if (!validSessionToken(token)) return null;
+  const tokenHash = await digestText(`gongkao-session:${token}`);
+  const row = await getD1().prepare(`SELECT user_id FROM user_sessions
+    WHERE token_hash = ? AND revoked_at IS NULL AND datetime(expires_at) > CURRENT_TIMESTAMP`)
+    .bind(tokenHash).first<{ user_id: string }>();
+  if (!row?.user_id) return null;
+  await getD1().prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
+    .bind(tokenHash).run();
+  return { userId: row.user_id, token };
+}
+
+async function issueUserSession(userId: string) {
+  const token = randomSessionToken();
+  const tokenHash = await digestText(`gongkao-session:${token}`);
+  const expiresAt = new Date(Date.now() + USER_SESSION_SECONDS * 1000).toISOString();
+  await getD1().prepare(`INSERT INTO user_sessions
+    (token_hash, user_id, expires_at, last_seen_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`)
+    .bind(tokenHash, userId, expiresAt).run();
+  return token;
+}
+
 async function hashCode(value: string) {
   return digestText(normalizeCode(value));
 }
 
-function addDays(currentEnd: string | null, days: number) {
-  const now = Date.now();
-  const current = currentEnd ? Date.parse(currentEnd) : 0;
-  const base = Number.isFinite(current) && current > now ? current : now;
-  return new Date(base + days * 86_400_000).toISOString();
+function membershipIsActive(user: { membership_type?: string | null; membership_end?: string | null } | null | undefined) {
+  if (user?.membership_type === "lifetime") return true;
+  return Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
+}
+
+async function userMembership(userId: string) {
+  return getD1().prepare("SELECT membership_type, membership_end FROM users WHERE id = ?")
+    .bind(userId).first<{ membership_type: string; membership_end: string | null }>();
 }
 
 function laterDate(first: string | null, second: string | null) {
   const firstValue = first ? Date.parse(first) : 0;
   const secondValue = second ? Date.parse(second) : 0;
   return firstValue >= secondValue ? first : second;
+}
+
+function mergeProgressJson(deviceValue: string | undefined, accountValue: string | undefined) {
+  const parse = (value: string | undefined): Record<string, unknown> => {
+    try {
+      const parsed = JSON.parse(value ?? "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  };
+  const merge = (device: unknown, account: unknown): unknown => {
+    if (device && account && typeof device === "object" && typeof account === "object"
+      && !Array.isArray(device) && !Array.isArray(account)) {
+      const keys = new Set([...Object.keys(device as Record<string, unknown>), ...Object.keys(account as Record<string, unknown>)]);
+      return Object.fromEntries(Array.from(keys).map((key) => [key, merge(
+        (device as Record<string, unknown>)[key], (account as Record<string, unknown>)[key],
+      )]));
+    }
+    if (Array.isArray(device) && Array.isArray(account)) {
+      return account.length ? account : device;
+    }
+    return account === undefined || account === null || account === "" ? device : account;
+  };
+  return JSON.stringify(merge(parse(deviceValue), parse(accountValue)));
 }
 
 function maskCode(code: string) {
@@ -351,18 +530,21 @@ async function migrateDeviceUser(deviceId: string, accountId: string) {
   if (deviceId === accountId || !validUserId(deviceId) || deviceId.startsWith("acct_")) return;
   const db = getD1();
   const [device, account, deviceState, accountState] = await Promise.all([
-    db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(deviceId).first<{ membership_end: string | null }>(),
-    db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(accountId).first<{ membership_end: string | null }>(),
+    db.prepare("SELECT membership_type, membership_end FROM users WHERE id = ?").bind(deviceId).first<{ membership_type: string; membership_end: string | null }>(),
+    db.prepare("SELECT membership_type, membership_end FROM users WHERE id = ?").bind(accountId).first<{ membership_type: string; membership_end: string | null }>(),
     db.prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(deviceId).first<{ progress_json: string }>(),
     db.prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(accountId).first<{ progress_json: string }>(),
   ]);
   if (!device) return;
-  const accountProgress = accountState?.progress_json ?? "{}";
-  const progress = accountProgress === "{}" ? deviceState?.progress_json ?? "{}" : accountProgress;
+  const progress = mergeProgressJson(deviceState?.progress_json, accountState?.progress_json);
   await db.batch([
-    db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(laterDate(account?.membership_end ?? null, device.membership_end), accountId),
-    db.prepare(`INSERT INTO user_states (user_id, progress_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(user_id) DO UPDATE SET progress_json = excluded.progress_json, updated_at = CURRENT_TIMESTAMP`).bind(accountId, progress),
+    db.prepare("UPDATE users SET membership_type = ?, membership_end = ? WHERE id = ?")
+      .bind(account?.membership_type === "lifetime" || device.membership_type === "lifetime" ? "lifetime" : "duration",
+        account?.membership_type === "lifetime" || device.membership_type === "lifetime"
+          ? null : laterDate(account?.membership_end ?? null, device.membership_end), accountId),
+    db.prepare(`INSERT INTO user_states (user_id, progress_json, version, updated_at) VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id) DO UPDATE SET progress_json = excluded.progress_json,
+      version = user_states.version + 1, updated_at = CURRENT_TIMESTAMP`).bind(accountId, progress),
     db.prepare(`INSERT OR IGNORE INTO user_exam_profiles
       (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
       SELECT ?, exam_type, province, exam_year, exam_date, daily_minutes, CURRENT_TIMESTAMP
@@ -379,37 +561,127 @@ async function migrateDeviceUser(deviceId: string, accountId: string) {
       FROM user_exam_profiles WHERE user_id = ?`).bind(accountId, deviceId),
     db.prepare(`INSERT OR IGNORE INTO user_question_banks (user_id, bank_code, added_at)
       SELECT ?, bank_code, added_at FROM user_question_banks WHERE user_id = ?`).bind(accountId, deviceId),
-    db.prepare(`INSERT OR IGNORE INTO user_question_progress
+    db.prepare(`INSERT INTO user_question_progress
       (user_id, question_code, state, correct_count, wrong_count, uncertain_count, last_answer,
         last_correct, last_duration_ms, last_answered_at, next_review_at, favorite, wrong_reason,
-        review_count, updated_at)
+        review_count, review_stage, updated_at)
       SELECT ?, question_code, state, correct_count, wrong_count, uncertain_count, last_answer,
         last_correct, last_duration_ms, last_answered_at, next_review_at, favorite, wrong_reason,
-        review_count, updated_at FROM user_question_progress WHERE user_id = ?`).bind(accountId, deviceId),
+        review_count, review_stage, updated_at FROM user_question_progress WHERE user_id = ?
+      ON CONFLICT(user_id, question_code) DO UPDATE SET
+        state = CASE WHEN datetime(excluded.updated_at) >= datetime(user_question_progress.updated_at)
+          THEN excluded.state ELSE user_question_progress.state END,
+        correct_count = user_question_progress.correct_count + excluded.correct_count,
+        wrong_count = user_question_progress.wrong_count + excluded.wrong_count,
+        uncertain_count = user_question_progress.uncertain_count + excluded.uncertain_count,
+        last_answer = CASE WHEN user_question_progress.last_answered_at IS NULL OR (excluded.last_answered_at IS NOT NULL AND datetime(excluded.last_answered_at) >= datetime(user_question_progress.last_answered_at))
+          THEN excluded.last_answer ELSE user_question_progress.last_answer END,
+        last_correct = CASE WHEN user_question_progress.last_answered_at IS NULL OR (excluded.last_answered_at IS NOT NULL AND datetime(excluded.last_answered_at) >= datetime(user_question_progress.last_answered_at))
+          THEN excluded.last_correct ELSE user_question_progress.last_correct END,
+        last_duration_ms = CASE WHEN user_question_progress.last_answered_at IS NULL OR (excluded.last_answered_at IS NOT NULL AND datetime(excluded.last_answered_at) >= datetime(user_question_progress.last_answered_at))
+          THEN excluded.last_duration_ms ELSE user_question_progress.last_duration_ms END,
+        last_answered_at = CASE WHEN user_question_progress.last_answered_at IS NULL OR (excluded.last_answered_at IS NOT NULL AND datetime(excluded.last_answered_at) >= datetime(user_question_progress.last_answered_at))
+          THEN excluded.last_answered_at ELSE user_question_progress.last_answered_at END,
+        next_review_at = CASE
+          WHEN user_question_progress.next_review_at IS NULL THEN excluded.next_review_at
+          WHEN excluded.next_review_at IS NULL THEN user_question_progress.next_review_at
+          WHEN datetime(excluded.next_review_at) < datetime(user_question_progress.next_review_at) THEN excluded.next_review_at
+          ELSE user_question_progress.next_review_at END,
+        favorite = MAX(user_question_progress.favorite, excluded.favorite),
+        wrong_reason = CASE WHEN excluded.wrong_reason <> '' THEN excluded.wrong_reason ELSE user_question_progress.wrong_reason END,
+        review_count = user_question_progress.review_count + excluded.review_count,
+        review_stage = MAX(user_question_progress.review_stage, excluded.review_stage),
+        updated_at = CASE WHEN datetime(excluded.updated_at) >= datetime(user_question_progress.updated_at)
+          THEN excluded.updated_at ELSE user_question_progress.updated_at END`).bind(accountId, deviceId),
+    db.prepare(`INSERT INTO user_daily_usage (user_id, date_key, practice_count, audio_count, updated_at)
+      SELECT ?, date_key, practice_count, audio_count, updated_at FROM user_daily_usage WHERE user_id = ?
+      ON CONFLICT(user_id, date_key) DO UPDATE SET
+        practice_count = user_daily_usage.practice_count + excluded.practice_count,
+        audio_count = user_daily_usage.audio_count + excluded.audio_count,
+        updated_at = CURRENT_TIMESTAMP`).bind(accountId, deviceId),
+    db.prepare(`INSERT OR IGNORE INTO daily_checkins (user_id, date_key, session_id, source, completed_at)
+      SELECT ?, date_key, session_id, source, completed_at FROM daily_checkins WHERE user_id = ?`).bind(accountId, deviceId),
+    db.prepare("UPDATE practice_attempts SET attempt_key = 'merge:' || ? || ':' || COALESCE(attempt_key, CAST(id AS TEXT)) WHERE user_id = ?")
+      .bind(deviceId, deviceId),
     db.prepare("UPDATE practice_attempts SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
+    db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND status = 'active' AND EXISTS (
+        SELECT 1 FROM practice_sessions account_session WHERE account_session.user_id = ?
+          AND account_session.date_key = practice_sessions.date_key
+          AND account_session.kind = practice_sessions.kind AND account_session.mode = practice_sessions.mode
+          AND account_session.status = 'active')`).bind(deviceId, accountId),
+    db.prepare("UPDATE practice_sessions SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
+    db.prepare(`INSERT INTO essay_attempts
+      (id, user_id, question_code, date_key, stage, first_draft, self_checks_json, self_score,
+        loss_reasons_json, revised_draft, rewrite_draft, elapsed_seconds, rewrite_due_at, submitted_at,
+        completed_at, created_at, updated_at)
+      SELECT 'merge:' || ? || ':' || id, ?, question_code, date_key, stage, first_draft, self_checks_json, self_score,
+        loss_reasons_json, revised_draft, rewrite_draft, elapsed_seconds, rewrite_due_at, submitted_at,
+        completed_at, created_at, updated_at FROM essay_attempts WHERE user_id = ?
+      ON CONFLICT(user_id, question_code, date_key) DO UPDATE SET
+        stage = CASE WHEN CASE excluded.stage WHEN 'completed' THEN 5 WHEN 'rewrite_due' THEN 4 WHEN 'revised' THEN 3 WHEN 'self_review' THEN 2 WHEN 'submitted' THEN 1 ELSE 0 END
+          > CASE essay_attempts.stage WHEN 'completed' THEN 5 WHEN 'rewrite_due' THEN 4 WHEN 'revised' THEN 3 WHEN 'self_review' THEN 2 WHEN 'submitted' THEN 1 ELSE 0 END
+          THEN excluded.stage ELSE essay_attempts.stage END,
+        first_draft = CASE WHEN LENGTH(excluded.first_draft) > LENGTH(essay_attempts.first_draft) THEN excluded.first_draft ELSE essay_attempts.first_draft END,
+        self_checks_json = CASE WHEN LENGTH(excluded.self_checks_json) > LENGTH(essay_attempts.self_checks_json) THEN excluded.self_checks_json ELSE essay_attempts.self_checks_json END,
+        self_score = COALESCE(essay_attempts.self_score, excluded.self_score),
+        loss_reasons_json = CASE WHEN LENGTH(excluded.loss_reasons_json) > LENGTH(essay_attempts.loss_reasons_json) THEN excluded.loss_reasons_json ELSE essay_attempts.loss_reasons_json END,
+        revised_draft = CASE WHEN LENGTH(excluded.revised_draft) > LENGTH(essay_attempts.revised_draft) THEN excluded.revised_draft ELSE essay_attempts.revised_draft END,
+        rewrite_draft = CASE WHEN LENGTH(excluded.rewrite_draft) > LENGTH(essay_attempts.rewrite_draft) THEN excluded.rewrite_draft ELSE essay_attempts.rewrite_draft END,
+        elapsed_seconds = MAX(essay_attempts.elapsed_seconds, excluded.elapsed_seconds),
+        rewrite_due_at = COALESCE(essay_attempts.rewrite_due_at, excluded.rewrite_due_at),
+        submitted_at = COALESCE(essay_attempts.submitted_at, excluded.submitted_at),
+        completed_at = COALESCE(essay_attempts.completed_at, excluded.completed_at),
+        updated_at = CASE WHEN datetime(excluded.updated_at) > datetime(essay_attempts.updated_at) THEN excluded.updated_at ELSE essay_attempts.updated_at END`)
+      .bind(deviceId, accountId, deviceId),
     db.prepare("UPDATE OR IGNORE redemptions SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE membership_ledger SET user_id = ? WHERE user_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE invite_relations SET inviter_id = ? WHERE inviter_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE OR IGNORE invite_relations SET invitee_id = ? WHERE invitee_id = ?").bind(accountId, deviceId),
     db.prepare("UPDATE users SET invited_by = ? WHERE invited_by = ?").bind(accountId, deviceId),
+    db.prepare("DELETE FROM essay_attempts WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_question_progress WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_question_banks WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_exam_targets WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_exam_profiles WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_daily_usage WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM daily_checkins WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM user_states WHERE user_id = ?").bind(deviceId),
+    db.prepare("DELETE FROM users WHERE id = ?").bind(deviceId),
   ]);
 }
 
 async function grantWelcomeTrial(userId: string) {
   const db = getD1();
-  const claim = await db.prepare(`INSERT OR IGNORE INTO membership_ledger
-    (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'trial', ?, '新用户体验')`)
-    .bind(userId, TRIAL_DAYS, TRIAL_SOURCE)
-    .run();
-  if (!claim.meta.changes) return;
-  const user = await db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
-  await db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(addDays(user?.membership_end ?? null, TRIAL_DAYS), userId).run();
+  // D1 batch is transactional. changes() couples the entitlement mutation to
+  // the immediately preceding idempotency-ledger insert, so retries can never
+  // extend the same trial twice.
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO membership_ledger
+      (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'trial', ?, '新用户体验')`)
+      .bind(userId, TRIAL_DAYS, TRIAL_SOURCE),
+    db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+      CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+        THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+      WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+      .bind(`+${TRIAL_DAYS} days`, userId),
+  ]);
 }
 
 async function ensureUser(request: Request) {
   const db = getD1();
-  const cookieUserId = readCookie(request, USER_COOKIE);
+  const cookieValue = readCookie(request, USER_COOKIE);
+  const activeSession = await sessionUserId(cookieValue);
   const email = request.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() ?? "";
+  const signedOutAccountSession = Boolean(activeSession?.userId.startsWith("acct_") && !email);
+  if (signedOutAccountSession && activeSession) {
+    const tokenHash = await digestText(`gongkao-session:${activeSession.token}`);
+    await db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(tokenHash).run();
+  }
+  // One-way compatibility for the legacy raw device UUID cookie. Account ids
+  // are never trusted without the authenticated identity header.
+  const legacyDeviceId = !activeSession && validLegacyDeviceId(cookieValue) ? cookieValue : null;
+  const cookieUserId = signedOutAccountSession ? legacyDeviceId : activeSession?.userId ?? legacyDeviceId;
   let identity: Identity;
 
   if (email) {
@@ -434,19 +706,50 @@ async function ensureUser(request: Request) {
     db.prepare("INSERT OR IGNORE INTO users (id, invite_code) VALUES (?, ?)").bind(identity.userId, inviteCode),
     db.prepare("INSERT OR IGNORE INTO user_states (user_id, progress_json) VALUES (?, '{}')").bind(identity.userId),
   ]);
+  if (identity.signedIn) {
+    await db.prepare("UPDATE users SET verified_at = COALESCE(verified_at, CURRENT_TIMESTAMP) WHERE id = ?")
+      .bind(identity.userId).run();
+  }
+  const switchedAccountId = identity.signedIn && activeSession?.userId.startsWith("acct_")
+    && activeSession.userId !== identity.userId ? activeSession.userId : "";
+  if (switchedAccountId) {
+    // 只记录“同一浏览器会话明确切换两个已验证账号”这一强信号，不做侵入式设备指纹。
+    const switchedTokenHash = await digestText(`gongkao-session:${activeSession!.token}`);
+    await db.batch([
+      db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
+        .bind(switchedTokenHash),
+      db.prepare(`INSERT INTO analytics_events (user_id, event_name, event_data)
+        VALUES (?, 'account_switch_detected', ?)`).bind(identity.userId,
+        JSON.stringify({ otherUserId: switchedAccountId, signal: "same_browser_account_switch" })),
+      db.prepare(`INSERT INTO analytics_events (user_id, event_name, event_data)
+        VALUES (?, 'account_switch_detected', ?)`).bind(switchedAccountId,
+        JSON.stringify({ otherUserId: identity.userId, signal: "same_browser_account_switch" })),
+    ]);
+  }
   if (identity.signedIn && validUserId(cookieUserId) && cookieUserId !== identity.userId) {
     await migrateDeviceUser(cookieUserId, identity.userId);
   }
-  await grantWelcomeTrial(identity.userId);
-  const setCookie = cookieUserId === identity.userId ? undefined : cookieHeader(request, identity.userId);
+  if (identity.signedIn) await grantWelcomeTrial(identity.userId);
+  const mayReuseSession = !signedOutAccountSession && activeSession?.userId === identity.userId;
+  const sessionToken = mayReuseSession ? activeSession.token : await issueUserSession(identity.userId);
+  const setCookie = mayReuseSession ? undefined : cookieHeader(request, sessionToken);
   return { ...identity, setCookie };
 }
 
 async function seedDefaults() {
   const db = getD1();
   await db.batch([
-    db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_reward_days', '3')"),
+    db.prepare(`INSERT OR IGNORE INTO products
+      (id, name, description, price_cents, currency, grant_type, duration_days, public_promise, status, sort_order)
+      VALUES ('gkrl-lifetime-2980', '公考日练终身会员', '解锁完整真题日练、多题库组合、智能复习、申论微练与日练电台。',
+        2980, 'CNY', 'lifetime', NULL, '29.8元一次购买，终身使用', 'active', 10)`),
+    db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_reward_days', '7')"),
+    db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invitee_reward_days', '3')"),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_monthly_cap', '30')"),
+    db.prepare(`UPDATE configs SET value = '7', updated_at = CURRENT_TIMESTAMP
+      WHERE key = 'invite_reward_days' AND value = '3'
+        AND NOT EXISTS (SELECT 1 FROM configs WHERE key = 'invite_policy_v2')`),
+    db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_policy_v2', 'applied')"),
     db.prepare("UPDATE redemption_codes SET status = 'disabled' WHERE batch_name = '内测演示码'"),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
@@ -605,6 +908,22 @@ function starterQuestionList(): ResolvedQuestion[] {
     suggestedSeconds: 60,
     imageUrl: "",
     resourceUrl: "",
+    truthVerified: false,
+    frequencyReliable: false,
+    frequencyOccurrences: 0,
+    frequencyPapers: 0,
+    frequencyYears: [],
+    frequencyUpdatedAt: null,
+    importanceReliable: false,
+    importanceRuleVersion: "",
+    importanceReason: "",
+    importanceOverrideReason: "",
+    scoreRateReliable: false,
+    scoreRateCorrect: 0,
+    scoreRateAttempts: 0,
+    scoreRateScope: "",
+    scoreRateSource: "",
+    scoreRateUpdatedAt: null,
   })));
 }
 
@@ -617,6 +936,67 @@ function parseOptions(value: string) {
   }
 }
 
+function parseYearList(value: unknown) {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value ?? "[]"));
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(new Set(parsed.map(Number)
+      .filter((year) => Number.isInteger(year) && year >= 1990 && year <= new Date().getFullYear())))
+      .sort((a, b) => b - a)
+      .slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+function metricFields(row: Record<string, unknown>) {
+  const truthVerified = Number(row.truth_verified ?? 0) === 1;
+  const frequencyOccurrences = Math.max(0, Math.floor(Number(row.frequency_occurrences ?? 0)));
+  const frequencyPapers = Math.max(0, Math.floor(Number(row.frequency_papers ?? 0)));
+  const frequencyYears = parseYearList(row.frequency_years_json);
+  const frequencyUpdatedAt = row.frequency_updated_at ? String(row.frequency_updated_at) : null;
+  const frequencyReliable = truthVerified && frequencyOccurrences > 0 && frequencyPapers >= 3
+    && frequencyYears.length >= 3 && Boolean(frequencyUpdatedAt);
+  const coverage = frequencyPapers > 0 ? frequencyOccurrences / frequencyPapers : 0;
+  const frequency = frequencyReliable ? coverage >= 0.55 ? "高频" : coverage >= 0.25 ? "中频" : "低频" : "";
+  const importanceRuleVersion = String(row.importance_rule_version ?? "").trim();
+  const importanceReason = String(row.importance_reason ?? "").trim();
+  const importanceOverrideReason = String(row.importance_override_reason ?? "").trim();
+  const rawImportance = Math.floor(Number(row.importance_stars ?? 0));
+  const importanceReliable = truthVerified && rawImportance >= 1 && rawImportance <= 5
+    && Boolean(importanceRuleVersion) && Boolean(importanceReason || importanceOverrideReason)
+    && (Boolean(importanceOverrideReason) || frequencyReliable);
+  const scoreRateCorrect = Math.max(0, Math.floor(Number(row.score_rate_correct ?? 0)));
+  const scoreRateAttempts = Math.max(0, Math.floor(Number(row.score_rate_attempts ?? 0)));
+  const scoreRateScope = String(row.score_rate_scope ?? "").trim();
+  const scoreRateSource = String(row.score_rate_source ?? "platform").trim() || "platform";
+  const scoreRateUpdatedAt = row.score_rate_updated_at ? String(row.score_rate_updated_at) : null;
+  const scoreRateReliable = truthVerified && scoreRateAttempts >= 100 && scoreRateCorrect <= scoreRateAttempts
+    && Boolean(scoreRateScope) && Boolean(scoreRateUpdatedAt);
+  const scoreRate = scoreRateAttempts > 0 ? Math.round(scoreRateCorrect * 100 / scoreRateAttempts) : 0;
+  return {
+    truthVerified,
+    frequency,
+    frequencyReliable,
+    frequencyOccurrences,
+    frequencyPapers,
+    frequencyYears,
+    frequencyUpdatedAt,
+    importanceStars: importanceReliable ? rawImportance : 0,
+    importanceReliable,
+    importanceRuleVersion,
+    importanceReason,
+    importanceOverrideReason,
+    scoreRate: scoreRateReliable ? scoreRate : 0,
+    scoreRateReliable,
+    scoreRateCorrect,
+    scoreRateAttempts,
+    scoreRateScope,
+    scoreRateSource,
+    scoreRateUpdatedAt,
+  };
+}
+
 function answerIndex(value: string | null) {
   if (!value) return -1;
   const normalized = value.trim().toUpperCase();
@@ -627,6 +1007,7 @@ function answerIndex(value: string | null) {
 
 function publicQuestion(question: ResolvedQuestion, progress?: QuestionProgressRow) {
   const due = Boolean(progress?.next_review_at && Date.parse(progress.next_review_at) <= Date.now());
+  const truthRegion = normalizeProvince(question.region) === "全国" ? "国考" : normalizeProvince(question.region);
   return {
     id: question.id,
     module: question.module,
@@ -644,10 +1025,33 @@ function publicQuestion(question: ResolvedQuestion, progress?: QuestionProgressR
     frequency: question.frequency,
     importanceStars: question.importanceStars,
     scoreRate: question.scoreRate,
+    truthVerified: question.truthVerified,
+    frequencyMeta: {
+      reliable: question.frequencyReliable,
+      occurrences: question.frequencyOccurrences,
+      paperCount: question.frequencyPapers,
+      years: question.frequencyYears,
+      updatedAt: question.frequencyUpdatedAt,
+      scope: question.scopeLabel,
+    },
+    importanceMeta: {
+      reliable: question.importanceReliable,
+      ruleVersion: question.importanceRuleVersion,
+      reason: question.importanceReason,
+      overrideReason: question.importanceOverrideReason,
+    },
+    scoreRateMeta: {
+      reliable: question.scoreRateReliable,
+      correct: question.scoreRateCorrect,
+      sampleSize: question.scoreRateAttempts,
+      scope: question.scoreRateScope,
+      source: question.scoreRateSource,
+      updatedAt: question.scoreRateUpdatedAt,
+    },
     suggestedSeconds: question.suggestedSeconds,
     imageUrl: question.imageUrl,
     resourceUrl: question.resourceUrl,
-    truthLabel: question.region && question.examYear ? `${question.region}-${question.examYear}` : question.region || "真题",
+    truthLabel: truthRegion && question.examYear ? `${truthRegion}-${question.examYear}` : truthRegion || "真题",
     state: progress?.state ?? "new",
     due,
     favorite: Boolean(progress?.favorite),
@@ -671,9 +1075,13 @@ function questionValueRank(
   const scoreDistance = question.scoreRate >= sweetSpot[0] && question.scoreRate <= sweetSpot[1]
     ? 0
     : Math.min(Math.abs(question.scoreRate - sweetSpot[0]), Math.abs(question.scoreRate - sweetSpot[1]));
-  const normalizedScorePenalty = Math.min(1, scoreDistance / 40) * weights.scoreRate;
-  const normalizedFrequencyPenalty = (question.frequency === "高频" ? 0 : question.frequency === "中频" ? 0.5 : 1) * weights.frequency;
-  const normalizedImportancePenalty = ((5 - question.importanceStars) / 4) * weights.importance;
+  const normalizedScorePenalty = question.scoreRateReliable
+    ? Math.min(1, scoreDistance / 40) * weights.scoreRate
+    : 0.5 * weights.scoreRate;
+  const normalizedFrequencyPenalty = (question.frequencyReliable
+    ? question.frequency === "高频" ? 0 : question.frequency === "中频" ? 0.5 : 1
+    : 0.5) * weights.frequency;
+  const normalizedImportancePenalty = (question.importanceReliable ? (5 - question.importanceStars) / 4 : 0.5) * weights.importance;
   return normalizedScorePenalty + normalizedFrequencyPenalty + normalizedImportancePenalty;
 }
 
@@ -719,6 +1127,49 @@ async function selectedBankCodes(userId: string) {
   const rows = await getD1().prepare("SELECT bank_code FROM user_question_banks WHERE user_id = ? ORDER BY added_at")
     .bind(userId).all<{ bank_code: string }>();
   return rows.results.map((row) => row.bank_code).filter((code) => code !== STARTER_BANK_CODE);
+}
+
+async function effectivePracticeBankCodes(userId: string, selected: string[], membershipActive: boolean) {
+  if (membershipActive || selected.length <= 1) return selected;
+  const row = await getD1().prepare(`SELECT uqb.bank_code
+    FROM user_question_banks uqb
+    JOIN question_banks qb ON qb.bank_code = uqb.bank_code AND qb.status = 'published'
+    WHERE uqb.user_id = ? AND EXISTS (
+      SELECT 1 FROM question_bank_items qbi
+      JOIN questions q ON q.id = qbi.question_id
+      WHERE qbi.bank_id = qb.id AND q.status = 'active'
+        AND q.truth_verified = 1 AND q.review_status = 'approved'
+        AND ((qb.subject = '申论' AND q.subject = '申论') OR (qb.subject <> '申论' AND q.subject = '行测'))
+    )
+    ORDER BY uqb.added_at, uqb.bank_code LIMIT 1`).bind(userId).first<{ bank_code: string }>();
+  return row?.bank_code ? [row.bank_code] : selected.slice(0, 1);
+}
+
+async function loadDailyUsage(userId: string, dateKey = chinaDateKey()) {
+  const row = await getD1().prepare(`SELECT practice_count, audio_count FROM user_daily_usage
+    WHERE user_id = ? AND date_key = ?`).bind(userId, dateKey)
+    .first<{ practice_count: number; audio_count: number }>();
+  return { practice: Number(row?.practice_count ?? 0), audio: Number(row?.audio_count ?? 0) };
+}
+
+type PracticeSessionRow = {
+  id: string;
+  status: string;
+  target_count: number;
+  question_codes_json: string;
+  answered_count: number;
+  correct_count: number;
+  review_added: number;
+  elapsed_seconds: number;
+};
+
+function safeStringArray(value: unknown, max = 100) {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? Array.from(new Set(parsed.map(String).filter(Boolean))).slice(0, max) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function loadExamProfile(userId: string): Promise<LoadedExamProfile> {
@@ -801,7 +1252,9 @@ async function loadQuestionBanks(userId: string) {
   const [selected, rows, profile] = await Promise.all([
     selectedBankCodes(userId),
     db.prepare(`SELECT qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year, qb.subject,
-      qb.description, qb.cover_color, COUNT(DISTINCT q.question_code) AS question_count,
+      qb.description, qb.cover_color,
+      COUNT(DISTINCT CASE WHEN q.subject = '行测' THEN q.question_code END) AS practice_question_count,
+      COUNT(DISTINCT CASE WHEN q.subject = '申论' THEN q.question_code END) AS essay_question_count,
       COUNT(DISTINCT CASE WHEN uqp.last_answered_at IS NOT NULL THEN q.question_code END) AS studied_count,
       COUNT(DISTINCT CASE WHEN uqp.state = 'mastered' THEN q.question_code END) AS mastered_count,
       COUNT(DISTINCT CASE WHEN uqp.state = 'weak' THEN q.question_code END) AS weak_count,
@@ -809,11 +1262,12 @@ async function loadQuestionBanks(userId: string) {
       FROM question_banks qb
       LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
       LEFT JOIN questions q ON q.id = qbi.question_id AND q.status = 'active'
+        AND q.truth_verified = 1 AND q.review_status = 'approved'
       LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
       WHERE qb.status = 'published'
       GROUP BY qb.id ORDER BY qb.updated_at DESC`).bind(userId).all<{
         bank_code: string; name: string; exam_type: string; province: string | null; exam_year: number | null;
-        subject: string; description: string; cover_color: string; question_count: number; studied_count: number; mastered_count: number;
+        subject: string; description: string; cover_color: string; practice_question_count: number; essay_question_count: number; studied_count: number; mastered_count: number;
         weak_count: number; due_count: number;
       }>(),
     loadExamProfile(userId),
@@ -823,7 +1277,8 @@ async function loadQuestionBanks(userId: string) {
     const matchingTarget = profile.targets.find((target) => row.exam_type === "national"
       ? target.examType === "国考"
       : row.exam_type === "provincial" ? target.examType === "省考" && normalizeProvince(target.province) === normalizeProvince(row.province) : true);
-    const recommended = targetMatch && (!row.exam_year || matchingTarget?.examYear === row.exam_year);
+    const recommended = targetMatch && (!row.exam_year || Boolean(matchingTarget
+      && row.exam_year <= matchingTarget.examYear && row.exam_year >= matchingTarget.examYear - 4));
     const scopeLabel = row.exam_type === "provincial" ? `${normalizeProvince(row.province) || "未设置"}省考专属` : row.exam_type === "national" ? "国考专属" : "专项训练";
     const mismatchReason = targetMatch ? "" : row.exam_type === "provincial"
       ? `添加后会同步加入“${normalizeProvince(row.province) || "该省"}省考”报考目标。`
@@ -837,7 +1292,7 @@ async function loadQuestionBanks(userId: string) {
     subject: row.subject,
     description: row.description,
     coverColor: row.cover_color,
-    questionCount: Number(row.question_count),
+    questionCount: Number(row.subject === "申论" ? row.essay_question_count : row.practice_question_count),
     studiedCount: Number(row.studied_count),
     masteredCount: Number(row.mastered_count),
     weakCount: Number(row.weak_count),
@@ -853,24 +1308,78 @@ async function loadQuestionBanks(userId: string) {
 async function loadStudyInsights(userId: string) {
   const db = getD1();
   const selectedBanks = (await selectedBankCodes(userId)).slice(0, 32);
-  const [summary, modules, states, recent] = await Promise.all([
+  const appliedAttempt = "apply_status = 'applied'";
+  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(AVG(duration_ms), 0) AS avg_duration,
       COALESCE(SUM(CASE WHEN confidence IN ('hesitant', 'guessed') OR uncertain = 1 THEN 1 ELSE 0 END), 0) AS uncertain_total,
       COALESCE(SUM(overtime), 0) AS overtime_total
-      FROM practice_attempts WHERE user_id = ?`).bind(userId)
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}`).bind(userId)
       .first<{ total: number; correct: number; avg_duration: number; uncertain_total: number; overtime_total: number }>(),
     db.prepare(`SELECT module, COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(AVG(duration_ms), 0) AS avg_duration FROM practice_attempts WHERE user_id = ?
-        AND answered_at >= datetime('now', '-14 days')
+        AND ${appliedAttempt} AND answered_at >= datetime('now', '-14 days')
       GROUP BY module ORDER BY total DESC LIMIT 8`).bind(userId)
       .all<{ module: string; total: number; correct: number; avg_duration: number }>(),
     db.prepare(`SELECT state, COUNT(*) AS total FROM user_question_progress WHERE user_id = ? GROUP BY state`)
       .bind(userId).all<{ state: string; total: number }>(),
     db.prepare(`SELECT date(answered_at, '+8 hours') AS day, COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct
-      FROM practice_attempts WHERE user_id = ? AND answered_at >= datetime('now', '-6 days')
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt} AND answered_at >= datetime('now', '-6 days')
       GROUP BY date(answered_at, '+8 hours') ORDER BY day`).bind(userId)
       .all<{ day: string; total: number; correct: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
+        COALESCE(SUM(CASE WHEN was_due = 1 AND is_correct = 1 AND confidence = 'confident' THEN 1 ELSE 0 END), 0) AS repaired_due,
+        COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong_total,
+        COALESCE(SUM(CASE WHEN confidence = 'hesitant' THEN 1 ELSE 0 END), 0) AS hesitant_total,
+        COALESCE(SUM(CASE WHEN confidence = 'guessed' THEN 1 ELSE 0 END), 0) AS guessed_total,
+        COALESCE(SUM(overtime), 0) AS overtime_total, COALESCE(AVG(duration_ms), 0) AS avg_duration
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}
+        AND date(answered_at, '+8 hours') = date('now', '+8 hours')`).bind(userId)
+      .first<{ total: number; correct: number; repaired_due: number; wrong_total: number; hesitant_total: number; guessed_total: number; overtime_total: number; avg_duration: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct, COALESCE(AVG(duration_ms), 0) AS avg_duration
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}
+        AND date(answered_at, '+8 hours') >= date('now', '+8 hours', '-7 days')
+        AND date(answered_at, '+8 hours') < date('now', '+8 hours')`).bind(userId)
+      .first<{ total: number; correct: number; avg_duration: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
+        COUNT(DISTINCT date(answered_at, '+8 hours')) AS active_days, COALESCE(AVG(duration_ms), 0) AS avg_duration,
+        COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong_total,
+        COALESCE(SUM(CASE WHEN is_correct = 0 AND EXISTS (
+          SELECT 1 FROM practice_attempts prior WHERE prior.user_id = practice_attempts.user_id
+            AND prior.question_code = practice_attempts.question_code AND prior.id < practice_attempts.id
+            AND prior.apply_status = 'applied' AND prior.is_correct = 0
+        ) THEN 1 ELSE 0 END), 0) AS repeated_wrong
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}
+        AND date(answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')`).bind(userId)
+      .first<{ total: number; correct: number; active_days: number; avg_duration: number; wrong_total: number; repeated_wrong: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
+        COUNT(DISTINCT date(answered_at, '+8 hours')) AS active_days, COALESCE(AVG(duration_ms), 0) AS avg_duration,
+        COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong_total,
+        COALESCE(SUM(CASE WHEN is_correct = 0 AND EXISTS (
+          SELECT 1 FROM practice_attempts prior WHERE prior.user_id = practice_attempts.user_id
+            AND prior.question_code = practice_attempts.question_code AND prior.id < practice_attempts.id
+            AND prior.apply_status = 'applied' AND prior.is_correct = 0
+        ) THEN 1 ELSE 0 END), 0) AS repeated_wrong
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}
+        AND date(answered_at, '+8 hours') BETWEEN date('now', '+8 hours', '-13 days') AND date('now', '+8 hours', '-7 days')`).bind(userId)
+      .first<{ total: number; correct: number; active_days: number; avg_duration: number; wrong_total: number; repeated_wrong: number }>(),
+    db.prepare(`SELECT DISTINCT q.knowledge_point FROM practice_attempts pa
+      JOIN questions q ON q.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND q.frequency_reliable = 1
+        AND q.frequency_occurrences >= 3 AND TRIM(q.knowledge_point) <> ''
+        AND date(pa.answered_at, '+8 hours') = date('now', '+8 hours')
+      ORDER BY q.frequency_occurrences DESC LIMIT 6`).bind(userId).all<{ knowledge_point: string }>(),
+    db.prepare(`SELECT COUNT(DISTINCT q.knowledge_point) AS total FROM practice_attempts pa
+      JOIN questions q ON q.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND q.frequency_reliable = 1
+        AND q.frequency_occurrences >= 3 AND TRIM(q.knowledge_point) <> ''
+        AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')`).bind(userId).first<{ total: number }>(),
+    db.prepare(`SELECT DISTINCT q.knowledge_point FROM practice_attempts pa
+      JOIN questions q ON q.question_code = pa.question_code
+      JOIN user_question_progress uqp ON uqp.user_id = pa.user_id AND uqp.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND uqp.state = 'mastered'
+        AND TRIM(q.knowledge_point) <> '' AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
+      ORDER BY q.knowledge_point LIMIT 5`).bind(userId).all<{ knowledge_point: string }>(),
   ]);
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
@@ -889,6 +1398,7 @@ async function loadStudyInsights(userId: string) {
       JOIN questions q ON q.id = qbi.question_id
       JOIN question_banks qb ON qb.id = qbi.bank_id
       WHERE q.question_code = uqp.question_code AND qb.status = 'published'
+        AND q.truth_verified = 1 AND q.review_status = 'approved'
         AND qb.bank_code IN (${publishedBanks.map(() => "?").join(",")})
     )`);
     dueBindings.push(...publishedBanks);
@@ -915,6 +1425,25 @@ async function loadStudyInsights(userId: string) {
     .sort((a, b) => a.accuracy - b.accuracy || b.avgSeconds - a.avgSeconds)[0] ?? null;
   const focusQuestionCount = focusModule ? 5 : 0;
   const estimatedMinutes = Math.max(5, Math.ceil(tomorrowDueCount * 1.2 + focusQuestionCount * 1.2));
+  const ratio = (part: number, whole: number) => whole > 0 ? Math.round(part * 100 / whole) : null;
+  const todayTotal = Number(todayStats?.total ?? 0);
+  const todayAccuracy = ratio(Number(todayStats?.correct ?? 0), todayTotal);
+  const previousDailyTotal = Number(previousDailyStats?.total ?? 0);
+  const previousDailyAccuracy = ratio(Number(previousDailyStats?.correct ?? 0), previousDailyTotal);
+  const todayAvgSeconds = todayTotal ? Math.round(Number(todayStats?.avg_duration ?? 0) / 1000) : 0;
+  const previousDailyAvgSeconds = previousDailyTotal ? Math.round(Number(previousDailyStats?.avg_duration ?? 0) / 1000) : null;
+  const weeklyTotal = Number(weeklyStats?.total ?? 0);
+  const previousWeeklyTotal = Number(previousWeeklyStats?.total ?? 0);
+  const weeklyAccuracy = ratio(Number(weeklyStats?.correct ?? 0), weeklyTotal);
+  const previousWeeklyAccuracy = ratio(Number(previousWeeklyStats?.correct ?? 0), previousWeeklyTotal);
+  const weeklyAvgSeconds = weeklyTotal ? Math.round(Number(weeklyStats?.avg_duration ?? 0) / 1000) : 0;
+  const previousWeeklyAvgSeconds = previousWeeklyTotal ? Math.round(Number(previousWeeklyStats?.avg_duration ?? 0) / 1000) : null;
+  const weeklyRepeatRate = ratio(Number(weeklyStats?.repeated_wrong ?? 0), Number(weeklyStats?.wrong_total ?? 0));
+  const previousWeeklyRepeatRate = ratio(Number(previousWeeklyStats?.repeated_wrong ?? 0), Number(previousWeeklyStats?.wrong_total ?? 0));
+  const nextIssues = [...moduleInsights]
+    .sort((a, b) => a.accuracy - b.accuracy || b.avgSeconds - a.avgSeconds)
+    .slice(0, 3)
+    .map((item) => `${item.module}：${item.accuracy}%正确率，平均${item.avgSeconds}秒`);
   return {
     total,
     accuracy: total ? Math.round((correct / total) * 100) : 0,
@@ -929,6 +1458,32 @@ async function loadStudyInsights(userId: string) {
     },
     modules: moduleInsights,
     recent: recent.results.map((row) => ({ day: row.day, total: Number(row.total), accuracy: Number(row.total) ? Math.round((Number(row.correct) / Number(row.total)) * 100) : 0 })),
+    today: {
+      total: todayTotal,
+      correct: Number(todayStats?.correct ?? 0),
+      repairedDue: Number(todayStats?.repaired_due ?? 0),
+      wrong: Number(todayStats?.wrong_total ?? 0),
+      hesitant: Number(todayStats?.hesitant_total ?? 0),
+      guessed: Number(todayStats?.guessed_total ?? 0),
+      overtime: Number(todayStats?.overtime_total ?? 0),
+      avgSeconds: todayAvgSeconds,
+      accuracyDelta: todayAccuracy !== null && previousDailyAccuracy !== null ? todayAccuracy - previousDailyAccuracy : null,
+      avgSecondsDelta: previousDailyAvgSeconds !== null ? todayAvgSeconds - previousDailyAvgSeconds : null,
+      highFrequencyPoints: todayHighFrequency.results.map((row) => row.knowledge_point),
+    },
+    weekly: {
+      total: weeklyTotal,
+      accuracy: weeklyAccuracy ?? 0,
+      activeDays: Number(weeklyStats?.active_days ?? 0),
+      avgSeconds: weeklyAvgSeconds,
+      highFrequencyCoverage: Number(weeklyHighFrequency?.total ?? 0),
+      repeatErrorRate: weeklyRepeatRate,
+      accuracyDelta: weeklyAccuracy !== null && previousWeeklyAccuracy !== null ? weeklyAccuracy - previousWeeklyAccuracy : null,
+      avgSecondsDelta: previousWeeklyAvgSeconds !== null ? weeklyAvgSeconds - previousWeeklyAvgSeconds : null,
+      repeatErrorRateDelta: weeklyRepeatRate !== null && previousWeeklyRepeatRate !== null ? weeklyRepeatRate - previousWeeklyRepeatRate : null,
+      masteredPoints: masteredThisWeek.results.map((row) => row.knowledge_point),
+      nextIssues,
+    },
     tomorrowPlan: {
       dueCount: tomorrowDueCount,
       focusModule: focusModule?.module ?? null,
@@ -941,22 +1496,30 @@ async function loadStudyInsights(userId: string) {
 
 async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
   const db = getD1();
-  const rows = await db.prepare(`SELECT question_code FROM user_question_progress
+  const rows = await db.prepare(`SELECT question_code, next_review_at FROM user_question_progress
     WHERE user_id = ? AND wrong_count > 0 AND last_answered_at IS NOT NULL
-    ORDER BY last_answered_at DESC LIMIT 20`).bind(userId).all<{ question_code: string }>();
+    ORDER BY CASE WHEN datetime(next_review_at) <= CURRENT_TIMESTAMP THEN 0 ELSE 1 END,
+      datetime(next_review_at), last_answered_at DESC LIMIT 20`)
+    .bind(userId).all<{ question_code: string; next_review_at: string | null }>();
   const orderedCodes = rows.results.map((row) => row.question_code);
+  const reviewDueByCode = new Map(rows.results.map((row) => [row.question_code, row.next_review_at]));
   if (!orderedCodes.length) return [];
 
   const questionMap = new Map<string, Question>();
   for (const question of starterQuestionList()) {
-    if (orderedCodes.includes(question.id)) questionMap.set(question.id, question);
+    if (orderedCodes.includes(question.id)) questionMap.set(question.id, {
+      ...question,
+      nextReviewAt: reviewDueByCode.get(question.id) ?? null,
+      due: Boolean(reviewDueByCode.get(question.id) && Date.parse(String(reviewDueByCode.get(question.id))) <= Date.now()),
+    } as Question);
   }
   const databaseCodes = orderedCodes.filter((code) => !questionMap.has(code));
   if (databaseCodes.length) {
     const placeholders = databaseCodes.map(() => "?").join(",");
     const databaseRows = await db.prepare(`SELECT question_code, module, sub_type, stem, options_json,
       answer, explanation, source, difficulty FROM questions
-      WHERE status = 'active' AND question_code IN (${placeholders})`).bind(...databaseCodes).all<Record<string, unknown>>();
+      WHERE status = 'active' AND truth_verified = 1 AND review_status = 'approved'
+        AND question_code IN (${placeholders})`).bind(...databaseCodes).all<Record<string, unknown>>();
     for (const row of databaseRows.results) {
       const id = String(row.question_code);
       questionMap.set(id, {
@@ -969,7 +1532,9 @@ async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
         knowledge: String(row.sub_type ?? row.module),
         source: String(row.source ?? "题库导入"),
         difficulty: String(row.difficulty ?? "中等"),
-      });
+        nextReviewAt: reviewDueByCode.get(id) ?? null,
+        due: Boolean(reviewDueByCode.get(id) && Date.parse(String(reviewDueByCode.get(id))) <= Date.now()),
+      } as Question);
     }
   }
   return orderedCodes.map((code) => questionMap.get(code)).filter((question): question is Question => Boolean(question));
@@ -977,7 +1542,8 @@ async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
 
 async function loadContent(membershipActive: boolean, profile?: LoadedExamProfile) {
   const rows = await getD1().prepare(`SELECT content_type, content_key, title, payload_json, version
-    FROM content_items WHERE status IN ('published', 'scheduled') AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
+    FROM content_items WHERE content_type <> 'job_position' AND status IN ('published', 'scheduled')
+      AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
     ORDER BY id ASC`).all<{ content_type: string; content_key: string; payload_json: string }>();
   const dayMap = new Map<string, PracticeDay>();
   const audioMap = new Map<string, AudioTrack>();
@@ -1087,6 +1653,8 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
             remarks: trimmed(item.remarks, 220),
             phone: trimmed(item.phone, 80),
             sourceUrl: /^https?:\/\//i.test(trimmed(item.sourceUrl, 400)) ? trimmed(item.sourceUrl, 400) : "",
+            dataVersion: Math.max(1, Math.floor(Number(item.dataVersion ?? row.version)) || 1),
+            updatedAt: trimmed(item.updatedAt, 40),
           });
         }
       }
@@ -1199,10 +1767,11 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
 
   const previewDay = practiceDays[0] ? clone(practiceDays[0]) : null;
   if (previewDay) {
-    previewDay.questions = previewDay.questions.slice(0, 5).map((question) => ({ ...question, explanation: "会员可查看完整解析与解题技巧。" }));
+    // Free users are limited by server-side daily usage, not by hiding the
+    // explanation of a question they have already answered.
+    previewDay.questions = previewDay.questions.slice(0, 5);
     previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
     previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
-    previewDay.essay.reference = "兑换会员码后查看参考答案。";
   }
   return {
     ...common,
@@ -1213,36 +1782,142 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
   };
 }
 
+function parseJobPosition(contentKey: string, payloadJson: string, dataVersion = 1, updatedAt = ""): PublishedJobPosition | null {
+  try {
+    const item = JSON.parse(payloadJson) as Record<string, unknown>;
+    const targetCode = trimmed(item.targetCode, 60);
+    const title = trimmed(item.title, 80);
+    if (!targetCode || !title) return null;
+    return {
+      id: `position-${contentKey}`,
+      targetCode,
+      targetLabel: trimmed(item.targetLabel, 24) || (targetCode === "national" ? "国考" : targetCode.replace(/^province:/, "") + "省考"),
+      examName: trimmed(item.examName, 80),
+      department: trimmed(item.department, 80),
+      unit: trimmed(item.unit, 80),
+      title,
+      code: trimmed(item.code, 40) || contentKey,
+      region: trimmed(item.region, 60),
+      recruitCount: Math.max(0, Math.min(999, Math.round(Number(item.recruitCount ?? 0)))),
+      education: trimmed(item.education, 60) || "不限",
+      degree: trimmed(item.degree, 60) || "不限",
+      majors: trimmed(item.majors, 160) || "不限",
+      majorCodes: trimmed(item.majorCodes, 160),
+      freshLimit: trimmed(item.freshLimit, 80) || "不限",
+      politicalStatus: trimmed(item.politicalStatus, 60) || "不限",
+      household: trimmed(item.household, 80) || "不限",
+      grassrootsYears: trimmed(item.grassrootsYears, 60) || "不限",
+      gender: trimmed(item.gender, 20) || "不限",
+      certificates: trimmed(item.certificates, 120) || "不限",
+      remote: trimmed(item.remote, 100),
+      remarks: trimmed(item.remarks, 220),
+      phone: trimmed(item.phone, 80),
+      sourceUrl: /^https?:\/\//i.test(trimmed(item.sourceUrl, 400)) ? trimmed(item.sourceUrl, 400) : "",
+      dataVersion: Math.max(1, Math.floor(Number(item.dataVersion ?? dataVersion)) || 1),
+      updatedAt: trimmed(item.updatedAt, 40) || updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function searchJobPositions(userId: string, payload: Record<string, unknown>) {
+  const profile = await loadExamProfile(userId);
+  const allowedTargets = new Set(profile.targets.map((target) => target.code));
+  const requestedTargets = Array.isArray(payload.targetCodes)
+    ? payload.targetCodes.map(String).filter((code) => allowedTargets.has(code))
+    : [];
+  const targetCodes = (requestedTargets.length ? requestedTargets : Array.from(allowedTargets)).slice(0, 32);
+  if (!targetCodes.length) return json({ positions: [], total: 0, page: 1, pageSize: 30 });
+  const candidate = payload.candidateProfile && typeof payload.candidateProfile === "object"
+    ? payload.candidateProfile as Record<string, unknown> : {};
+  const keyword = trimmed(payload.keyword, 80);
+  const pageSize = Math.max(1, Math.min(50, Math.floor(Number(payload.pageSize)) || 30));
+  const page = Math.max(1, Math.floor(Number(payload.page)) || 1);
+  const clauses = [`json_extract(payload_json, '$.targetCode') IN (${targetCodes.map(() => "?").join(",")})`];
+  const bindings: unknown[] = [...targetCodes];
+  const addInclusiveFilter = (field: string, value: unknown) => {
+    const normalized = trimmed(value, 80);
+    if (!normalized) return;
+    clauses.push(`(COALESCE(json_extract(payload_json, '$.${field}'), '') IN ('', '不限')
+      OR json_extract(payload_json, '$.${field}') LIKE ?)`);
+    bindings.push(`%${normalized}%`);
+  };
+  addInclusiveFilter("education", candidate.education);
+  addInclusiveFilter("degree", candidate.degree);
+  addInclusiveFilter("freshLimit", candidate.freshStatus);
+  addInclusiveFilter("politicalStatus", candidate.politicalStatus);
+  addInclusiveFilter("grassrootsYears", candidate.grassrootsYears);
+  const major = trimmed(candidate.major, 80);
+  if (major) {
+    clauses.push(`(COALESCE(json_extract(payload_json, '$.majors'), '') IN ('', '不限')
+      OR json_extract(payload_json, '$.majors') LIKE ? OR json_extract(payload_json, '$.majorCodes') LIKE ?)`);
+    bindings.push(`%${major}%`, `%${major}%`);
+  }
+  if (keyword) {
+    clauses.push(`(title LIKE ? OR json_extract(payload_json, '$.department') LIKE ?
+      OR json_extract(payload_json, '$.unit') LIKE ? OR json_extract(payload_json, '$.region') LIKE ?
+      OR json_extract(payload_json, '$.code') LIKE ?)`);
+    bindings.push(...Array(5).fill(`%${keyword}%`));
+  }
+  const rows = await getD1().prepare(`SELECT content_key, payload_json, version, updated_at, COUNT(*) OVER() AS total_count
+    FROM content_items WHERE content_type = 'job_position' AND status IN ('published', 'scheduled')
+      AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
+      AND ${clauses.join(" AND ")}
+    ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`)
+    .bind(...bindings, pageSize, (page - 1) * pageSize).all<{ content_key: string; payload_json: string; version: number; updated_at: string; total_count: number }>();
+  const positions = rows.results.map((row) => parseJobPosition(row.content_key, row.payload_json, row.version, row.updated_at))
+    .filter((item): item is PublishedJobPosition => Boolean(item));
+  return json({ positions, total: Number(rows.results[0]?.total_count ?? 0), page, pageSize });
+}
+
 async function bootstrap(request: Request) {
   await ensureSchema();
   await seedDefaults();
   const identity = await ensureUser(request);
+  if (identity.signedIn) await reconcileInviteReward(identity.userId);
   const db = getD1();
-  const [user, state, ledger, inviteStats, inviteDays, inviteCap, examProfile, questionBanks, studyInsights, wrongAudioQuestions] = await Promise.all([
-    db.prepare("SELECT id, invite_code, invited_by, membership_end FROM users WHERE id = ?").bind(identity.userId).first<UserRow>(),
-    db.prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(identity.userId).first<{ progress_json: string }>(),
+  // 若客户端在会话完成后、写打卡前断网，下一次启动仍可由服务端完成会话恢复；
+  // 只从达到题量目标的 daily 会话推导，绝不读取客户端 progress_json。
+  await db.prepare(`INSERT OR IGNORE INTO daily_checkins
+    (user_id, date_key, session_id, source, completed_at)
+    SELECT user_id, date_key, id, 'daily_practice', COALESCE(completed_at, updated_at, created_at, CURRENT_TIMESTAMP)
+    FROM practice_sessions WHERE user_id = ? AND status = 'completed' AND kind = 'daily'
+      AND mode = 'mixed' AND target_count > 0 AND answered_count >= target_count`).bind(identity.userId).run();
+  const [user, state, ledger, inviteStats, inviteDays, inviteeInviteDays, inviteCap, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins] = await Promise.all([
+    db.prepare("SELECT id, invite_code, invited_by, membership_type, membership_end FROM users WHERE id = ?").bind(identity.userId).first<UserRow>(),
+    db.prepare("SELECT progress_json, version FROM user_states WHERE user_id = ?").bind(identity.userId)
+      .first<{ progress_json: string; version: number }>(),
     db.prepare(`SELECT delta_days, source_type, note, created_at
       FROM membership_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20`).bind(identity.userId).all(),
     db.prepare(`SELECT COUNT(*) AS total,
       SUM(CASE WHEN status = 'rewarded' THEN 1 ELSE 0 END) AS rewarded,
       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
       FROM invite_relations WHERE inviter_id = ?`).bind(identity.userId).first<{ total: number; rewarded: number; pending: number }>(),
-    getConfigNumber("invite_reward_days", 3),
+    getConfigNumber("invite_reward_days", 7),
+    getConfigNumber("invitee_reward_days", 3),
     getConfigNumber("invite_monthly_cap", 30),
     loadExamProfile(identity.userId),
     loadQuestionBanks(identity.userId),
     loadStudyInsights(identity.userId),
     loadWrongAudioQuestions(identity.userId),
+    loadDueEssayRewrites(identity.userId),
+    db.prepare("SELECT date_key FROM daily_checkins WHERE user_id = ? ORDER BY date_key")
+      .bind(identity.userId).all<{ date_key: string }>(),
   ]);
   if (!user) return json({ error: "用户初始化失败" }, 500, identity.setCookie);
-  let progress = {};
+  let progress: Record<string, unknown> = {};
   try { progress = JSON.parse(state?.progress_json ?? "{}"); } catch { progress = {}; }
-  const membershipActive = Boolean(user.membership_end && Date.parse(user.membership_end) > Date.now());
+  // 打卡只信规范化记录。旧 progress_json 可被客户端整体保存，不能继续作为
+  // “真实完成”的证据；历史有效日练由 runtime/migration 按完成会话幂等回填。
+  progress = { ...progress, checkins: dailyCheckins.results.map((row) => row.date_key) };
+  const membershipActive = membershipIsActive(user);
   const content = await loadContent(membershipActive, examProfile);
   return json({
     user: {
       id: user.id,
       inviteCode: user.invite_code,
+      membershipType: user.membership_type,
       membershipEnd: user.membership_end,
       membershipActive,
       signedIn: identity.signedIn,
@@ -1251,29 +1926,47 @@ async function bootstrap(request: Request) {
     },
     content,
     progress,
+    progressVersion: Number(state?.version ?? 0),
     examProfile,
     questionBanks,
     studyInsights,
     wrongAudioQuestions,
+    dueEssayRewrites,
     todayKey: chinaDateKey(),
     ledger: ledger.results,
     inviteStats: inviteStats ?? { total: 0, rewarded: 0, pending: 0 },
-    inviteConfig: { rewardDays: inviteDays, monthlyCap: inviteCap },
+    inviteConfig: { rewardDays: inviteDays, inviteeRewardDays: inviteeInviteDays, monthlyCap: inviteCap },
   }, 200, identity.setCookie);
 }
 
 async function saveProgress(userId: string, payload: Record<string, unknown>) {
   const value = JSON.stringify(payload.progress ?? {});
   if (value.length > 120_000) return json({ error: "学习记录过大" }, 400);
-  await getD1().prepare(`INSERT INTO user_states (user_id, progress_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET progress_json = excluded.progress_json, updated_at = CURRENT_TIMESTAMP`)
-    .bind(userId, value).run();
-  return json({ ok: true });
+  const expectedVersion = Number.isInteger(Number(payload.progressVersion)) ? Number(payload.progressVersion) : null;
+  const db = getD1();
+  if (expectedVersion !== null) {
+    const saved = await db.prepare(`UPDATE user_states SET progress_json = ?, version = version + 1,
+      updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND version = ?`).bind(value, userId, expectedVersion).run();
+    if (!saved.meta.changes) {
+      const latest = await db.prepare("SELECT progress_json, version FROM user_states WHERE user_id = ?")
+        .bind(userId).first<{ progress_json: string; version: number }>();
+      let progress: unknown = {};
+      try { progress = JSON.parse(latest?.progress_json ?? "{}"); } catch { progress = {}; }
+      return json({ error: "学习记录已在其他设备更新，请合并后重试", code: "PROGRESS_CONFLICT", progress, progressVersion: latest?.version ?? 0 }, 409);
+    }
+  } else {
+    // Compatibility for an older client; new clients should always send the
+    // version received at bootstrap so cross-device writes cannot silently win.
+    await db.prepare(`UPDATE user_states SET progress_json = ?, version = version + 1,
+      updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`).bind(value, userId).run();
+  }
+  const saved = await db.prepare("SELECT version FROM user_states WHERE user_id = ?").bind(userId).first<{ version: number }>();
+  return json({ ok: true, progressVersion: Number(saved?.version ?? 0) });
 }
 
 async function saveExamProfile(userId: string, payload: Record<string, unknown>) {
   const currentYear = new Date().getFullYear();
-  const allowedMinutes = new Set([30, 45, 60]);
+  const allowedMinutes = new Set([10, 30, 45, 60]);
   const db = getD1();
   const currentProfile = await loadExamProfile(userId);
   const dailyMinutesValue = Number(payload.dailyMinutes);
@@ -1304,6 +1997,30 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
   }
   const targets = Array.from(targetMap.values());
   if (!targets.length) return json({ error: "请至少选择一个报考目标" }, 400);
+  const initialBankCode = trimmed(payload.initialBankCode, 80);
+  let initialBank: { bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number } | null = null;
+  if (initialBankCode) {
+    initialBank = await db.prepare(`SELECT qb.bank_code, qb.exam_type, qb.province, qb.exam_year, qb.subject,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved' THEN q.id END) AS question_count
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      WHERE qb.bank_code = ? AND qb.status = 'published' GROUP BY qb.id`).bind(initialBankCode)
+      .first<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number }>() ?? null;
+    const matchesTarget = initialBank && targets.some((target) => {
+      const typeMatches = initialBank?.exam_type === "national" ? target.examType === "国考"
+        : initialBank?.exam_type === "provincial" && target.examType === "省考" && normalizeProvince(initialBank.province) === normalizeProvince(target.province);
+      const year = Number(initialBank?.exam_year ?? 0);
+      return typeMatches && (!year || (year <= target.examYear && year >= target.examYear - 4));
+    });
+    if (!initialBank || !matchesTarget || !["行测", "综合"].includes(initialBank.subject) || Number(initialBank.question_count) < 1) {
+      return json({ error: "所选题库尚未审核上架，或与当前报考目标不匹配" }, 409);
+    }
+    const [membership, currentBanks] = await Promise.all([userMembership(userId), selectedBankCodes(userId)]);
+    if (!membershipIsActive(membership) && !currentBanks.includes(initialBankCode) && currentBanks.length >= 1) {
+      return json({ error: "免费版最多加入1个题库，开通后可组合国考与多个省考题库", code: "FREE_BANK_LIMIT" }, 403);
+    }
+  }
   const primary = targets[0];
   const targetProfile: LoadedExamProfile = {
     onboarded: true,
@@ -1324,6 +2041,7 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
     ...targets.map((target) => db.prepare(`INSERT INTO user_exam_targets
       (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(userId, target.code, target.examType === "国考" ? "national" : "provincial", target.province, target.examYear, target.examDate)),
+    ...(initialBank ? [db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, initialBank.bank_code)] : []),
   ]);
   return json({ ok: true, profile: targetProfile, selectedBanks: await selectedBankCodes(userId) });
 }
@@ -1334,13 +2052,27 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
   if (!/^[a-zA-Z0-9_-]{3,80}$/.test(bankCode)) return json({ error: "题库编号无效" }, 400);
   if (bankCode === STARTER_BANK_CODE) return json({ error: "演示题库已停用，请添加已发布的真题库" }, 410);
   const db = getD1();
-  let bank: { id: number; exam_type: string; province: string | null; exam_year: number | null } | null = null;
+  let bank: { id: number; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number } | null = null;
   if (bankCode !== STARTER_BANK_CODE) {
-    bank = await db.prepare("SELECT id, exam_type, province, exam_year FROM question_banks WHERE bank_code = ? AND status = 'published'")
-      .bind(bankCode).first<{ id: number; exam_type: string; province: string | null; exam_year: number | null }>() ?? null;
+    bank = await db.prepare(`SELECT qb.id, qb.exam_type, qb.province, qb.exam_year, qb.subject,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
+        AND ((qb.subject = '申论' AND q.subject = '申论') OR (qb.subject <> '申论' AND q.subject = '行测')) THEN q.id END) AS question_count
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      WHERE qb.bank_code = ? AND qb.status = 'published' GROUP BY qb.id`)
+      .bind(bankCode).first<{ id: number; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number }>() ?? null;
     if (!bank) return json({ error: "题库不存在或尚未发布" }, 404);
+    if (added && Number(bank.question_count) < 1) return json({ error: "题库尚无可练真题，暂不能加入" }, 409);
   }
   if (added) {
+    const membership = await userMembership(userId);
+    if (!membershipIsActive(membership)) {
+      const current = await selectedBankCodes(userId);
+      if (!current.includes(bankCode) && current.length >= 1) {
+        return json({ error: "免费版最多加入1个题库，开通后可组合国考与多个省考题库", code: "FREE_BANK_LIMIT" }, 403);
+      }
+    }
     const statements: D1PreparedStatement[] = [
       db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, bankCode),
     ];
@@ -1383,8 +2115,11 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
   const placeholders = bankCodes.map(() => "?").join(",");
   const rows = await getD1().prepare(`WITH candidates AS (
       SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json,
-        q.answer, q.explanation, q.technique, q.difficulty, q.source, q.updated_at,
-        q.source_region, q.source_year, q.frequency, q.importance_stars, q.score_rate,
+        q.answer, q.explanation, q.technique, q.difficulty, q.source, q.truth_verified_at,
+        q.source_region, q.source_year, q.truth_verified,
+        q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
+        q.importance_stars, q.importance_rule_version, q.importance_reason, q.importance_override_reason,
+        q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope, q.score_rate_source, q.score_rate_updated_at,
         q.suggested_seconds, q.image_url, q.resource_url,
         qb.bank_code, qb.name AS bank_name, qb.exam_type AS bank_exam_type, qb.province AS bank_province,
         uqp.state, uqp.correct_count, uqp.wrong_count, uqp.uncertain_count, uqp.review_stage, uqp.next_review_at,
@@ -1395,15 +2130,19 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
       JOIN question_bank_items qbi ON qbi.question_id = q.id
       JOIN question_banks qb ON qb.id = qbi.bank_id
       LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
-      WHERE q.status = 'active' AND q.subject = '行测' AND qb.status = 'published'
+      WHERE q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
+        AND q.subject = '行测' AND qb.status = 'published'
         AND qb.bank_code IN (${placeholders})
     ), ranked AS (
       SELECT *, ROW_NUMBER() OVER (
         PARTITION BY bank_code
         ORDER BY priority_rank,
-          CASE WHEN score_rate BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
-          CASE frequency WHEN '高频' THEN 0 WHEN '中频' THEN 1 ELSE 2 END,
-          importance_stars DESC, COALESCE(last_answered_at, '1970-01-01'), sort_order, question_code
+          CASE WHEN score_rate_attempts >= 100
+            AND (score_rate_correct * 100.0 / score_rate_attempts) BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
+          CASE WHEN frequency_papers > 0 AND (frequency_occurrences * 1.0 / frequency_papers) >= 0.55 THEN 0
+            WHEN frequency_papers > 0 AND (frequency_occurrences * 1.0 / frequency_papers) >= 0.25 THEN 1 ELSE 2 END,
+          CASE WHEN importance_rule_version <> '' THEN importance_stars ELSE 0 END DESC,
+          COALESCE(last_answered_at, '1970-01-01'), sort_order, question_code
       ) AS bank_rank
       FROM candidates
     )
@@ -1412,6 +2151,7 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
     ORDER BY priority_rank, bank_rank, bank_code
     LIMIT 640`).bind(userId, ...bankCodes).all<Record<string, unknown>>();
   return rows.results.map((row) => {
+    const metrics = metricFields(row);
     const progress = row.state ? {
       question_code: String(row.question_code),
       state: String(row.state),
@@ -1439,17 +2179,15 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
         bankCode: String(row.bank_code),
         bankName: String(row.bank_name),
         scopeLabel: questionScopeLabel(String(row.bank_exam_type), row.bank_province),
-        reviewedAt: row.updated_at ? String(row.updated_at) : null,
+        reviewedAt: row.truth_verified_at ? String(row.truth_verified_at) : null,
         targetCode: String(row.bank_exam_type) === "national"
           ? "national"
           : String(row.bank_exam_type) === "provincial"
             ? `province:${normalizeProvince(row.bank_province)}`
             : null,
-        region: String(row.source_region || normalizeProvince(row.bank_province) || "全国"),
+        region: normalizeProvince(row.source_region) || normalizeProvince(row.bank_province) || "全国",
         examYear: Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null,
-        frequency: String(row.frequency ?? "中频"),
-        importanceStars: Math.max(1, Math.min(5, Number(row.importance_stars ?? 3))),
-        scoreRate: Math.max(0, Math.min(100, Number(row.score_rate ?? 60))),
+        ...metrics,
         suggestedSeconds: Math.max(10, Number(row.suggested_seconds ?? 60)),
         imageUrl: String(row.image_url ?? ""),
         resourceUrl: String(row.resource_url ?? ""),
@@ -1460,9 +2198,14 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
 }
 
 async function getPracticeBatch(userId: string, payload: Record<string, unknown>) {
+  const db = getD1();
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
-  const selected = await selectedBankCodes(userId);
-  const allowed = new Set(selected);
+  const [selected, membership] = await Promise.all([selectedBankCodes(userId), userMembership(userId)]);
+  const active = membershipIsActive(membership);
+  // 试用期内可以体验多题库，但试用到期后服务端只放行最早加入且仍可练的一个主库。
+  // 其余选库关系继续保留，续费后立即恢复，不能只靠前端“上锁”。
+  const effectiveSelected = await effectivePracticeBankCodes(userId, selected, active);
+  const allowed = new Set(effectiveSelected);
   const primaryBankCode = allowed.has(String(payload.primaryBankCode ?? "")) ? String(payload.primaryBankCode) : "";
   const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
   if (primaryBankCode && bankCodes.includes(primaryBankCode)) {
@@ -1481,12 +2224,71 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const rawScoreRateMax = Math.max(0, Math.min(100, Number(payload.scoreRateMax) || 100));
   const scoreRateMin = Math.min(rawScoreRateMin, rawScoreRateMax);
   const scoreRateMax = Math.max(rawScoreRateMin, rawScoreRateMax);
-  const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
-  const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
-  const requestedLimit = Math.max(1, Math.min(active ? 20 : 5, Math.floor(Number(payload.limit)) || 10));
-  const resumeQuestionCodes = Array.isArray(payload.resumeQuestionCodes)
+  const rawKind = trimmed(payload.sessionKind, 40).toLowerCase().replace(/[^a-z0-9:_-]/g, "");
+  const sessionKind = rawKind || `practice:${mode}:${focusModule || "mixed"}`;
+  const isDiagnostic = sessionKind === "diagnostic";
+  const dateKey = chinaDateKey();
+  const usage = await loadDailyUsage(userId, dateKey);
+  const freeRemaining = active ? null : Math.max(0, 5 - usage.practice);
+  const desiredLimit = Math.max(1, Math.min(active ? 20 : isDiagnostic ? 10 : 5, Math.floor(Number(payload.limit)) || 10));
+  let requestedLimit = active || isDiagnostic ? desiredLimit : Math.min(desiredLimit, freeRemaining ?? 0);
+  let existingSession: PracticeSessionRow | null = null;
+  const pendingAttempts = new Map<string, {
+    id: number; selected_answer: number; is_correct: number; overtime: number; uncertain: number;
+    state: string | null; next_review_at: string | null; review_stage: number | null;
+  }>();
+  const completedDiagnostic = isDiagnostic
+    ? await db.prepare(`SELECT id FROM practice_sessions WHERE user_id = ? AND kind = 'diagnostic' AND status = 'completed' LIMIT 1`)
+      .bind(userId).first<{ id: string }>()
+    : null;
+  if (completedDiagnostic) {
+    return json({ questions: [], mode, limit: 0, access: active ? "premium" : "diagnostic_used", diagnosticUsed: true,
+      composition: { due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] } });
+  }
+  if (payload.resetSession === true && !isDiagnostic) {
+    await db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND date_key = ? AND kind = ? AND mode = ? AND status = 'active'`)
+      .bind(userId, dateKey, sessionKind, mode).run();
+  } else {
+    existingSession = await db.prepare(`SELECT id, status, target_count, question_codes_json,
+      answered_count, correct_count, review_added, elapsed_seconds
+      FROM practice_sessions WHERE user_id = ? AND date_key = ? AND kind = ? AND mode = ? AND status = 'active'
+      ORDER BY created_at DESC LIMIT 1`).bind(userId, dateKey, sessionKind, mode).first<PracticeSessionRow>() ?? null;
+  }
+  let serverResumeCodes: string[] = [];
+  if (existingSession) {
+    const stored = safeStringArray(existingSession.question_codes_json, 20);
+    const attempts = await db.prepare(`SELECT pa.question_code, pa.confidence, pa.id, pa.selected_answer,
+      pa.is_correct, pa.overtime, pa.uncertain, uqp.state, uqp.next_review_at, uqp.review_stage
+      FROM practice_attempts pa
+      LEFT JOIN user_question_progress uqp ON uqp.user_id = pa.user_id AND uqp.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.practice_session_id = ? AND COALESCE(pa.apply_status, 'applied') = 'applied'`)
+      .bind(userId, existingSession.id).all<{
+        question_code: string; confidence: string; id: number; selected_answer: number; is_correct: number;
+        overtime: number; uncertain: number; state: string | null; next_review_at: string | null; review_stage: number | null;
+      }>();
+    const answered = new Set(attempts.results.filter((row) => row.confidence !== "pending").map((row) => row.question_code));
+    const pending = new Set(attempts.results.filter((row) => row.confidence === "pending").map((row) => row.question_code));
+    for (const attempt of attempts.results) if (attempt.confidence === "pending") pendingAttempts.set(attempt.question_code, attempt);
+    const remaining = stored.filter((code) => !answered.has(code));
+    serverResumeCodes = active || isDiagnostic
+      ? remaining
+      : [...remaining.filter((code) => pending.has(code)), ...remaining.filter((code) => !pending.has(code)).slice(0, freeRemaining ?? 0)];
+    requestedLimit = serverResumeCodes.length;
+  }
+  const clientResumeCodes = Array.isArray(payload.resumeQuestionCodes)
     ? Array.from(new Set(payload.resumeQuestionCodes.map(String).filter((code) => /^[a-zA-Z0-9_-]{2,80}$/.test(code)))).slice(0, 20)
     : [];
+  const resumeQuestionCodes = serverResumeCodes.length ? serverResumeCodes : clientResumeCodes;
+  if (requestedLimit < 1) {
+    return json({
+      questions: [], mode, limit: 0, access: active ? "premium" : "preview",
+      sessionId: existingSession?.id ?? null,
+      freeRemaining: freeRemaining ?? null,
+      quotaExceeded: !active && (freeRemaining ?? 0) <= 0,
+      composition: { due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] },
+    });
+  }
   const starter = starterQuestionList();
   const starterRows = bankCodes.includes(STARTER_BANK_CODE)
     ? await getD1().prepare(`SELECT question_code, state, correct_count, wrong_count, uncertain_count, review_stage,
@@ -1500,6 +2302,13 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     : [];
   candidates.push(...await dbQuestionCandidates(userId, bankCodes.filter((code) => code !== STARTER_BANK_CODE)));
   const [profile, strategy] = await Promise.all([loadExamProfile(userId), loadStrategyConfig()]);
+  if (sessionKind === "daily" && !existingSession && !resumeQuestionCodes.length) {
+    const plan = strategy.timePlans && typeof strategy.timePlans === "object"
+      ? (strategy.timePlans as Record<string, Record<string, unknown>>)[String(profile.dailyMinutes)]
+      : null;
+    const prescribed = Math.max(5, Math.min(20, Math.floor(Number(plan?.questionCount)) || desiredLimit));
+    requestedLimit = active ? prescribed : Math.min(prescribed, freeRemaining ?? 0);
+  }
   const sweetSpot: [number, number] = [Number(strategy.scoreRateSweetSpot[0]), Number(strategy.scoreRateSweetSpot[1])];
   const valueWeights = {
     frequency: Math.max(0, Math.min(100, Number(strategy.frequencyWeight ?? 25))),
@@ -1564,10 +2373,11 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
         || item.question.knowledge.includes(focusModule)
         || focusSubTypes.some((subType) => item.question.module.includes(subType) || item.question.knowledge.includes(subType));
       return moduleMatches
+        && (!requestedFrequency || item.question.frequencyReliable)
         && (frequencyRank[item.question.frequency] ?? 0) >= minimumFrequencyRank
-        && item.question.importanceStars >= minImportanceStars
-        && item.question.scoreRate >= scoreRateMin
-        && item.question.scoreRate <= scoreRateMax;
+        && (!minImportanceStars || (item.question.importanceReliable && item.question.importanceStars >= minImportanceStars))
+        && ((scoreRateMin === 0 && scoreRateMax === 100)
+          || (item.question.scoreRateReliable && item.question.scoreRate >= scoreRateMin && item.question.scoreRate <= scoreRateMax));
     });
     chosen = [];
     takeBalanced(focusPool, requestedLimit, chosen, bankCycle);
@@ -1576,13 +2386,49 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     const fresh = sorted.filter((item) => !item.progress);
     const focusFresh = focusModule ? fresh.filter((item) => item.question.module.includes(focusModule) || item.question.knowledge.includes(focusModule)) : fresh;
     const selectedItems: typeof sorted = [];
-    takeBalanced(due, Math.ceil(requestedLimit * strategy.dueShare), selectedItems, bankCycle);
+    const dueTarget = due.length > 30
+      ? requestedLimit
+      : due.length > 10
+        ? Math.ceil(requestedLimit * Math.max(0.75, strategy.dueShare))
+        : Math.ceil(requestedLimit * strategy.dueShare);
+    takeBalanced(due, dueTarget, selectedItems, bankCycle);
     takeBalanced(focusFresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     takeBalanced(fresh, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     takeBalanced(due, requestedLimit - selectedItems.length, selectedItems, bankCycle);
     chosen = selectedItems;
   }
-  const questions = chosen.slice(0, requestedLimit).map((item) => {
+  let sessionItems = chosen.slice(0, requestedLimit);
+  let sessionId = existingSession?.id ?? null;
+  if (!sessionId && sessionItems.length) {
+    sessionId = crypto.randomUUID();
+    const created = await db.prepare(`INSERT OR IGNORE INTO practice_sessions
+      (id, user_id, date_key, kind, mode, status, plan_minutes, target_count, bank_codes_json, question_codes_json)
+      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
+      .bind(
+        sessionId,
+        userId,
+        dateKey,
+        sessionKind,
+        mode,
+        Math.max(10, Math.min(60, Math.floor(Number(payload.planMinutes)) || 30)),
+        sessionItems.length,
+        JSON.stringify(bankCodes),
+        JSON.stringify(sessionItems.map((item) => item.question.id)),
+      ).run();
+    if (!created.meta.changes) {
+      const concurrent = await db.prepare(`SELECT id, question_codes_json FROM practice_sessions
+        WHERE user_id = ? AND date_key = ? AND kind = ? AND mode = ? AND status = 'active'
+        ORDER BY created_at DESC LIMIT 1`).bind(userId, dateKey, sessionKind, mode)
+        .first<{ id: string; question_codes_json: string }>();
+      if (concurrent) {
+        sessionId = concurrent.id;
+        const candidateMap = new Map(allSorted.map((item) => [item.question.id, item]));
+        sessionItems = safeStringArray(concurrent.question_codes_json, 20)
+          .map((code) => candidateMap.get(code)).filter((item): item is QuestionCandidate => Boolean(item));
+      }
+    }
+  }
+  const questions = sessionItems.map((item) => {
     const question = publicQuestion(item.question, item.progress);
     const planReason = question.due
       ? item.progress?.state === "weak" ? "错题到期" : "记忆到期"
@@ -1591,7 +2437,28 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
         : urgentBankCodes.has(item.question.bankCode)
           ? "临近考试"
           : "兼顾题库";
-    return { ...question, planReason };
+    const pending = pendingAttempts.get(item.question.id);
+    const pendingStage = Math.max(0, Math.floor(Number(pending?.review_stage ?? 0)));
+    return {
+      ...question,
+      planReason,
+      pendingAttempt: pending ? {
+        attemptId: pending.id,
+        selectedAnswer: Number(pending.selected_answer),
+        correct: Boolean(pending.is_correct),
+        correctAnswer: item.question.answer,
+        explanation: item.question.explanation,
+        technique: item.question.technique,
+        state: pending.state ?? "learning",
+        nextReviewAt: pending.next_review_at,
+        reviewStage: pendingStage,
+        reviewDays: strategy.reviewIntervals[pendingStage] ?? 1,
+        needsReview: Boolean(pending.overtime || pending.uncertain || !pending.is_correct),
+        uncertain: Boolean(pending.uncertain),
+        overtime: Boolean(pending.overtime),
+        targetSeconds: item.question.suggestedSeconds || targetSecondsFor(item.question),
+      } : null,
+    };
   });
   const byBank = Array.from(questions.reduce((map, question) => {
     const current = map.get(question.bankCode) ?? { bankCode: question.bankCode, bankName: question.bankName, count: 0 };
@@ -1603,7 +2470,11 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     questions,
     mode,
     limit: requestedLimit,
-    access: active ? "premium" : "preview",
+    sessionId,
+    freeRemaining: freeRemaining ?? null,
+    quotaExceeded: false,
+    resumed: Boolean(existingSession),
+      access: active ? "premium" : isDiagnostic ? "diagnostic" : "preview",
     composition: {
       due: questions.filter((item) => item.due).length,
       weak: questions.filter((item) => item.state === "weak").length,
@@ -1611,6 +2482,14 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
       primary: questions.filter((item) => item.bankCode === primaryBankCode).length,
       other: questions.filter((item) => item.bankCode !== primaryBankCode).length,
       byBank,
+      reviewDebt: {
+        total: sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now())).length,
+        policy: sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now())).length > 30
+          ? "only_review"
+          : sorted.filter((item) => Boolean(item.progress?.next_review_at && Date.parse(item.progress.next_review_at) <= Date.now())).length > 10
+            ? "reduce_new"
+            : "balanced",
+      },
     },
   });
 }
@@ -1621,30 +2500,51 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
   const allowed = new Set(selected);
   const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
   if (!bankCodes.length) return json({ questions: [], mode: "essay", limit: 0, access: "preview" });
-  const user = await getD1().prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
-  const active = Boolean(user?.membership_end && Date.parse(user.membership_end) > Date.now());
+  const active = membershipIsActive(await userMembership(userId));
+  if (!active) return json({ error: "申论真题微练为会员权益，可先登录领取一次72小时体验", code: "PAYWALL_ESSAY" }, 403);
   const limit = Math.max(1, Math.min(active ? 10 : 2, Math.floor(Number(payload.limit)) || 3));
   const placeholders = bankCodes.map(() => "?").join(",");
   const focusModule = trimmed(payload.focusModule, 40);
   const moduleClause = focusModule ? "AND (q.module LIKE ? OR q.sub_type LIKE ?)" : "";
+  const requestedQuestionCode = trimmed(payload.questionCode, 80);
+  const questionClause = requestedQuestionCode ? "AND q.question_code = ?" : "";
   const bindings: unknown[] = [...bankCodes];
   if (focusModule) bindings.push(`%${focusModule}%`, `%${focusModule}%`);
+  if (requestedQuestionCode) bindings.push(requestedQuestionCode);
   const rows = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.material, q.prompt,
     q.word_limit, q.scoring_points_json, q.explanation, q.technique, q.source, q.source_region, q.source_year,
-    q.frequency, q.importance_stars, q.score_rate, q.suggested_seconds, q.image_url, q.resource_url,
+    q.truth_verified, q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
+    q.importance_stars, q.importance_rule_version, q.importance_reason, q.importance_override_reason,
+    q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope, q.score_rate_source, q.score_rate_updated_at,
+    q.suggested_seconds, q.image_url, q.resource_url,
     qb.bank_code, qb.name AS bank_name, qb.exam_type, qb.province
     FROM questions q
     JOIN question_bank_items qbi ON qbi.question_id = q.id
     JOIN question_banks qb ON qb.id = qbi.bank_id
-    WHERE q.status = 'active' AND q.subject = '申论' AND qb.status = 'published'
-      AND qb.bank_code IN (${placeholders}) ${moduleClause}
+    WHERE q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
+      AND q.subject = '申论' AND qb.status = 'published'
+      AND qb.bank_code IN (${placeholders}) ${moduleClause} ${questionClause}
     GROUP BY q.question_code
-    ORDER BY CASE WHEN q.score_rate BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
-      CASE q.frequency WHEN '高频' THEN 0 WHEN '中频' THEN 1 ELSE 2 END,
-      q.importance_stars DESC, q.source_year DESC, q.question_code
+    ORDER BY CASE WHEN q.score_rate_attempts >= 100
+        AND (q.score_rate_correct * 100.0 / q.score_rate_attempts) BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
+      CASE WHEN q.frequency_papers > 0 AND (q.frequency_occurrences * 1.0 / q.frequency_papers) >= 0.55 THEN 0
+        WHEN q.frequency_papers > 0 AND (q.frequency_occurrences * 1.0 / q.frequency_papers) >= 0.25 THEN 1 ELSE 2 END,
+      CASE WHEN q.importance_rule_version <> '' THEN q.importance_stars ELSE 0 END DESC,
+      q.source_year DESC, q.question_code
     LIMIT ?`).bind(...bindings, limit).all<Record<string, unknown>>();
+  const questionCodes = rows.results.map((row) => String(row.question_code));
+  const attemptStages = new Map<string, string>();
+  if (questionCodes.length) {
+    const attempts = await getD1().prepare(`SELECT question_code, stage FROM essay_attempts
+      WHERE user_id = ? AND question_code IN (${questionCodes.map(() => "?").join(",")})
+      ORDER BY updated_at DESC`).bind(userId, ...questionCodes).all<{ question_code: string; stage: string }>();
+    for (const attempt of attempts.results) if (!attemptStages.has(attempt.question_code)) attemptStages.set(attempt.question_code, attempt.stage);
+  }
   const questions = rows.results.map((row) => {
-    const region = String(row.source_region || normalizeProvince(row.province) || "全国");
+    const metrics = metricFields(row);
+    const attemptStage = attemptStages.get(String(row.question_code)) ?? "draft";
+    const attemptStageIndex = ESSAY_STAGE_ORDER.indexOf(attemptStage as (typeof ESSAY_STAGE_ORDER)[number]);
+    const region = normalizeProvince(row.source_region) || normalizeProvince(row.province) || "全国";
     const examYear = Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null;
     let scoringPoints: string[] = [];
     try {
@@ -1662,16 +2562,37 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
       material: String(row.material ?? ""),
       prompt: String(row.prompt ?? ""),
       wordLimit: Number(row.word_limit ?? 0) || null,
-      scoringPoints,
-      reference: active ? String(row.explanation ?? "") : "会员可查看参考答案与得分点。",
-      technique: active ? String(row.technique ?? "") : "",
+      scoringPoints: attemptStageIndex >= 2 ? scoringPoints : [],
+      reference: attemptStageIndex >= 3 ? String(row.explanation ?? "") : "",
+      technique: attemptStageIndex >= 3 ? String(row.technique ?? "") : "",
+      serverStage: attemptStage,
       source: String(row.source ?? ""),
       region,
       examYear,
-      truthLabel: examYear ? `${region}-${examYear}` : region,
-      frequency: String(row.frequency ?? "中频"),
-      importanceStars: Number(row.importance_stars ?? 3),
-      scoreRate: Number(row.score_rate ?? 60),
+      truthLabel: examYear ? `${region === "全国" ? "国考" : region}-${examYear}` : region,
+      ...metrics,
+      frequencyMeta: {
+        reliable: metrics.frequencyReliable,
+        occurrences: metrics.frequencyOccurrences,
+        paperCount: metrics.frequencyPapers,
+        years: metrics.frequencyYears,
+        updatedAt: metrics.frequencyUpdatedAt,
+        scope: questionScopeLabel(String(row.exam_type), row.province),
+      },
+      importanceMeta: {
+        reliable: metrics.importanceReliable,
+        ruleVersion: metrics.importanceRuleVersion,
+        reason: metrics.importanceReason,
+        overrideReason: metrics.importanceOverrideReason,
+      },
+      scoreRateMeta: {
+        reliable: metrics.scoreRateReliable,
+        correct: metrics.scoreRateCorrect,
+        sampleSize: metrics.scoreRateAttempts,
+        scope: metrics.scoreRateScope,
+        source: metrics.scoreRateSource,
+        updatedAt: metrics.scoreRateUpdatedAt,
+      },
       suggestedSeconds: Number(row.suggested_seconds ?? 600),
       imageUrl: String(row.image_url ?? ""),
       resourceUrl: String(row.resource_url ?? ""),
@@ -1683,92 +2604,445 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
   return json({ questions, mode: "essay", limit, access: active ? "premium" : "preview" });
 }
 
+const ESSAY_STAGE_ORDER = ["draft", "self_check", "self_score", "revision", "scheduled", "completed"] as const;
+
+async function saveEssayAttempt(userId: string, payload: Record<string, unknown>) {
+  if (!membershipIsActive(await userMembership(userId))) {
+    return json({ error: "申论真题微练为完整会员权益", code: "PAYWALL_ESSAY" }, 403);
+  }
+  const questionCode = trimmed(payload.questionCode, 80);
+  const stage = String(payload.stage ?? "draft");
+  if (!ESSAY_STAGE_ORDER.includes(stage as (typeof ESSAY_STAGE_ORDER)[number])) return json({ error: "申论阶段无效" }, 400);
+  const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(payload.dateKey)) ? String(payload.dateKey) : chinaDateKey();
+  const firstDraft = trimmed(payload.firstDraft, 8_000);
+  const revisedDraft = trimmed(payload.revisedDraft, 8_000);
+  const rewriteDraft = trimmed(payload.rewriteDraft, 8_000);
+  const checks = safeStringArray(payload.selfChecks, 20).map((item) => item.slice(0, 120));
+  const lossReasons = safeStringArray(payload.lossReasons, 20).map((item) => item.slice(0, 120));
+  const selfScoreValue = Number(payload.selfScore);
+  const selfScore = Number.isFinite(selfScoreValue) ? Math.max(0, Math.min(100, Math.round(selfScoreValue))) : null;
+  const elapsedSeconds = Math.max(0, Math.min(4 * 3600, Math.floor(Number(payload.elapsedSeconds)) || 0));
+  const requestedRewriteDueAt = /^\d{4}-\d{2}-\d{2}$/.test(String(payload.rewriteDueAt)) ? String(payload.rewriteDueAt) : null;
+  const stageIndex = ESSAY_STAGE_ORDER.indexOf(stage as (typeof ESSAY_STAGE_ORDER)[number]);
+  if (stageIndex >= 1 && firstDraft.length < 10) return json({ error: "请先完成独立作答" }, 400);
+  if (stageIndex >= 2 && checks.length < 2) return json({ error: "请至少完成两项自查" }, 400);
+  if (stageIndex >= 3 && selfScore === null) return json({ error: "请先完成采分自评" }, 400);
+  if (stageIndex >= 4 && revisedDraft.length < 10) return json({ error: "请先完成二改" }, 400);
+  if (stageIndex >= 5 && rewriteDraft.length < 10) return json({ error: "请完成3天重写" }, 400);
+  const db = getD1();
+  const available = await db.prepare(`SELECT q.question_code, q.scoring_points_json, q.explanation, q.technique FROM questions q
+    JOIN question_bank_items qbi ON qbi.question_id = q.id
+    JOIN question_banks qb ON qb.id = qbi.bank_id
+    JOIN user_question_banks uqb ON uqb.bank_code = qb.bank_code AND uqb.user_id = ?
+    WHERE q.question_code = ? AND q.subject = '申论' AND q.status = 'active'
+      AND q.truth_verified = 1 AND q.review_status = 'approved' AND qb.status = 'published' LIMIT 1`)
+    .bind(userId, questionCode).first<{ question_code: string; scoring_points_json: string; explanation: string; technique: string }>();
+  if (!available) return json({ error: "申论真题不在已加入的有效题库中" }, 404);
+  const existing = await db.prepare(`SELECT id, stage, first_draft, rewrite_due_at FROM essay_attempts
+    WHERE user_id = ? AND question_code = ? AND date_key = ?`).bind(userId, questionCode, dateKey)
+    .first<{ id: string; stage: string; first_draft: string; rewrite_due_at: string | null }>();
+  const existingIndex = existing ? ESSAY_STAGE_ORDER.indexOf(existing.stage as (typeof ESSAY_STAGE_ORDER)[number]) : -1;
+  if (!existing && dateKey !== chinaDateKey()) return json({ error: "新的申论练习必须从今天开始" }, 409);
+  if (existingIndex >= 0 && stageIndex < existingIndex) return json({ error: "不能退回已完成的申论阶段" }, 409);
+  const maximumNextStage = existingIndex >= 0 ? existingIndex + 1 : 1;
+  if (stageIndex > maximumNextStage) return json({ error: "请按顺序完成申论训练阶段" }, 409);
+  if (existingIndex >= 1 && existing?.first_draft !== firstDraft) return json({ error: "独立初稿已锁定，不能覆盖" }, 409);
+  const serverRewriteDueAt = stageIndex >= 4 ? (existing?.rewrite_due_at ?? chinaDateKeyAfter(dateKey, 3)) : null;
+  if (stage === "scheduled" && requestedRewriteDueAt && requestedRewriteDueAt !== serverRewriteDueAt) {
+    return json({ error: `3天重写由系统安排在${serverRewriteDueAt}` }, 409);
+  }
+  if (stage === "completed") {
+    const dueDate = existing?.rewrite_due_at ?? serverRewriteDueAt;
+    if (!dueDate || dueDate > chinaDateKey()) return json({ error: "3天重写尚未到期" }, 409);
+  }
+  const id = existing?.id ?? crypto.randomUUID();
+  await db.prepare(`INSERT INTO essay_attempts
+    (id, user_id, question_code, date_key, stage, first_draft, self_checks_json, self_score,
+      loss_reasons_json, revised_draft, rewrite_draft, elapsed_seconds, rewrite_due_at, submitted_at, completed_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      CASE WHEN ? <> 'draft' THEN CURRENT_TIMESTAMP ELSE NULL END,
+      CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, question_code, date_key) DO UPDATE SET
+      stage = excluded.stage, first_draft = excluded.first_draft, self_checks_json = excluded.self_checks_json,
+      self_score = excluded.self_score, loss_reasons_json = excluded.loss_reasons_json,
+      revised_draft = excluded.revised_draft, rewrite_draft = excluded.rewrite_draft,
+      elapsed_seconds = excluded.elapsed_seconds, rewrite_due_at = excluded.rewrite_due_at,
+      submitted_at = COALESCE(essay_attempts.submitted_at, excluded.submitted_at),
+      completed_at = CASE WHEN excluded.stage = 'completed' THEN CURRENT_TIMESTAMP ELSE essay_attempts.completed_at END,
+      updated_at = CURRENT_TIMESTAMP`)
+    .bind(id, userId, questionCode, dateKey, stage, firstDraft, JSON.stringify(checks), selfScore,
+      JSON.stringify(lossReasons), revisedDraft, rewriteDraft, elapsedSeconds, serverRewriteDueAt, stage, stage).run();
+  let scoringPoints: string[] = [];
+  try {
+    const parsed = JSON.parse(available.scoring_points_json ?? "[]");
+    if (Array.isArray(parsed)) scoringPoints = parsed.map(String).slice(0, 30);
+  } catch { scoringPoints = []; }
+  return json({
+    ok: true,
+    id,
+    stage,
+    rewriteDueAt: serverRewriteDueAt,
+    scoringPoints: stageIndex >= 2 ? scoringPoints : undefined,
+    reference: stageIndex >= 3 ? available.explanation : undefined,
+    technique: stageIndex >= 3 ? available.technique : undefined,
+  });
+}
+
+async function loadDueEssayRewrites(userId: string) {
+  const rows = await getD1().prepare(`SELECT ea.question_code, ea.date_key, ea.rewrite_due_at,
+    q.module, q.source_region, q.source_year, qb.bank_code, qb.name AS bank_name
+    FROM essay_attempts ea
+    JOIN questions q ON q.question_code = ea.question_code
+    JOIN question_bank_items qbi ON qbi.question_id = q.id
+    JOIN question_banks qb ON qb.id = qbi.bank_id
+    JOIN user_question_banks uqb ON uqb.user_id = ea.user_id AND uqb.bank_code = qb.bank_code
+    WHERE ea.user_id = ? AND ea.stage = 'scheduled' AND date(ea.rewrite_due_at) <= date('now', '+8 hours')
+      AND q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved' AND qb.status = 'published'
+    GROUP BY ea.id ORDER BY date(ea.rewrite_due_at), ea.created_at LIMIT 10`).bind(userId).all<Record<string, unknown>>();
+  return rows.results.map((row) => ({
+    questionCode: String(row.question_code),
+    originalDateKey: String(row.date_key),
+    rewriteDueAt: String(row.rewrite_due_at),
+    module: String(row.module),
+    truthLabel: normalizeProvince(row.source_region) === "全国"
+      ? `国考-${String(row.source_year ?? "")}`
+      : `${normalizeProvince(row.source_region)}-${String(row.source_year ?? "")}`,
+    bankCode: String(row.bank_code),
+    bankName: String(row.bank_name),
+  }));
+}
+
 async function resolveQuestion(questionCode: string, bankCode: string) {
   const starter = starterQuestionList().find((question) => question.id === questionCode && bankCode === STARTER_BANK_CODE);
   if (starter) return starter;
   const row = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json, q.answer,
-    q.explanation, q.technique, q.difficulty, q.source, q.updated_at, q.source_region, q.source_year,
-    q.frequency, q.importance_stars, q.score_rate, q.suggested_seconds, q.image_url, q.resource_url,
+    q.explanation, q.technique, q.difficulty, q.source, q.truth_verified_at, q.source_region, q.source_year,
+    q.truth_verified, q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
+    q.importance_stars, q.importance_rule_version, q.importance_reason, q.importance_override_reason,
+    q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope, q.score_rate_source, q.score_rate_updated_at,
+    q.suggested_seconds, q.image_url, q.resource_url,
     qb.bank_code, qb.name AS bank_name,
     qb.exam_type AS bank_exam_type, qb.province AS bank_province
     FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
     JOIN question_banks qb ON qb.id = qbi.bank_id
-    WHERE q.question_code = ? AND qb.bank_code = ? AND q.status = 'active' AND qb.status = 'published' LIMIT 1`)
+    WHERE q.question_code = ? AND qb.bank_code = ? AND q.status = 'active'
+      AND q.truth_verified = 1 AND q.review_status = 'approved' AND qb.status = 'published' LIMIT 1`)
     .bind(questionCode, bankCode).first<Record<string, unknown>>();
   if (!row) return null;
+  const metrics = metricFields(row);
   return {
     id: String(row.question_code), module: String(row.module), stem: String(row.stem), options: parseOptions(String(row.options_json ?? "[]")),
     answer: answerIndex(row.answer ? String(row.answer) : null), explanation: String(row.explanation ?? ""),
     knowledge: String(row.sub_type ?? row.module), technique: String(row.technique ?? ""), source: String(row.source ?? "题库导入"),
     difficulty: String(row.difficulty ?? "中等"), bankCode: String(row.bank_code), bankName: String(row.bank_name),
     scopeLabel: questionScopeLabel(String(row.bank_exam_type), row.bank_province),
-    reviewedAt: row.updated_at ? String(row.updated_at) : null,
+    reviewedAt: row.truth_verified_at ? String(row.truth_verified_at) : null,
     targetCode: String(row.bank_exam_type) === "national"
       ? "national"
       : String(row.bank_exam_type) === "provincial"
         ? `province:${normalizeProvince(row.bank_province)}`
         : null,
-    region: String(row.source_region || normalizeProvince(row.bank_province) || "全国"),
+    region: normalizeProvince(row.source_region) || normalizeProvince(row.bank_province) || "全国",
     examYear: Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null,
-    frequency: String(row.frequency ?? "中频"),
-    importanceStars: Math.max(1, Math.min(5, Number(row.importance_stars ?? 3))),
-    scoreRate: Math.max(0, Math.min(100, Number(row.score_rate ?? 60))),
+    ...metrics,
     suggestedSeconds: Math.max(10, Number(row.suggested_seconds ?? 60)),
     imageUrl: String(row.image_url ?? ""),
     resourceUrl: String(row.resource_url ?? ""),
   } satisfies ResolvedQuestion;
 }
 
-async function submitPracticeAnswer(userId: string, payload: Record<string, unknown>) {
+async function submitContentReport(userId: string, payload: Record<string, unknown>) {
+  const db = getD1();
+  const questionCode = trimmed(payload.questionCode, 80);
+  const bankCode = trimmed(payload.bankCode, 80);
+  const reasonCode = trimmed(payload.reasonCode, 40);
+  const detail = trimmed(payload.detail, 500);
+  if (!questionCode || !bankCode || !CONTENT_REPORT_REASONS.has(reasonCode)) {
+    return json({ error: "请选择有效的报错原因", code: "CONTENT_REPORT_INVALID" }, 400);
+  }
+  if (reasonCode === "other" && detail.length < 2) {
+    return json({ error: "选择“其他问题”时，请补充说明", code: "CONTENT_REPORT_DETAIL_REQUIRED" }, 400);
+  }
+
+  let reportableQuestion = bankCode === STARTER_BANK_CODE
+    ? starterQuestionList().find((question) => question.id === questionCode) ?? null
+    : null;
+  if (!reportableQuestion) {
+    const allowed = await db.prepare(`SELECT q.question_code, q.module, q.source, qb.bank_code, qb.name AS bank_name
+      FROM questions q
+      JOIN question_bank_items qbi ON qbi.question_id = q.id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      JOIN user_question_banks uqb ON uqb.bank_code = qb.bank_code AND uqb.user_id = ?
+      WHERE q.question_code = ? AND qb.bank_code = ? AND q.status = 'active'
+        AND q.truth_verified = 1 AND q.review_status = 'approved' AND qb.status = 'published'
+      LIMIT 1`).bind(userId, questionCode, bankCode).first<Record<string, unknown>>();
+    if (allowed) {
+      reportableQuestion = {
+        id: String(allowed.question_code),
+        module: String(allowed.module ?? ""),
+        source: String(allowed.source ?? ""),
+        bankCode: String(allowed.bank_code),
+        bankName: String(allowed.bank_name ?? ""),
+      } as ResolvedQuestion;
+    }
+  }
+  if (!reportableQuestion) {
+    return json({ error: "这道题不在你当前可练的题库中", code: "CONTENT_REPORT_NOT_REPORTABLE" }, 403);
+  }
+
+  const existing = await db.prepare(`SELECT id FROM content_reports
+    WHERE user_id = ? AND content_type = 'question' AND content_key = ? AND reason_code = ? AND status = 'pending'
+    LIMIT 1`).bind(userId, questionCode, reasonCode).first<{ id: number }>();
+  if (existing) return json({ ok: true, duplicate: true, id: existing.id });
+
+  const recent = await db.prepare(`SELECT COUNT(*) AS count FROM content_reports
+    WHERE user_id = ? AND created_at >= datetime('now','-24 hours')`).bind(userId).first<{ count: number }>();
+  if (Number(recent?.count ?? 0) >= CONTENT_REPORT_DAILY_LIMIT) {
+    const response = json({ error: "今天提交的报错较多，请明天再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
+    response.headers.set("retry-after", "86400");
+    return response;
+  }
+
+  const contextJson = JSON.stringify({
+    bankCode,
+    bankName: reportableQuestion.bankName,
+    module: reportableQuestion.module,
+    source: reportableQuestion.source,
+  });
+  await db.prepare(`INSERT OR IGNORE INTO content_reports
+    (user_id, content_type, content_key, reason_code, detail, context_json, status, updated_at)
+    SELECT ?, 'question', ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP
+    WHERE (SELECT COUNT(*) FROM content_reports WHERE user_id = ?
+      AND created_at >= datetime('now','-24 hours')) < ?`)
+    .bind(userId, questionCode, reasonCode, detail, contextJson, userId, CONTENT_REPORT_DAILY_LIMIT).run();
+  const report = await db.prepare(`SELECT id FROM content_reports
+    WHERE user_id = ? AND content_type = 'question' AND content_key = ? AND reason_code = ? AND status = 'pending'
+    LIMIT 1`).bind(userId, questionCode, reasonCode).first<{ id: number }>();
+  if (!report) {
+    const response = json({ error: "今天提交的报错较多，请明天再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
+    response.headers.set("retry-after", "86400");
+    return response;
+  }
+  return json({ ok: true, duplicate: false, id: report.id });
+}
+
+async function submitPracticeAnswer(userId: string, payload: Record<string, unknown>, signedIn: boolean) {
   const questionCode = trimmed(payload.questionCode, 80);
   const bankCode = trimmed(payload.bankCode, 80);
   const selectedAnswer = Math.floor(Number(payload.selectedAnswer));
   const uncertain = payload.uncertain === true;
   const durationMs = Math.max(0, Math.min(30 * 60_000, Math.floor(Number(payload.durationMs)) || 0));
+  const practiceSessionId = trimmed(payload.practiceSessionId ?? payload.sessionId, 80);
+  if (!practiceSessionId) return json({ error: "练习会话缺失，请重新进入本组练习" }, 409);
+  // One question can be applied only once in a server-issued session. Client
+  // attempt ids are deliberately ignored so changing them cannot farm quota,
+  // progress, check-ins or invite rewards.
+  const attemptKey = `${practiceSessionId}:${questionCode}`;
   const question = await resolveQuestion(questionCode, bankCode);
   if (!question || selectedAnswer < 0 || selectedAnswer >= question.options.length || question.answer < 0) return json({ error: "题目或答案无效" }, 400);
   const db = getD1();
+  const duplicate = await db.prepare(`SELECT id, question_code, selected_answer, is_correct, overtime, confidence, uncertain, apply_status
+    FROM practice_attempts WHERE user_id = ? AND attempt_key = ?`).bind(userId, attemptKey)
+    .first<{ id: number; question_code: string; selected_answer: number | null; is_correct: number; overtime: number; confidence: string; uncertain: number; apply_status: string }>();
+  if (duplicate) {
+    if (duplicate.apply_status !== "applied") {
+      // A current D1 batch cannot persist a partial attempt, but this safely
+      // clears a legacy interrupted row created before transactional apply.
+      await db.prepare("DELETE FROM practice_attempts WHERE id = ? AND user_id = ? AND apply_status <> 'applied'")
+        .bind(duplicate.id, userId).run();
+    } else {
+    if (duplicate.question_code !== questionCode || Number(duplicate.selected_answer) !== selectedAnswer) {
+      return json({ error: "答题请求标识冲突，请刷新后重试" }, 409);
+    }
+    const current = await db.prepare(`SELECT state, next_review_at, review_stage FROM user_question_progress
+      WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
+      .first<{ state: string; next_review_at: string | null; review_stage: number }>();
+    const duplicateStrategy = await loadStrategyConfig();
+    const duplicateStage = Number(current?.review_stage ?? 0);
+    await reconcileInviteReward(userId);
+    return json({
+      ok: true,
+      duplicate: true,
+      correct: Boolean(duplicate.is_correct),
+      correctAnswer: question.answer,
+      explanation: question.explanation,
+      technique: question.technique,
+      state: current?.state ?? "learning",
+      nextReviewAt: current?.next_review_at ?? null,
+      reviewStage: duplicateStage,
+      reviewDays: duplicateStrategy.reviewIntervals[duplicateStage] ?? 1,
+      needsReview: !duplicate.is_correct || Boolean(duplicate.overtime) || Boolean(duplicate.uncertain),
+      confidence: duplicate.confidence,
+      attemptId: duplicate.id,
+      overtime: Boolean(duplicate.overtime),
+      targetSeconds: question.suggestedSeconds || targetSecondsFor(question),
+    });
+    }
+  }
+
+  let session: { id: string; status: string; kind: string; question_codes_json: string } | null = null;
+  if (practiceSessionId) {
+    session = await db.prepare(`SELECT id, status, kind, question_codes_json FROM practice_sessions
+      WHERE id = ? AND user_id = ? AND status = 'active'`).bind(practiceSessionId, userId)
+      .first<{ id: string; status: string; kind: string; question_codes_json: string }>() ?? null;
+    if (!session || !safeStringArray(session.question_codes_json, 20).includes(questionCode)) {
+      return json({ error: "练习会话无效或题目不在本次任务中" }, 409);
+    }
+  }
+  const diagnosticSession = session?.kind === "diagnostic";
+  if (!signedIn && !diagnosticSession) {
+    return json({ error: "首次摸底可免登录完成；正式日练请登录后继续", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403);
+  }
+
+  const correct = selectedAnswer === question.answer;
+  const targetSeconds = question.suggestedSeconds || targetSecondsFor(question);
+  const overtime = durationMs > targetSeconds * 1000;
+  const confidence = correct ? "pending" : "hesitant";
+  const dateKey = chinaDateKey();
+  const active = membershipIsActive(await userMembership(userId));
+  await db.prepare(`INSERT OR IGNORE INTO user_daily_usage (user_id, date_key, practice_count)
+    VALUES (?, ?, 0)`).bind(userId, dateKey).run();
+
   const previous = await db.prepare(`SELECT state, correct_count, wrong_count, uncertain_count, review_count, review_stage,
     next_review_at, last_answered_at
     FROM user_question_progress WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
     .first<{ state: string; correct_count: number; wrong_count: number; uncertain_count: number; review_count: number;
       review_stage: number; next_review_at: string | null; last_answered_at: string | null }>();
-  const correct = selectedAnswer === question.answer;
   const strategy = await loadStrategyConfig();
-  const targetSeconds = question.suggestedSeconds || targetSecondsFor(question);
-  const overtime = durationMs > targetSeconds * 1000;
   const needsReview = !correct || uncertain || overtime;
   const isDue = Boolean(previous?.next_review_at && Date.parse(previous.next_review_at) <= Date.now());
-  const correctCount = Number(previous?.correct_count ?? 0) + (correct ? 1 : 0);
-  const wrongCount = Number(previous?.wrong_count ?? 0) + (correct ? 0 : 1);
-  const uncertainCount = Number(previous?.uncertain_count ?? 0) + (uncertain ? 1 : 0);
   const finalStage = Math.max(0, strategy.reviewIntervals.length - 1);
   const previousStage = Math.max(0, Math.min(finalStage, Number(previous?.review_stage ?? 0)));
-  const reviewStage = needsReview
+  const initialReviewStage = needsReview
     ? 0
     : previous
-      ? isDue ? Math.min(finalStage, previousStage + 1) : Math.max(Math.min(1, finalStage), previousStage)
-      : Math.min(1, finalStage);
-  const reviewDays = strategy.reviewIntervals[reviewStage] ?? 1;
-  const state = needsReview ? "weak" : reviewStage >= 2 ? "mastered" : "learning";
-  const nextReviewAt = reviewAtAfterChinaDays(reviewDays);
-  const results = await db.batch([
+      ? isDue ? Math.min(finalStage, previousStage + 1) : previousStage
+      : 0;
+  const initialReviewDays = strategy.reviewIntervals[initialReviewStage] ?? 1;
+  const initialState = needsReview ? "weak" : initialReviewStage >= 2 ? "mastered" : "learning";
+  const initialNextReviewAt = reviewAtAfterChinaDays(initialReviewDays);
+  const intervalDates = strategy.reviewIntervals.map((days) => reviewAtAfterChinaDays(days));
+  const intervalCase = intervalDates.map((_, index) => `WHEN ${index} THEN ?`).join(" ");
+  const scoreScopeLabel = new Set(["全国", "国考"]).has(normalizeProvince(question.region))
+    ? "国考" : normalizeProvince(question.region);
+  const usageStatement = diagnosticSession
+    ? db.prepare(`UPDATE user_daily_usage SET updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND date_key = ? AND EXISTS (
+          SELECT 1 FROM practice_attempts WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')`)
+      .bind(userId, dateKey, userId, attemptKey)
+    : active
+    ? db.prepare(`UPDATE user_daily_usage SET practice_count = practice_count + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND date_key = ? AND EXISTS (
+          SELECT 1 FROM practice_attempts WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')`)
+      .bind(userId, dateKey, userId, attemptKey)
+    : db.prepare(`UPDATE user_daily_usage SET practice_count = practice_count + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND date_key = ? AND practice_count < 5 AND EXISTS (
+          SELECT 1 FROM practice_attempts WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')`)
+      .bind(userId, dateKey, userId, attemptKey);
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`INSERT OR IGNORE INTO practice_attempts
+      (attempt_key, practice_session_id, user_id, question_code, bank_code, module, selected_answer,
+        is_correct, uncertain, confidence, wrong_reason, overtime, was_due, apply_status, duration_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0, 'processing', ?)`)
+      .bind(attemptKey, session?.id ?? null, userId, questionCode, bankCode, question.module, selectedAnswer,
+        correct ? 1 : 0, uncertain ? 1 : 0, confidence, overtime ? 1 : 0, durationMs),
+    db.prepare(`UPDATE practice_attempts SET apply_status = 'applying'
+      WHERE user_id = ? AND attempt_key = ? AND apply_status = 'processing' AND changes() = 1`)
+      .bind(userId, attemptKey),
+    usageStatement,
+    db.prepare(`UPDATE practice_attempts SET apply_status = 'quota_rejected'
+      WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying' AND changes() = 0`)
+      .bind(userId, attemptKey),
     db.prepare(`INSERT INTO user_question_progress
       (user_id, question_code, state, correct_count, wrong_count, uncertain_count, last_answer, last_correct,
        last_duration_ms, last_answered_at, next_review_at, review_count, review_stage, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(user_id, question_code) DO UPDATE SET state = excluded.state, correct_count = excluded.correct_count,
-      wrong_count = excluded.wrong_count, uncertain_count = excluded.uncertain_count, last_answer = excluded.last_answer,
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, CURRENT_TIMESTAMP
+      WHERE EXISTS (SELECT 1 FROM practice_attempts
+        WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')
+      ON CONFLICT(user_id, question_code) DO UPDATE SET
+      state = CASE
+        WHEN excluded.state = 'weak' THEN 'weak'
+        WHEN datetime(user_question_progress.next_review_at) <= CURRENT_TIMESTAMP
+          AND MIN(?, user_question_progress.review_stage + 1) >= 2 THEN 'mastered'
+        WHEN user_question_progress.review_stage >= 2 THEN 'mastered'
+        ELSE 'learning' END,
+      correct_count = user_question_progress.correct_count + excluded.correct_count,
+      wrong_count = user_question_progress.wrong_count + excluded.wrong_count,
+      uncertain_count = user_question_progress.uncertain_count + excluded.uncertain_count,
+      last_answer = excluded.last_answer,
       last_correct = excluded.last_correct, last_duration_ms = excluded.last_duration_ms,
-      last_answered_at = CURRENT_TIMESTAMP, next_review_at = excluded.next_review_at,
-      review_count = excluded.review_count, review_stage = excluded.review_stage, updated_at = CURRENT_TIMESTAMP`)
-      .bind(userId, questionCode, state, correctCount, wrongCount, uncertainCount, selectedAnswer, correct ? 1 : 0,
-        durationMs, nextReviewAt, Number(previous?.review_count ?? 0) + (isDue ? 1 : 0), reviewStage),
-    db.prepare(`INSERT INTO practice_attempts
-      (user_id, question_code, bank_code, module, is_correct, uncertain, confidence, wrong_reason, overtime, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`).bind(userId, questionCode, bankCode, question.module,
-        correct ? 1 : 0, uncertain ? 1 : 0, uncertain ? "hesitant" : "confident", overtime ? 1 : 0, durationMs),
-  ]);
+      last_answered_at = CURRENT_TIMESTAMP,
+      next_review_at = CASE
+        WHEN excluded.state = 'weak' THEN excluded.next_review_at
+        WHEN user_question_progress.next_review_at IS NOT NULL
+          AND datetime(user_question_progress.next_review_at) > CURRENT_TIMESTAMP THEN user_question_progress.next_review_at
+        ELSE CASE MIN(?, user_question_progress.review_stage + 1) ${intervalCase} ELSE excluded.next_review_at END
+      END,
+      review_count = user_question_progress.review_count
+        + CASE WHEN datetime(user_question_progress.next_review_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END,
+      review_stage = CASE
+        WHEN excluded.state = 'weak' THEN 0
+        WHEN datetime(user_question_progress.next_review_at) <= CURRENT_TIMESTAMP
+          THEN MIN(?, user_question_progress.review_stage + 1)
+        ELSE user_question_progress.review_stage END,
+      updated_at = CURRENT_TIMESTAMP`)
+      .bind(userId, questionCode, initialState, correct ? 1 : 0, correct ? 0 : 1, uncertain ? 1 : 0,
+        selectedAnswer, correct ? 1 : 0, durationMs, initialNextReviewAt, isDue ? 1 : 0, initialReviewStage,
+        userId, attemptKey, finalStage, finalStage, ...intervalDates, finalStage),
+    db.prepare(`UPDATE questions SET
+      score_rate_correct = score_rate_correct + ?, score_rate_attempts = score_rate_attempts + 1,
+      score_rate_scope = ?, score_rate_source = 'platform', score_rate_updated_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+      WHERE question_code = ? AND score_rate_source IN ('', 'platform')
+        AND EXISTS (SELECT 1 FROM practice_attempts
+          WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')
+        AND NOT EXISTS (SELECT 1 FROM practice_attempts
+          WHERE user_id = ? AND question_code = ? AND apply_status = 'applied')`)
+      .bind(correct ? 1 : 0, `同${scoreScopeLabel}目标用户·有效首答`, questionCode,
+        userId, attemptKey, userId, questionCode),
+  ];
+  if (session && confidence !== "pending") {
+    statements.push(db.prepare(`UPDATE practice_sessions SET
+        answered_count = answered_count + 1,
+        correct_count = correct_count + ?,
+        review_added = review_added + ?,
+        elapsed_seconds = elapsed_seconds + ?,
+        status = CASE WHEN answered_count + 1 >= target_count THEN 'completed' ELSE status END,
+        completed_at = CASE WHEN answered_count + 1 >= target_count THEN CURRENT_TIMESTAMP ELSE completed_at END,
+        updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND status = 'active'
+          AND EXISTS (SELECT 1 FROM practice_attempts
+            WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')`)
+      .bind(correct ? 1 : 0, needsReview ? 1 : 0, Math.round(durationMs / 1000), session.id, userId, userId, attemptKey));
+  }
+  statements.push(
+    db.prepare(`UPDATE practice_attempts SET was_due = ?, apply_status = 'applied'
+      WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying'`)
+      .bind(isDue ? 1 : 0, userId, attemptKey),
+    db.prepare(`DELETE FROM practice_attempts
+      WHERE user_id = ? AND attempt_key = ? AND apply_status = 'quota_rejected'`)
+      .bind(userId, attemptKey),
+  );
+  await db.batch(statements);
+  const appliedAttempt = await db.prepare(`SELECT id FROM practice_attempts
+    WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applied'`)
+    .bind(userId, attemptKey).first<{ id: number }>();
+  if (!appliedAttempt) return json({ error: "今日5道免费真题已完成，明天可继续", code: "FREE_DAILY_LIMIT", freeRemaining: 0 }, 429);
+  const attemptId = Number(appliedAttempt.id);
+  const finalProgress = await db.prepare(`SELECT state, next_review_at, review_stage FROM user_question_progress
+    WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
+    .first<{ state: string; next_review_at: string | null; review_stage: number }>();
+  const reviewStage = Math.max(0, Math.floor(Number(finalProgress?.review_stage ?? initialReviewStage)));
+  const reviewDays = strategy.reviewIntervals[reviewStage] ?? 1;
+  const state = finalProgress?.state ?? initialState;
+  const nextReviewAt = finalProgress?.next_review_at ?? initialNextReviewAt;
+  if (session && confidence !== "pending") {
+    const completed = await db.prepare(`SELECT status, kind, mode, target_count, answered_count
+      FROM practice_sessions WHERE id = ? AND user_id = ?`).bind(session.id, userId)
+      .first<{ status: string; kind: string; mode: string; target_count: number; answered_count: number }>();
+    if (completed?.status === "completed" && completed.kind === "daily" && completed.mode === "mixed"
+      && completed.target_count >= 5 && completed.answered_count >= 5) await rewardInvite(userId);
+  }
   return json({
     ok: true,
     correct,
@@ -1780,17 +3054,27 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     reviewDays,
     reviewStage,
     needsReview,
-    attemptId: Number(results[1]?.meta?.last_row_id ?? 0),
+    attemptId,
+    attemptKey,
+    sessionId: session?.id ?? null,
+    freeRemaining: active ? null : Math.max(0, 5 - (await loadDailyUsage(userId, dateKey)).practice),
     overtime,
     targetSeconds,
   });
 }
 
-async function updateQuestionMeta(userId: string, payload: Record<string, unknown>) {
+async function updateQuestionMeta(userId: string, payload: Record<string, unknown>, signedIn: boolean) {
   const questionCode = trimmed(payload.questionCode, 80);
   if (!questionCode) return json({ error: "题目编号不能为空" }, 400);
   const db = getD1();
   const attemptId = Math.max(0, Math.floor(Number(payload.attemptId)) || 0);
+  if (!signedIn) {
+    const diagnosticAttempt = attemptId ? await db.prepare(`SELECT 1 AS allowed FROM practice_attempts pa
+      JOIN practice_sessions ps ON ps.id = pa.practice_session_id AND ps.user_id = pa.user_id
+      WHERE pa.id = ? AND pa.user_id = ? AND pa.question_code = ? AND ps.kind = 'diagnostic' LIMIT 1`)
+      .bind(attemptId, userId, questionCode).first<{ allowed: number }>() : null;
+    if (!diagnosticAttempt) return json({ error: "正式学习记录请登录后保存", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403);
+  }
   await db.prepare(`INSERT OR IGNORE INTO user_question_progress (user_id, question_code, state)
     VALUES (?, ?, 'learning')`).bind(userId, questionCode).run();
   if (typeof payload.favorite === "boolean") {
@@ -1810,21 +3094,58 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
     const confidence = allowedConfidence.has(payload.confidence) ? payload.confidence : "";
     if (!confidence) return json({ error: "掌握状态无效" }, 400);
     const attempt = attemptId
-      ? await db.prepare(`SELECT uncertain FROM practice_attempts
-        WHERE id = ? AND user_id = ? AND question_code = ?`).bind(attemptId, userId, questionCode).first<{ uncertain: number }>()
+      ? await db.prepare(`SELECT uncertain, confidence, practice_session_id, is_correct, overtime, duration_ms
+        FROM practice_attempts WHERE id = ? AND user_id = ? AND question_code = ?`)
+        .bind(attemptId, userId, questionCode).first<{
+          uncertain: number; confidence: string; practice_session_id: string | null; is_correct: number; overtime: number; duration_ms: number;
+        }>()
       : null;
-    if (attemptId) await db.prepare(`UPDATE practice_attempts SET confidence = ?, uncertain = ?
-      WHERE id = ? AND user_id = ? AND question_code = ?`)
-      .bind(confidence, confidence === "confident" ? Number(attempt?.uncertain ?? 0) : 1, attemptId, userId, questionCode).run();
-    if (confidence !== "confident") {
-      nextReviewAt = reviewAtAfterChinaDays(1);
-      const increment = attempt && !attempt.uncertain ? 1 : 0;
-      await db.prepare(`UPDATE user_question_progress SET state = 'weak', review_stage = 0,
-        uncertain_count = uncertain_count + ?, next_review_at = ?,
+    if (!attemptId || !attempt) return json({ error: "答题记录不存在，无法确认掌握状态" }, 404);
+    nextReviewAt = confidence === "confident" ? null : reviewAtAfterChinaDays(1);
+    const increment = confidence !== "confident" && !attempt.uncertain ? 1 : 0;
+    const needsReview = !attempt.is_correct || confidence !== "confident" || Boolean(attempt.overtime);
+    const finalizeStatements: D1PreparedStatement[] = [
+      db.prepare(`UPDATE practice_attempts SET confidence = ?, uncertain = ?
+        WHERE id = ? AND user_id = ? AND question_code = ? AND confidence = 'pending' AND apply_status = 'applied'`)
+        .bind(confidence, confidence === "confident" ? Number(attempt.uncertain ?? 0) : 1, attemptId, userId, questionCode),
+      db.prepare(`UPDATE user_question_progress SET
+        state = CASE WHEN ? = 'confident' THEN state ELSE 'weak' END,
+        review_stage = CASE WHEN ? = 'confident' THEN review_stage ELSE 0 END,
+        uncertain_count = uncertain_count + ?,
+        next_review_at = CASE WHEN ? = 'confident' THEN next_review_at ELSE ? END,
         wrong_reason = CASE WHEN ? = 'guessed' THEN '蒙对了' ELSE wrong_reason END,
-        updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND question_code = ?`)
-        .bind(increment, nextReviewAt, confidence, userId, questionCode).run();
-      state = "weak";
+        updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND question_code = ? AND changes() = 1`)
+        .bind(confidence, confidence, increment, confidence, nextReviewAt, confidence, userId, questionCode),
+    ];
+    if (attempt.practice_session_id) {
+      finalizeStatements.push(db.prepare(`UPDATE practice_sessions SET
+          answered_count = answered_count + 1,
+          correct_count = correct_count + ?,
+          review_added = review_added + ?,
+          elapsed_seconds = elapsed_seconds + ?,
+          status = CASE WHEN answered_count + 1 >= target_count THEN 'completed' ELSE status END,
+          completed_at = CASE WHEN answered_count + 1 >= target_count THEN CURRENT_TIMESTAMP ELSE completed_at END,
+          updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_id = ? AND status = 'active' AND changes() = 1`)
+        .bind(attempt.is_correct ? 1 : 0, needsReview ? 1 : 0, Math.round(Number(attempt.duration_ms ?? 0) / 1000),
+          attempt.practice_session_id, userId));
+    }
+    const finalized = await db.batch(finalizeStatements);
+    const applied = Number(finalized[0]?.meta?.changes ?? 0) > 0;
+    if (!applied) {
+      const current = await db.prepare(`SELECT state, next_review_at FROM user_question_progress
+        WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
+        .first<{ state: string; next_review_at: string | null }>();
+      return json({ ok: true, duplicate: true, state: current?.state ?? "learning", nextReviewAt: current?.next_review_at ?? null });
+    }
+    if (confidence !== "confident") state = "weak";
+    if (attempt.practice_session_id) {
+      const completed = await db.prepare(`SELECT status, kind, mode, target_count, answered_count
+        FROM practice_sessions WHERE id = ? AND user_id = ?`).bind(attempt.practice_session_id, userId)
+        .first<{ status: string; kind: string; mode: string; target_count: number; answered_count: number }>();
+      if (completed?.status === "completed" && completed.kind === "daily" && completed.mode === "mixed"
+        && completed.target_count >= 5 && completed.answered_count >= 5) await rewardInvite(userId);
     }
   }
   const current = await db.prepare(`SELECT state, next_review_at FROM user_question_progress
@@ -1832,58 +3153,189 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
   return json({ ok: true, state: state ?? current?.state ?? "learning", nextReviewAt: nextReviewAt ?? current?.next_review_at ?? null });
 }
 
+async function recordDailyCheckin(userId: string, payload: Record<string, unknown>) {
+  const today = chinaDateKey();
+  const requestedDate = trimmed(payload.dateKey, 10) || today;
+  if (requestedDate !== today) return json({ error: "只能记录当天完成的日练", code: "CHECKIN_DATE_INVALID" }, 400);
+  const db = getD1();
+  const session = await db.prepare(`SELECT id FROM practice_sessions
+    WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
+      AND status = 'completed' AND target_count > 0 AND answered_count >= target_count
+    ORDER BY completed_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
+  if (!session) {
+    return json({ error: "完成真实日练后才能打卡，空题库或未完成任务不会计入", code: "DAILY_PRACTICE_INCOMPLETE" }, 409);
+  }
+  await db.prepare(`INSERT OR IGNORE INTO daily_checkins
+    (user_id, date_key, session_id, source, completed_at) VALUES (?, ?, ?, 'daily_practice', CURRENT_TIMESTAMP)`)
+    .bind(userId, today, session.id).run();
+  return json({ ok: true, dateKey: today, duplicate: false });
+}
+
+async function getPracticeSessionSummary(userId: string, payload: Record<string, unknown>) {
+  const sessionId = trimmed(payload.practiceSessionId, 80);
+  if (!sessionId) return json({ error: "练习会话不能为空" }, 400);
+  const db = getD1();
+  const session = await db.prepare("SELECT id FROM practice_sessions WHERE id = ? AND user_id = ?")
+    .bind(sessionId, userId).first<{ id: string }>();
+  if (!session) return json({ error: "练习会话不存在" }, 404);
+  const [stats, modules] = await Promise.all([
+    db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
+      COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
+      COALESCE(SUM(CASE WHEN confidence = 'hesitant' AND is_correct = 1 THEN 1 ELSE 0 END), 0) AS hesitant,
+      COALESCE(SUM(CASE WHEN confidence = 'guessed' THEN 1 ELSE 0 END), 0) AS guessed,
+      COALESCE(SUM(overtime), 0) AS overtime,
+      COALESCE(SUM(CASE WHEN was_due = 1 AND is_correct = 1 AND confidence = 'confident' THEN 1 ELSE 0 END), 0) AS repaired_due
+      FROM practice_attempts WHERE user_id = ? AND practice_session_id = ? AND apply_status = 'applied'`)
+      .bind(userId, sessionId).first<Record<string, unknown>>(),
+    db.prepare(`SELECT module, COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct
+      FROM practice_attempts WHERE user_id = ? AND practice_session_id = ? AND apply_status = 'applied'
+      GROUP BY module ORDER BY (1.0 * COALESCE(SUM(is_correct), 0) / COUNT(*)) ASC, total DESC LIMIT 5`)
+      .bind(userId, sessionId).all<{ module: string; total: number; correct: number }>(),
+  ]);
+  return json({
+    wrong: Number(stats?.wrong ?? 0),
+    hesitant: Number(stats?.hesitant ?? 0),
+    guessed: Number(stats?.guessed ?? 0),
+    overtime: Number(stats?.overtime ?? 0),
+    repairedDue: Number(stats?.repaired_due ?? 0),
+    weakModules: modules.results.map((row) => ({
+      module: row.module,
+      total: Number(row.total),
+      accuracy: Number(row.total) ? Math.round(Number(row.correct) * 100 / Number(row.total)) : 0,
+    })),
+  });
+}
+
 async function bindInvite(userId: string, payload: Record<string, unknown>) {
   const inviteCode = String(payload.inviteCode ?? "").trim().toUpperCase();
   if (!inviteCode) return json({ error: "邀请码不能为空" }, 400);
   const db = getD1();
-  const inviter = await db.prepare("SELECT id FROM users WHERE invite_code = ?").bind(inviteCode).first<{ id: string }>();
+  const invitee = await db.prepare("SELECT verified_at FROM users WHERE id = ?").bind(userId).first<{ verified_at: string | null }>();
+  if (!invitee?.verified_at) return json({ error: "请先登录并完成账号验证后再绑定邀请关系", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403);
+  const inviter = await db.prepare("SELECT id, verified_at FROM users WHERE invite_code = ?").bind(inviteCode)
+    .first<{ id: string; verified_at: string | null }>();
   if (!inviter) return json({ error: "邀请码无效" }, 404);
+  if (!inviter.verified_at) return json({ error: "邀请账号尚未验证" }, 409);
   if (inviter.id === userId) return json({ error: "不能邀请自己" }, 400);
   const existing = await db.prepare("SELECT inviter_id, status FROM invite_relations WHERE invitee_id = ?").bind(userId).first<{ inviter_id: string; status: string }>();
   if (existing) return json({ ok: true, status: existing.status, message: "已绑定邀请关系" });
+  const [sameBrowserSwitch, inviterDailyBindings] = await Promise.all([
+    db.prepare(`SELECT 1 AS detected FROM analytics_events
+      WHERE event_name = 'account_switch_detected' AND (
+        (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
+        OR (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
+      ) LIMIT 1`).bind(userId, inviter.id, inviter.id, userId).first<{ detected: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM invite_relations
+      WHERE inviter_id = ? AND datetime(bound_at) >= datetime('now', '-1 day')`)
+      .bind(inviter.id).first<{ count: number }>(),
+  ]);
+  if (sameBrowserSwitch) {
+    return json({ error: "同一浏览器切换账号不能参与邀请时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
+  }
+  if (Number(inviterDailyBindings?.count ?? 0) >= 10) {
+    return json({ error: "该邀请账号今日绑定过于集中，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
+  }
   await db.batch([
-    db.prepare("INSERT INTO invite_relations (invitee_id, inviter_id) VALUES (?, ?)").bind(userId, inviter.id),
+    db.prepare(`INSERT INTO invite_relations (invitee_id, inviter_id, verified_at, risk_status)
+      VALUES (?, ?, CURRENT_TIMESTAMP, 'clear')`).bind(userId, inviter.id),
     db.prepare("UPDATE users SET invited_by = ? WHERE id = ? AND invited_by IS NULL").bind(inviter.id, userId),
   ]);
-  return json({ ok: true, status: "pending", message: "好友关系已绑定，首次激活后双方获得奖励" });
+  return json({ ok: true, status: "pending", message: "已绑定；完成首次有效日练后，被邀请人得3天、邀请人得7天" });
 }
 
 async function rewardInvite(inviteeId: string) {
   const db = getD1();
-  const relation = await db.prepare("SELECT inviter_id, status FROM invite_relations WHERE invitee_id = ?").bind(inviteeId).first<{ inviter_id: string; status: string }>();
-  if (!relation || relation.status !== "pending") return;
-  const rewardDays = await getConfigNumber("invite_reward_days", 3);
-  const monthlyCap = await getConfigNumber("invite_monthly_cap", 30);
-  const monthStart = new Date();
-  monthStart.setUTCDate(1);
-  monthStart.setUTCHours(0, 0, 0, 0);
-  const awarded = await db.prepare(`SELECT COALESCE(SUM(delta_days), 0) AS total FROM membership_ledger
-    WHERE user_id = ? AND source_type = 'invite_reward' AND created_at >= ?`)
-    .bind(relation.inviter_id, monthStart.toISOString()).first<{ total: number }>();
-  const inviterDays = Math.max(0, Math.min(rewardDays, monthlyCap - Number(awarded?.total ?? 0)));
-  const claimed = await db.prepare("UPDATE invite_relations SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP WHERE invitee_id = ? AND status = 'pending'").bind(inviteeId).run();
-  if (!claimed.meta.changes) return;
-  try {
-    const [invitee, inviter] = await Promise.all([
-      db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(inviteeId).first<{ membership_end: string | null }>(),
-      db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(relation.inviter_id).first<{ membership_end: string | null }>(),
-    ]);
-    const source = `invite:${inviteeId}`;
-    const statements = [
-      db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(addDays(invitee?.membership_end ?? null, rewardDays), inviteeId),
-      db.prepare(`INSERT OR IGNORE INTO membership_ledger
-        (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'invitee_reward', ?, '受邀激活奖励')`).bind(inviteeId, rewardDays, source),
-    ];
-    if (inviterDays > 0) statements.push(
-      db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(addDays(inviter?.membership_end ?? null, inviterDays), relation.inviter_id),
-      db.prepare(`INSERT OR IGNORE INTO membership_ledger
-        (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'invite_reward', ?, '邀请好友激活奖励')`).bind(relation.inviter_id, inviterDays, source),
-    );
-    await db.batch(statements);
-  } catch (error) {
-    await db.prepare("UPDATE invite_relations SET status = 'pending', rewarded_at = NULL WHERE invitee_id = ?").bind(inviteeId).run();
-    throw error;
-  }
+  const relation = await db.prepare(`SELECT ir.inviter_id, ir.status, ir.risk_status,
+    invitee.verified_at AS invitee_verified, inviter.verified_at AS inviter_verified
+    FROM invite_relations ir
+    JOIN users invitee ON invitee.id = ir.invitee_id
+    JOIN users inviter ON inviter.id = ir.inviter_id
+    WHERE ir.invitee_id = ?`).bind(inviteeId).first<{
+      inviter_id: string; status: string; risk_status: string; invitee_verified: string | null; inviter_verified: string | null;
+    }>();
+  if (!relation || relation.status !== "pending" || relation.risk_status !== "clear"
+    || !relation.invitee_verified || !relation.inviter_verified) return;
+  const inviterRewardDays = Math.max(0, await getConfigNumber("invite_reward_days", 7));
+  const inviteeRewardDays = Math.max(0, await getConfigNumber("invitee_reward_days", 3));
+  const monthlyCap = Math.max(0, await getConfigNumber("invite_monthly_cap", 30));
+  const source = `invite:${inviteeId}`;
+  // 风控复查、有效日练认领、双方台账和会员时长在同一 D1 事务中完成。
+  // 这样即使用户先绑定、再在同一浏览器切换账号，也不能绕过奖励前风控。
+  await db.batch([
+    db.prepare(`UPDATE invite_relations SET risk_status = 'blocked_same_browser'
+      WHERE invitee_id = ? AND status = 'pending' AND risk_status = 'clear' AND EXISTS (
+        SELECT 1 FROM analytics_events ae WHERE ae.event_name = 'account_switch_detected' AND (
+          (ae.user_id = invite_relations.invitee_id
+            AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.inviter_id)
+          OR (ae.user_id = invite_relations.inviter_id
+            AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.invitee_id)
+        )
+      )`).bind(inviteeId),
+    db.prepare(`UPDATE invite_relations SET status = 'rewarded',
+      first_valid_practice_at = COALESCE(first_valid_practice_at, (
+        SELECT MIN(ps.completed_at) FROM practice_sessions ps
+        WHERE ps.user_id = invite_relations.invitee_id AND ps.status = 'completed'
+          AND ps.kind = 'daily' AND ps.mode = 'mixed' AND ps.target_count >= 5 AND ps.answered_count >= 5
+          AND ps.completed_at IS NOT NULL AND datetime(ps.completed_at) >= datetime(invite_relations.bound_at)
+      )),
+      rewarded_at = CURRENT_TIMESTAMP, inviter_grant_id = ?, invitee_grant_id = ?
+      WHERE invitee_id = ? AND status = 'pending' AND risk_status = 'clear' AND EXISTS (
+        SELECT 1 FROM practice_sessions ps WHERE ps.user_id = invite_relations.invitee_id
+          AND ps.status = 'completed' AND ps.kind = 'daily' AND ps.mode = 'mixed'
+          AND ps.target_count >= 5 AND ps.answered_count >= 5 AND ps.completed_at IS NOT NULL
+          AND datetime(ps.completed_at) >= datetime(invite_relations.bound_at)
+      )`)
+      .bind(`${source}:inviter`, `${source}:invitee`, inviteeId),
+    db.prepare(`INSERT OR IGNORE INTO membership_ledger
+      (user_id, delta_days, source_type, source_id, note)
+      SELECT ?, ?, 'invitee_reward', ?, '完成首次有效日练奖励'
+      WHERE ? > 0 AND EXISTS (
+        SELECT 1 FROM invite_relations WHERE invitee_id = ? AND status = 'rewarded')`)
+      .bind(inviteeId, inviteeRewardDays, source, inviteeRewardDays, inviteeId),
+    db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+      CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+        THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+      WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+      .bind(`+${inviteeRewardDays} days`, inviteeId),
+    db.prepare(`INSERT OR IGNORE INTO membership_ledger
+      (user_id, delta_days, source_type, source_id, note)
+      SELECT ?, MIN(?, MAX(0, ? - COALESCE((
+        SELECT SUM(delta_days) FROM membership_ledger
+        WHERE user_id = ? AND source_type = 'invite_reward'
+          AND datetime(created_at) >= datetime('now', '+8 hours', 'start of month', '-8 hours')
+      ), 0))), 'invite_reward', ?, '好友完成首次有效日练奖励'
+      WHERE MIN(?, MAX(0, ? - COALESCE((
+        SELECT SUM(delta_days) FROM membership_ledger
+        WHERE user_id = ? AND source_type = 'invite_reward'
+          AND datetime(created_at) >= datetime('now', '+8 hours', 'start of month', '-8 hours')
+      ), 0))) > 0 AND EXISTS (
+        SELECT 1 FROM invite_relations WHERE invitee_id = ? AND inviter_id = ?
+          AND status = 'rewarded' AND risk_status = 'clear'
+      )`)
+      .bind(relation.inviter_id, inviterRewardDays, monthlyCap, relation.inviter_id, source,
+        inviterRewardDays, monthlyCap, relation.inviter_id, inviteeId, relation.inviter_id),
+    db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+      CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+        THEN membership_end ELSE CURRENT_TIMESTAMP END,
+      printf('+%d days', (SELECT delta_days FROM membership_ledger
+        WHERE user_id = ? AND source_type = 'invite_reward' AND source_id = ?)))
+      WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+      .bind(relation.inviter_id, source, relation.inviter_id),
+  ]);
+}
+
+async function reconcileInviteReward(inviteeId: string) {
+  const eligible = await getD1().prepare(`SELECT 1 AS eligible
+    FROM invite_relations ir
+    WHERE ir.invitee_id = ? AND ir.status = 'pending' AND ir.risk_status = 'clear'
+      AND EXISTS (
+        SELECT 1 FROM practice_sessions ps
+        WHERE ps.user_id = ir.invitee_id AND ps.status = 'completed'
+          AND ps.kind = 'daily' AND ps.mode = 'mixed'
+          AND ps.target_count >= 5 AND ps.answered_count >= 5
+          AND ps.completed_at IS NOT NULL AND datetime(ps.completed_at) >= datetime(ir.bound_at)
+      ) LIMIT 1`).bind(inviteeId).first<{ eligible: number }>();
+  if (eligible) await rewardInvite(inviteeId);
 }
 
 async function redeem(userId: string, payload: Record<string, unknown>) {
@@ -1891,36 +3343,263 @@ async function redeem(userId: string, payload: Record<string, unknown>) {
   if (!code) return json({ error: "请输入兑换码" }, 400);
   const db = getD1();
   const codeHash = await hashCode(code);
-  const row = await db.prepare(`SELECT id, code_preview, duration_days, max_uses, used_count, status, valid_from, valid_until
+  const row = await db.prepare(`SELECT id, code_preview, grant_type, duration_days, max_uses, used_count, status, valid_from, valid_until
     FROM redemption_codes WHERE code_hash = ?`).bind(codeHash).first<CodeRow>();
   const now = new Date();
   if (!row) return json({ error: "兑换码不存在" }, 404);
   if (row.status !== "active") return json({ error: "兑换码已停用" }, 400);
   if (row.valid_from && Date.parse(row.valid_from) > now.getTime()) return json({ error: "兑换码尚未生效" }, 400);
   if (row.valid_until && Date.parse(row.valid_until) < now.getTime()) return json({ error: "兑换码已过期" }, 400);
-  const used = await db.prepare("SELECT id FROM redemptions WHERE code_id = ? AND user_id = ?").bind(row.id, userId).first();
-  if (used) return json({ error: "你已经使用过这个兑换码" }, 400);
-
-  const claim = await db.prepare(`UPDATE redemption_codes SET used_count = used_count + 1
-    WHERE id = ? AND status = 'active' AND used_count < max_uses`).bind(row.id).run();
-  if (!claim.meta.changes) return json({ error: "兑换码使用次数已达上限" }, 409);
-
-  try {
-    const user = await db.prepare("SELECT membership_end FROM users WHERE id = ?").bind(userId).first<{ membership_end: string | null }>();
-    const newEnd = addDays(user?.membership_end ?? null, row.duration_days);
-    const sourceId = `redeem:${row.id}:${userId}`;
-    await db.batch([
-      db.prepare("INSERT INTO redemptions (code_id, user_id) VALUES (?, ?)").bind(row.id, userId),
-      db.prepare("UPDATE users SET membership_end = ? WHERE id = ?").bind(newEnd, userId),
-      db.prepare(`INSERT INTO membership_ledger
-        (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'redeem', ?, ?)`).bind(userId, row.duration_days, sourceId, `兑换 ${row.duration_days} 天会员`),
-    ]);
-    await rewardInvite(userId);
-    return json({ ok: true, days: row.duration_days, membershipEnd: newEnd });
-  } catch {
-    await db.prepare("UPDATE redemption_codes SET used_count = MAX(0, used_count - 1) WHERE id = ?").bind(row.id).run();
-    return json({ error: "兑换失败，请勿重复提交" }, 409);
+  let redemption = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
+    .bind(row.id, userId).first<{ id: number; status: string }>();
+  if (!redemption) {
+    await db.prepare(`INSERT OR IGNORE INTO redemptions (code_id, user_id, status)
+      SELECT id, ?, 'pending' FROM redemption_codes c
+      WHERE c.id = ? AND c.status = 'active'
+        AND (SELECT COUNT(*) FROM redemptions r WHERE r.code_id = c.id) < c.max_uses`)
+      .bind(userId, row.id).run();
+    redemption = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
+      .bind(row.id, userId).first<{ id: number; status: string }>();
   }
+  if (!redemption) return json({ error: "兑换码使用次数已达上限" }, 409);
+
+  const sourceId = `redeem:${row.id}:${userId}`;
+  const grantType = row.grant_type === "lifetime" ? "lifetime" : "duration";
+  const safeDays = Math.max(1, Math.min(3650, row.duration_days));
+  if (redemption.status !== "completed") {
+    await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO membership_ledger
+        (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'redeem', ?, ?)`)
+        .bind(userId, grantType === "lifetime" ? 0 : safeDays, sourceId,
+          grantType === "lifetime" ? "兑换终身会员" : `兑换 ${safeDays} 天会员`),
+      grantType === "lifetime"
+        ? db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1").bind(userId)
+        : db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+            CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+              THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+            WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+          .bind(`+${safeDays} days`, userId),
+      db.prepare(`UPDATE redemptions SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+        WHERE id = ?`).bind(redemption.id),
+      db.prepare(`UPDATE redemption_codes SET used_count =
+        (SELECT COUNT(*) FROM redemptions WHERE code_id = ?) WHERE id = ?`).bind(row.id, row.id),
+    ]);
+  }
+  const membership = await userMembership(userId);
+  return json({
+    ok: true,
+    idempotent: redemption.status === "completed",
+    grantType,
+    days: grantType === "lifetime" ? null : safeDays,
+    membershipType: membership?.membership_type ?? grantType,
+    membershipEnd: membership?.membership_end ?? null,
+  });
+}
+
+function commerceTestMode(request: Request) {
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  const local = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname.endsWith(".local");
+  const configured = String((env as unknown as { PAYMENT_TEST_MODE?: string }).PAYMENT_TEST_MODE ?? "").trim().toLowerCase();
+  return local || configured === "1" || configured === "true" || configured === "enabled";
+}
+
+function safeReturnContext(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const source = value as Record<string, unknown>;
+  return {
+    reason: trimmed(source.reason, 40),
+    tab: trimmed(source.tab, 20),
+    bankCode: trimmed(source.bankCode, 80),
+    sessionKind: trimmed(source.sessionKind, 80),
+  };
+}
+
+function publicProduct(row: CommerceProductRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    priceCents: Number(row.price_cents),
+    currency: row.currency,
+    grantType: row.grant_type,
+    durationDays: row.duration_days === null ? null : Number(row.duration_days),
+    publicPromise: row.public_promise,
+  };
+}
+
+function publicOrder(row: CommerceOrderRow) {
+  let returnContext = {};
+  try { returnContext = JSON.parse(row.return_context_json || "{}"); } catch { returnContext = {}; }
+  return {
+    id: row.id,
+    orderNo: row.order_no,
+    productId: row.product_id,
+    productName: row.product_name,
+    amountCents: Number(row.amount_cents),
+    currency: row.currency,
+    status: row.status,
+    channel: row.channel,
+    returnContext,
+    paidAt: row.paid_at,
+    createdAt: row.created_at,
+  };
+}
+
+async function getCommerceProducts(request: Request, userId: string) {
+  const [productsResult, membership] = await Promise.all([
+    getD1().prepare(`SELECT id, name, description, price_cents, currency, grant_type,
+      duration_days, public_promise, status FROM products
+      WHERE status = 'active' ORDER BY sort_order ASC, created_at ASC`).all<CommerceProductRow>(),
+    userMembership(userId),
+  ]);
+  const testMode = commerceTestMode(request);
+  return json({
+    products: productsResult.results.map(publicProduct),
+    checkoutMode: testMode ? "test" : "unavailable",
+    testMode,
+    membershipActive: membershipIsActive(membership),
+    membershipType: membership?.membership_type ?? "duration",
+    notice: testMode
+      ? "测试支付模式：只验证订单与权益链路，不会发生真实扣款。"
+      : "真实支付尚未接入；当前页面仅展示既有公开权益与价格承诺，不能完成付款。",
+  });
+}
+
+async function createTestOrder(request: Request, userId: string, payload: Record<string, unknown>) {
+  if (!commerceTestMode(request)) {
+    return json({
+      error: "真实支付尚未接入，当前环境不能创建或完成付款",
+      code: "PAYMENT_NOT_CONFIGURED",
+      testMode: false,
+    }, 503);
+  }
+  const productId = trimmed(payload.productId, 80);
+  const idempotencyKey = trimmed(payload.idempotencyKey, 120);
+  if (!/^[a-zA-Z0-9:_-]{12,120}$/.test(idempotencyKey)) return json({ error: "订单幂等键无效" }, 400);
+  const db = getD1();
+  const membership = await userMembership(userId);
+  if (membership?.membership_type === "lifetime") {
+    return json({ error: "当前账号已是终身会员，无需重复购买", code: "ALREADY_ENTITLED" }, 409);
+  }
+  const product = await db.prepare(`SELECT id, name, description, price_cents, currency, grant_type,
+    duration_days, public_promise, status FROM products WHERE id = ? AND status = 'active'`)
+    .bind(productId).first<CommerceProductRow>();
+  if (!product) return json({ error: "商品不存在或已下架" }, 404);
+  if (product.grant_type !== "lifetime" && !(product.grant_type === "duration" && Number(product.duration_days) > 0)) {
+    return json({ error: "商品权益配置无效" }, 409);
+  }
+  const existing = await db.prepare(`SELECT id, order_no, user_id, product_id, product_name, amount_cents,
+    currency, status, channel, idempotency_key, return_context_json, entitlement_grant_id, paid_at, created_at
+    FROM orders WHERE user_id = ? AND idempotency_key = ?`).bind(userId, idempotencyKey).first<CommerceOrderRow>();
+  if (existing) return json({ order: publicOrder(existing), testMode: true, idempotent: true });
+
+  const orderId = `ord_${crypto.randomUUID()}`;
+  const orderNo = `GK${Date.now().toString(36).toUpperCase()}${crypto.randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+  const returnContextJson = JSON.stringify(safeReturnContext(payload.returnContext));
+  await db.prepare(`INSERT OR IGNORE INTO orders
+    (id, order_no, user_id, product_id, product_name, amount_cents, currency, status, channel, idempotency_key, return_context_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_test_payment', 'test', ?, ?)`)
+    .bind(orderId, orderNo, userId, product.id, product.name, Number(product.price_cents), product.currency, idempotencyKey, returnContextJson).run();
+  const order = await db.prepare(`SELECT id, order_no, user_id, product_id, product_name, amount_cents,
+    currency, status, channel, idempotency_key, return_context_json, entitlement_grant_id, paid_at, created_at
+    FROM orders WHERE user_id = ? AND idempotency_key = ?`).bind(userId, idempotencyKey).first<CommerceOrderRow>();
+  if (!order) return json({ error: "测试订单创建失败，请重试" }, 500);
+  const created = order?.id === orderId;
+  if (created) {
+    await db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'test_order_created', ?)")
+      .bind(userId, JSON.stringify({ orderId, productId, amountCents: Number(product.price_cents), testMode: true })).run().catch(() => undefined);
+  }
+  return json({
+    order: order ? publicOrder(order) : null,
+    product: publicProduct(product),
+    testMode: true,
+    idempotent: !created,
+    notice: "测试订单已创建，不代表已付款，也不会发生真实扣款。",
+  }, created ? 201 : 200);
+}
+
+async function completeTestPayment(request: Request, userId: string, payload: Record<string, unknown>) {
+  if (!commerceTestMode(request)) {
+    return json({ error: "测试支付完成接口仅在本地开发或显式 PAYMENT_TEST_MODE 环境开放", code: "TEST_PAYMENT_DISABLED" }, 403);
+  }
+  const orderId = trimmed(payload.orderId, 80);
+  const callbackId = trimmed(payload.callbackId, 120);
+  if (!/^ord_[0-9a-f-]{36}$/i.test(orderId) || !/^[a-zA-Z0-9:_-]{12,120}$/.test(callbackId)) {
+    return json({ error: "测试订单或回调幂等键无效" }, 400);
+  }
+  const db = getD1();
+  const order = await db.prepare(`SELECT o.id, o.order_no, o.user_id, o.product_id, o.product_name, o.amount_cents,
+    o.currency, o.status, o.channel, o.idempotency_key, o.return_context_json, o.entitlement_grant_id, o.paid_at, o.created_at,
+    p.grant_type, p.duration_days
+    FROM orders o JOIN products p ON p.id = o.product_id WHERE o.id = ? AND o.user_id = ?`)
+    .bind(orderId, userId).first<CommerceOrderRow & { grant_type: "duration" | "lifetime"; duration_days: number | null }>();
+  if (!order) return json({ error: "测试订单不存在" }, 404);
+  if (order.channel !== "test") return json({ error: "非测试订单不能使用此接口" }, 409);
+  if (order.status === "paid") {
+    const membership = await userMembership(userId);
+    return json({ order: publicOrder(order), membershipType: membership?.membership_type, membershipEnd: membership?.membership_end, idempotent: true, testMode: true });
+  }
+  if (order.status !== "awaiting_test_payment" && order.status !== "created") return json({ error: "订单当前状态不能完成测试支付" }, 409);
+  const configuredDurationDays = Math.floor(Number(order.duration_days));
+  if (order.grant_type === "duration" && (!Number.isFinite(configuredDurationDays) || configuredDurationDays <= 0)) {
+    return json({ error: "订单对应的时长权益配置无效" }, 409);
+  }
+  const existingCallback = await db.prepare(`SELECT order_id FROM payment_transactions
+    WHERE provider = 'test' AND callback_id = ?`).bind(callbackId).first<{ order_id: string }>();
+  if (existingCallback && existingCallback.order_id !== order.id) return json({ error: "该测试回调幂等键已用于其他订单" }, 409);
+  const durationDays = order.grant_type === "duration" ? configuredDurationDays : 0;
+  const grantId = `grant_${order.id}`;
+  const transactionId = `ptx_${order.id}`;
+  const providerTransactionId = `test_${order.order_no}`;
+  const rawPayloadJson = JSON.stringify({ explicitTest: true, callbackId, orderNo: order.order_no });
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`INSERT OR IGNORE INTO payment_transactions
+      (id, order_id, provider, provider_transaction_id, callback_id, event_type, amount_cents, currency, status, raw_payload_json)
+      VALUES (?, ?, 'test', ?, ?, 'test_payment_completed', ?, ?, 'received', ?)`)
+      .bind(transactionId, order.id, providerTransactionId, callbackId, Number(order.amount_cents), order.currency, rawPayloadJson),
+    db.prepare(`INSERT OR IGNORE INTO entitlement_grants
+      (id, user_id, product_id, order_id, grant_type, duration_days, source_type, source_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'order', ?, 'active')`)
+      .bind(grantId, userId, order.product_id, order.id, order.grant_type, durationDays, order.id),
+    order.grant_type === "lifetime"
+      ? db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1").bind(userId)
+      : db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+          CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+            THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+          WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+        .bind(`+${durationDays} days`, userId),
+    db.prepare(`UPDATE orders SET status = 'paid', entitlement_grant_id = ?, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND EXISTS
+      (SELECT 1 FROM entitlement_grants WHERE id = ? AND user_id = ? AND status = 'active')`)
+      .bind(grantId, order.id, grantId, userId),
+    db.prepare("UPDATE payment_transactions SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(transactionId),
+  ];
+  if (order.grant_type === "duration") {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO membership_ledger
+      (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'order', ?, ?)`)
+      .bind(userId, durationDays, order.id, `${order.product_name}测试订单权益`));
+  }
+  await db.batch(statements);
+  const [paidOrder, membership] = await Promise.all([
+    db.prepare(`SELECT id, order_no, user_id, product_id, product_name, amount_cents,
+      currency, status, channel, idempotency_key, return_context_json, entitlement_grant_id, paid_at, created_at
+      FROM orders WHERE id = ?`).bind(order.id).first<CommerceOrderRow>(),
+    userMembership(userId),
+  ]);
+  await Promise.all([
+    db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'test_payment_completed', ?)")
+      .bind(userId, JSON.stringify({ orderId: order.id, productId: order.product_id, amountCents: Number(order.amount_cents), testMode: true })).run(),
+    db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'entitlement_granted', ?)")
+      .bind(userId, JSON.stringify({ orderId: order.id, grantType: order.grant_type, durationDays, source: "test_order" })).run(),
+  ]).catch(() => undefined);
+  return json({
+    order: paidOrder ? publicOrder(paidOrder) : null,
+    membershipType: membership?.membership_type ?? order.grant_type,
+    membershipEnd: membership?.membership_end ?? null,
+    idempotent: false,
+    testMode: true,
+    notice: "测试支付已完成且权益已发放；本次操作不会产生真实扣款。",
+  });
 }
 
 async function trackEvent(userId: string, payload: Record<string, unknown>) {
@@ -2083,9 +3762,9 @@ async function adminList(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const db = getD1();
   const [codes, redemptions, content, mediaAssets, questionBanks, questionImports, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
-    db.prepare(`SELECT id, code_preview, batch_name, duration_days, max_uses, used_count, status, valid_until, created_at
+    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 100`).all(),
-    db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.duration_days
+    db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 100`).all(),
     db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json, ci.status,
       ci.publish_at, ci.version, ci.updated_at,
@@ -2102,9 +3781,9 @@ async function adminList(payload: Record<string, unknown>) {
       FROM question_imports qi JOIN question_banks qb ON qb.id = qi.bank_id
       ORDER BY qi.id DESC LIMIT 50`).all(),
     db.prepare(`SELECT event_name, COUNT(*) AS count FROM analytics_events
-      WHERE created_at >= datetime('now', '-7 days') GROUP BY event_name ORDER BY count DESC`).all(),
+      WHERE user_id <> 'system' AND created_at >= datetime('now', '-7 days') GROUP BY event_name ORDER BY count DESC`).all(),
     db.prepare(`SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events
-      WHERE created_at >= datetime('now', '-7 days')`).first<{ count: number }>(),
+      WHERE user_id <> 'system' AND created_at >= datetime('now', '-7 days')`).first<{ count: number }>(),
     getConfigNumber("invite_reward_days", 3),
     getConfigNumber("invite_monthly_cap", 30),
   ]);
@@ -2126,17 +3805,26 @@ async function adminList(payload: Record<string, unknown>) {
 
 async function adminCreateCodes(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  const durationDays = Math.floor(Number(payload.durationDays));
+  const grantType = payload.grantType === "lifetime" ? "lifetime" : "duration";
+  const durationDays = grantType === "lifetime" ? 0 : Math.floor(Number(payload.durationDays));
   const count = Math.floor(Number(payload.count));
   const maxUses = Math.max(1, Math.floor(Number(payload.maxUses ?? 1)));
   const batchName = String(payload.batchName ?? "新建批次").trim().slice(0, 40) || "新建批次";
+  const channel = trimmed(payload.channel, 40) || "manual";
   let validUntil: string | null = null;
   if (payload.validUntil) {
-    const value = Date.parse(String(payload.validUntil));
+    const rawValue = String(payload.validUntil).trim();
+    // HTML date inputs represent a China-local calendar day. A selected
+    // “截止日期” remains valid through 23:59:59 on that day, not only midnight.
+    const value = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+      ? `${rawValue}T23:59:59.999+08:00`
+      : rawValue);
     if (!Number.isFinite(value)) return json({ error: "兑换截止日期无效" }, 400);
     validUntil = new Date(value).toISOString();
   }
-  if (!Number.isFinite(durationDays) || durationDays < 1 || durationDays > 3650) return json({ error: "会员天数需在 1—3650 天之间" }, 400);
+  if (grantType === "duration" && !new Set([7, 30, 365]).has(durationDays)) {
+    return json({ error: "时长兑换码仅支持 7、30 或 365 天" }, 400);
+  }
   if (!Number.isFinite(count) || count < 1 || count > 200) return json({ error: "每批生成数量需在 1—200 个之间" }, 400);
   const db = getD1();
   const plainCodes: string[] = [];
@@ -2144,10 +3832,11 @@ async function adminCreateCodes(payload: Record<string, unknown>) {
     const code = randomCode();
     plainCodes.push(code);
     await db.prepare(`INSERT INTO redemption_codes
-      (code_hash, code_preview, batch_name, duration_days, max_uses, valid_until) VALUES (?, ?, ?, ?, ?, ?)`)
-      .bind(await hashCode(code), maskCode(code), batchName, durationDays, maxUses, validUntil).run();
+      (code_hash, code_preview, batch_name, grant_type, duration_days, channel, max_uses, valid_until)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(await hashCode(code), maskCode(code), batchName, grantType, durationDays, channel, maxUses, validUntil).run();
   }
-  return json({ ok: true, codes: plainCodes });
+  return json({ ok: true, grantType, durationDays: grantType === "lifetime" ? null : durationDays, codes: plainCodes });
 }
 
 async function adminDisableCode(payload: Record<string, unknown>) {
@@ -2159,6 +3848,7 @@ async function adminDisableCode(payload: Record<string, unknown>) {
 async function adminUpdateConfig(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const rewardDays = Math.max(0, Math.min(365, Math.floor(Number(payload.rewardDays))));
+  const inviteeRewardDays = Math.max(0, Math.min(365, Math.floor(Number(payload.inviteeRewardDays ?? 3))));
   const monthlyCap = Math.max(0, Math.min(3650, Math.floor(Number(payload.monthlyCap))));
   const db = getD1();
   await db.batch([
@@ -2166,6 +3856,8 @@ async function adminUpdateConfig(payload: Record<string, unknown>) {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(String(rewardDays)),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('invite_monthly_cap', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(String(monthlyCap)),
+    db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('invitee_reward_days', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(String(inviteeRewardDays)),
   ]);
   return json({ ok: true });
 }
@@ -2411,6 +4103,18 @@ async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
   if (examType === "provincial" && !province) return json({ error: "省考题库必须填写省份" }, 400);
   if (!new Set(["行测", "申论", "综合"]).has(subject)) return json({ error: "题库科目无效" }, 400);
   const db = getD1();
+  if (status === "published") {
+    if (!bankId) return json({ error: "请先保存题库并导入已审核真题，再发布" }, 409);
+    const quality = await db.prepare(`SELECT COUNT(DISTINCT q.id) AS total,
+      COUNT(DISTINCT CASE WHEN q.truth_verified <> 1 OR q.review_status <> 'approved'
+        OR q.source = '' OR q.source_region = '' OR q.source_year IS NULL OR q.source_batch = '' OR q.explanation = ''
+        OR (q.subject = '行测' AND (json_array_length(q.options_json) < 2 OR instr('ABCDEFGH', q.answer) < 1
+          OR instr('ABCDEFGH', q.answer) > json_array_length(q.options_json))) THEN q.id END) AS invalid
+      FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id WHERE qbi.bank_id = ? AND q.status = 'active'`)
+      .bind(bankId).first<{ total: number; invalid: number }>();
+    if (Number(quality?.total ?? 0) < 1) return json({ error: "题库至少包含1道可练真题后才能发布" }, 409);
+    if (Number(quality?.invalid ?? 0) > 0) return json({ error: `有${quality?.invalid}道题缺少真题来源、地区年份、解析或审核，不能发布` }, 409);
+  }
   const duplicate = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?").bind(bankCode).first<{ id: number }>();
   if (duplicate && duplicate.id !== bankId) return json({ error: "题库编码已被其他题库使用" }, 409);
   if (bankId) {
@@ -2433,27 +4137,54 @@ async function adminSetQuestionBankStatus(payload: Record<string, unknown>) {
   const id = Math.floor(Number(payload.id));
   const status = payload.status === "published" ? "published" : "draft";
   if (!Number.isFinite(id) || id < 1) return json({ error: "题库不存在" }, 400);
-  await getD1().prepare("UPDATE question_banks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id).run();
+  const db = getD1();
+  if (status === "published") {
+    const quality = await db.prepare(`SELECT COUNT(DISTINCT q.id) AS total,
+      COUNT(DISTINCT CASE WHEN q.truth_verified <> 1 OR q.review_status <> 'approved'
+        OR q.source = '' OR q.source_region = '' OR q.source_year IS NULL OR q.source_batch = '' OR q.explanation = ''
+        OR (q.subject = '行测' AND (json_array_length(q.options_json) < 2 OR instr('ABCDEFGH', q.answer) < 1
+          OR instr('ABCDEFGH', q.answer) > json_array_length(q.options_json))) THEN q.id END) AS invalid
+      FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id WHERE qbi.bank_id = ? AND q.status = 'active'`)
+      .bind(id).first<{ total: number; invalid: number }>();
+    if (Number(quality?.total ?? 0) < 1) return json({ error: "题库至少包含1道可练真题后才能发布" }, 409);
+    if (Number(quality?.invalid ?? 0) > 0) return json({ error: `有${quality?.invalid}道题未通过真题质量校验` }, 409);
+  }
+  await db.prepare("UPDATE question_banks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id).run();
   return json({ ok: true });
 }
 
 async function adminStartQuestionImport(payload: Record<string, unknown>) {
-  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  if (!canAdmin(payload, "question.import")) return adminForbidden("question.import");
+  const admin = adminFromPayload(payload);
   const bankId = Math.floor(Number(payload.bankId));
   const fileName = trimmed(payload.fileName, 160);
   const fileSize = Math.max(0, Math.floor(Number(payload.fileSize ?? 0)));
+  const fileHash = trimmed(payload.fileHash, 64).toLowerCase();
   const totalRows = Math.max(0, Math.floor(Number(payload.totalRows ?? 0)));
+  const requestedChunks = Math.floor(Number(payload.totalChunks ?? 0));
+  const chunkSize = Math.max(1, Math.min(QUESTION_IMPORT_CHUNK_ROWS, Math.floor(Number(payload.chunkSize ?? QUESTION_IMPORT_CHUNK_ROWS))));
+  const minimumChunks = Math.ceil(totalRows / QUESTION_IMPORT_CHUNK_ROWS);
+  const totalChunks = requestedChunks >= minimumChunks
+    && requestedChunks <= QUESTION_IMPORT_MAX_CHUNKS_PER_FILE
+    && requestedChunks <= totalRows ? requestedChunks : 0;
   if (!Number.isFinite(bankId) || bankId < 1) return json({ error: "请先选择目标题库" }, 400);
   if (!/\.(xlsx|xls|csv)$/i.test(fileName)) return json({ error: "仅支持 XLSX、XLS 或 CSV 文件" }, 400);
   if (fileSize > 20 * 1024 * 1024) return json({ error: "单个文件不能超过20MB" }, 400);
-  if (totalRows < 1 || totalRows > 50_000) return json({ error: "每个文件需包含1—50000道题" }, 400);
+  if (!/^[a-f0-9]{64}$/.test(fileHash)) return json({ error: "文件指纹无效，请重新选择文件" }, 400);
+  if (totalRows < 1 || totalRows > QUESTION_IMPORT_MAX_FILE_ROWS) {
+    return json({ error: `单个文件最多${QUESTION_IMPORT_MAX_FILE_ROWS}道题；超出请按年份或地区拆成多个文件导入` }, 400);
+  }
+  if (!totalChunks) {
+    return json({ error: `单个文件最多${QUESTION_IMPORT_MAX_CHUNKS_PER_FILE}个持久化分块；内容过大时请按年份或地区拆分文件` }, 400);
+  }
   const db = getD1();
   const bank = await db.prepare("SELECT id FROM question_banks WHERE id = ?").bind(bankId).first();
   if (!bank) return json({ error: "目标题库不存在" }, 404);
   const result = await db.prepare(`INSERT INTO question_imports
-    (bank_id, file_name, file_size, total_rows, status) VALUES (?, ?, ?, ?, 'processing')`)
-    .bind(bankId, fileName, fileSize, totalRows).run();
-  return json({ ok: true, importId: Number(result.meta.last_row_id) });
+    (bank_id, file_name, file_size, file_hash, total_rows, total_chunks, status, created_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'uploading', ?, CURRENT_TIMESTAMP)`)
+    .bind(bankId, fileName, fileSize, fileHash, totalRows, totalChunks, admin?.id ?? null).run();
+  return json({ ok: true, importId: Number(result.meta.last_row_id), chunkSize, totalChunks, status: "uploading" });
 }
 
 function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; error?: string } {
@@ -2465,11 +4196,41 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   const prompt = trimmed(item.prompt, 2_000);
   const explanation = trimmed(item.explanation, 8_000);
   const source = trimmed(item.source, 120);
+  const rawSourceExamType = trimmed(item.sourceExamType, 40);
+  const sourceBatch = trimmed(item.sourceBatch, 80);
   const region = trimmed(item.region ?? item.sourceRegion, 24).replace(/[·•]/g, "-");
+  const sourceExamType = rawSourceExamType.includes("国考") || /^(national|国考)$/i.test(rawSourceExamType)
+    || new Set(["全国", "国考"]).has(normalizeProvince(region))
+    ? "national"
+    : rawSourceExamType.includes("事业") || rawSourceExamType.includes("公安") || rawSourceExamType.includes("行政执法")
+      || /^special$/i.test(rawSourceExamType)
+      ? "special"
+      : "provincial";
   const examYear = Math.floor(Number(item.examYear ?? item.sourceYear));
-  const frequency = new Set(["高频", "中频", "低频"]).has(String(item.frequency)) ? String(item.frequency) : "中频";
-  const importanceStars = Math.max(1, Math.min(5, Math.floor(Number(item.importanceStars)) || 3));
-  const scoreRate = Math.max(0, Math.min(100, Math.round(Number(item.scoreRate))));
+  const frequencyOccurrences = Math.max(0, Math.floor(Number(item.frequencyOccurrences ?? 0)));
+  const frequencyPapers = Math.max(0, Math.floor(Number(item.frequencyPapers ?? 0)));
+  const frequencyYears = parseYearList(item.frequencyYears);
+  const frequencyCoverage = frequencyPapers > 0 ? frequencyOccurrences / frequencyPapers : 0;
+  const frequency = frequencyOccurrences > 0 && frequencyPapers > 0 && frequencyYears.length
+    ? frequencyCoverage >= 0.55 ? "高频" : frequencyCoverage >= 0.25 ? "中频" : "低频"
+    : "";
+  const frequencyUpdatedAt = frequency ? new Date().toISOString() : null;
+  const importanceRuleVersion = trimmed(item.importanceRuleVersion, 40);
+  const importanceReason = trimmed(item.importanceReason, 500);
+  const importanceOverrideReason = trimmed(item.importanceOverrideReason, 500);
+  const importanceValue = Math.floor(Number(item.importanceStars));
+  const importanceStars = importanceValue >= 1 && importanceValue <= 5
+    && importanceRuleVersion && (importanceReason || importanceOverrideReason) ? importanceValue : 0;
+  const scoreRateCorrect = Math.max(0, Math.floor(Number(item.scoreRateCorrect ?? 0)));
+  const scoreRateAttempts = Math.max(0, Math.floor(Number(item.scoreRateAttempts ?? 0)));
+  const scoreRate = scoreRateAttempts > 0 ? Math.round(scoreRateCorrect * 100 / scoreRateAttempts) : 0;
+  const scoreRateScope = trimmed(item.scoreRateScope, 120);
+  const scoreRateSource = trimmed(item.scoreRateSource, 500);
+  const scoreRateObservedAt = trimmed(item.scoreRateUpdatedAt ?? item.scoreRateObservedAt, 10);
+  const scoreRateObservedTime = /^\d{4}-\d{2}-\d{2}$/.test(scoreRateObservedAt)
+    ? Date.parse(`${scoreRateObservedAt}T23:59:59Z`) : Number.NaN;
+  const scoreRateUpdatedAt = scoreRateAttempts > 0 && Number.isFinite(scoreRateObservedTime)
+    ? new Date(`${scoreRateObservedAt}T00:00:00Z`).toISOString() : null;
   const suggestedSeconds = Math.max(10, Math.min(subject === "申论" ? 3600 : 900, Math.round(Number(item.suggestedSeconds)) || 60));
   const safeAssetUrl = (value: unknown) => {
     const url = trimmed(value, 500);
@@ -2485,11 +4246,28 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   if (!questionModule) return { error: "模块不能为空" };
   if (!stem) return { error: "题干/材料不能为空" };
   if (!source) return { error: "真题来源不能为空" };
+  if (!sourceBatch) return { error: "真题必须填写可追溯的来源批次（同一套试卷使用同一批次）" };
   if (!region) return { error: "真题必须填写地区" };
   if (!Number.isInteger(examYear) || examYear < 1990 || examYear > new Date().getFullYear()) return { error: "真题年份无效" };
-  if (!Number.isFinite(Number(item.scoreRate)) || scoreRate < 0 || scoreRate > 100) return { error: "拿分率需为0—100" };
+  if (frequencyOccurrences > frequencyPapers && frequencyPapers > 0) return { error: "考频出现次数不能大于有效试卷数" };
+  if ((frequencyOccurrences || frequencyPapers || frequencyYears.length)
+    && (!frequencyOccurrences || !frequencyPapers || !frequencyYears.length)) return { error: "考频需同时填写近5年出现次数、有效试卷数和年份" };
+  const hasImportanceInput = Boolean(Number(item.importanceStars) || importanceRuleVersion || importanceReason || importanceOverrideReason);
+  if (hasImportanceInput && !(importanceValue >= 1 && importanceValue <= 5
+    && importanceRuleVersion && (importanceReason || importanceOverrideReason))) {
+    return { error: "重要星级需同时填写1—5星、规则版本及评分理由；人工覆盖还需填写覆盖理由" };
+  }
+  if (scoreRateCorrect > scoreRateAttempts) return { error: "拿分率正确人数不能大于有效首答样本数" };
+  if (scoreRateAttempts > 0 && !scoreRateScope) return { error: "外部拿分率有样本时必须填写统计范围" };
+  if (scoreRateAttempts > 0 && !/^https:\/\//i.test(scoreRateSource)) {
+    return { error: "外部拿分率必须填写可追溯的 HTTPS 参考链接；平台拿分率由系统自动计算" };
+  }
+  if (scoreRateAttempts > 0 && (!scoreRateUpdatedAt || scoreRateObservedTime > Date.now())) {
+    return { error: "外部拿分率必须填写不晚于今天的统计日期（YYYY-MM-DD）" };
+  }
   if (!explanation) return { error: "解析/参考答案不能为空" };
   if (subject === "行测" && (options.length < 2 || !answer || !/^[A-H]$/.test(answer))) return { error: "行测题必须填写至少2个选项及A—H正确答案" };
+  if (subject === "行测" && answer && answer.charCodeAt(0) - 65 >= options.length) return { error: "正确答案超出当前选项数量" };
   if (subject === "申论" && !prompt) return { error: "申论题必须填写申论任务" };
   const wordValue = Number(item.wordLimit);
   const wordLimit = Number.isInteger(wordValue) && wordValue > 0 && wordValue <= 5000 ? wordValue : null;
@@ -2509,11 +4287,27 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
     scoringPoints,
     difficulty: new Set(["简单", "中等", "较难"]).has(String(item.difficulty)) ? String(item.difficulty) : "中等",
     source,
+    sourceExamType,
+    sourceBatch,
     region,
     examYear,
+    // 导入永远只提交待核验，客户端字段不能提升真题可信状态。
+    truthVerified: false,
     frequency,
+    frequencyOccurrences,
+    frequencyPapers,
+    frequencyYears,
+    frequencyUpdatedAt,
     importanceStars,
+    importanceRuleVersion,
+    importanceReason,
+    importanceOverrideReason,
     scoreRate,
+    scoreRateCorrect,
+    scoreRateAttempts,
+    scoreRateScope,
+    scoreRateSource: scoreRateSource || "platform",
+    scoreRateUpdatedAt,
     suggestedSeconds,
     imageUrl,
     resourceUrl,
@@ -2530,113 +4324,885 @@ function importedQuestionIdentityMatches(row: Record<string, unknown>, item: Imp
     && normalize(row.stem) === normalize(item.stem)
     && JSON.stringify(existingOptions) === JSON.stringify(incomingOptions)
     && normalize(row.answer).toUpperCase() === normalize(item.answer).toUpperCase()
-    && normalize(row.prompt) === normalize(item.prompt);
+    && normalize(row.prompt) === normalize(item.prompt)
+    && normalize(row.source) === normalize(item.source)
+    && normalize(row.source_exam_type) === normalize(item.sourceExamType)
+    && normalize(row.source_region) === normalize(item.region)
+    && Number(row.source_year) === Number(item.examYear)
+    && normalize(row.source_batch) === normalize(item.sourceBatch);
 }
 
-async function adminImportQuestionBatch(payload: Record<string, unknown>) {
-  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  const bankId = Math.floor(Number(payload.bankId));
-  const importId = Math.floor(Number(payload.importId));
-  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)));
-  if (!Array.isArray(payload.rows) || payload.rows.length < 1 || payload.rows.length > 40) return json({ error: "每批需包含1—40道题" }, 400);
+async function recomputeQuestionValueMetrics(bankId: number) {
   const db = getD1();
-  const job = await db.prepare("SELECT id FROM question_imports WHERE id = ? AND bank_id = ? AND status = 'processing'").bind(importId, bankId).first();
-  if (!job) return json({ error: "导入任务不存在或已经结束" }, 409);
-  const valid: Array<{ question: ImportedQuestion; row: number }> = [];
-  const errors: Array<{ row: number; message: string }> = [];
-  payload.rows.forEach((raw, index) => {
+  const firstYear = new Date().getFullYear() - 4;
+  const scopes = await db.prepare(`SELECT DISTINCT q.source_exam_type, q.source_region
+    FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
+    WHERE qbi.bank_id = ? AND q.truth_verified = 1 AND q.review_status = 'approved'`)
+    .bind(bankId).all<{ source_exam_type: string; source_region: string }>();
+  if (!scopes.results.length) return;
+  const rowsByScope = await Promise.all(scopes.results.map(async (scope) => ({
+    scope,
+    rows: (await db.prepare(`SELECT DISTINCT q.id, q.module, q.sub_type, q.source_batch, q.source_year
+      FROM questions q
+      WHERE q.source_exam_type = ? AND q.source_region = ?
+        AND q.truth_verified = 1 AND q.review_status = 'approved' AND q.status = 'active'
+        AND q.source_year >= ? AND q.source_batch <> ''`)
+      .bind(scope.source_exam_type, scope.source_region, firstYear).all<Record<string, unknown>>()).results,
+  })));
+  const paperKey = (row: Record<string, unknown>) => String(row.source_batch || `${row.source}|${row.source_year}`);
+  const statements: D1PreparedStatement[] = [];
+  for (const { scope, rows } of rowsByScope) {
+    const validPapers = new Set(rows.map(paperKey).filter(Boolean));
+    if (!validPapers.size) continue;
+    const grouped = new Map<string, Record<string, unknown>[]>();
+    for (const row of rows) {
+      const key = `${String(row.module)}|${String(row.sub_type ?? "")}`;
+      const list = grouped.get(key) ?? [];
+      list.push(row);
+      grouped.set(key, list);
+    }
+    for (const [key, group] of grouped) {
+      const occurrencePapers = new Set(group.map(paperKey).filter(Boolean));
+      const years = Array.from(new Set(group.map((row) => Number(row.source_year)).filter(Number.isInteger)))
+        .sort((a, b) => b - a).slice(0, 5);
+      const coverage = occurrencePapers.size / validPapers.size;
+      const frequency = coverage >= 0.55 ? "高频" : coverage >= 0.25 ? "中频" : "低频";
+      const recentPersistence = years.filter((year) => year >= new Date().getFullYear() - 2).length;
+      const calculatedStars = Math.max(1, Math.min(5,
+        1 + (coverage >= 0.55 ? 2 : coverage >= 0.25 ? 1 : 0) + (years.length >= 3 ? 1 : 0) + (recentPersistence >= 2 ? 1 : 0)));
+      const [moduleName, subType] = key.split("|");
+      statements.push(db.prepare(`UPDATE questions SET frequency = ?, frequency_occurrences = ?,
+        frequency_papers = ?, frequency_years_json = ?, frequency_updated_at = CURRENT_TIMESTAMP,
+        importance_stars = CASE WHEN importance_override_reason <> '' THEN importance_stars ELSE ? END,
+        importance_rule_version = CASE WHEN importance_override_reason <> '' THEN importance_rule_version ELSE 'importance-v1' END,
+        importance_reason = CASE WHEN importance_override_reason <> '' THEN importance_reason ELSE ? END,
+        updated_at = CURRENT_TIMESTAMP
+        WHERE source_exam_type = ? AND source_region = ? AND module = ? AND sub_type = ?
+          AND id IN (${group.map(() => "?").join(",")})`)
+        .bind(frequency, occurrencePapers.size, validPapers.size, JSON.stringify(years), calculatedStars,
+          `近5年同范围${occurrencePapers.size}/${validPapers.size}套试卷出现，覆盖${years.length}个年份，近3年持续${recentPersistence}年`,
+          scope.source_exam_type, scope.source_region, moduleName, subType, ...group.map((row) => Number(row.id))));
+    }
+  }
+  if (statements.length) await db.batch(statements);
+}
+
+async function adminReviewQuestion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.review")) return adminForbidden("question.review");
+  const admin = adminFromPayload(payload);
+  if (!admin || admin.role === "question_editor") return adminForbidden("question.review");
+  const id = Math.floor(Number(payload.id));
+  const decision = payload.decision === "approve" ? "approve" : payload.decision === "reject" ? "reject" : "";
+  const reviewNote = trimmed(payload.reviewNote, 1_000);
+  if (!Number.isFinite(id) || id < 1) return json({ error: "待审核题目不存在" }, 400);
+  if (!decision) return json({ error: "审核决定无效" }, 400);
+  if (decision === "reject" && !reviewNote) return json({ error: "驳回时必须填写原因" }, 400);
+  const db = getD1();
+  const question = await db.prepare(`SELECT id, question_code, subject, options_json, answer, explanation, prompt,
+    source, source_region, source_year, source_batch, score_rate, score_rate_correct, score_rate_attempts,
+    score_rate_scope, score_rate_source, score_rate_updated_at, review_status, truth_verified
+    FROM questions WHERE id = ?`).bind(id).first<Record<string, unknown>>();
+  if (!question) return json({ error: "待审核题目不存在" }, 404);
+  const sourceYear = Number(question.source_year);
+  if (decision === "approve" && (!trimmed(question.source, 120) || !trimmed(question.source_region, 24)
+    || !Number.isInteger(sourceYear) || sourceYear < 1990 || sourceYear > new Date().getFullYear()
+    || !trimmed(question.source_batch, 80))) {
+    return json({ error: "来源、地区、年份或来源批次不完整，不能通过审核" }, 409);
+  }
+  if (decision === "approve") {
+    const subject = trimmed(question.subject, 10);
+    const explanation = trimmed(question.explanation, 8_000);
+    const options = parseOptions(String(question.options_json ?? "[]"));
+    const answer = trimmed(question.answer, 8).toUpperCase();
+    if (!explanation) return json({ error: "解析或参考答案为空，不能通过审核" }, 409);
+    if (subject === "行测" && (options.length < 2 || !/^[A-H]$/.test(answer)
+      || answer.charCodeAt(0) - 65 >= options.length)) {
+      return json({ error: "行测选项或正确答案不完整，不能通过审核" }, 409);
+    }
+    if (subject === "申论" && !trimmed(question.prompt, 2_000)) {
+      return json({ error: "申论作答任务为空，不能通过审核" }, 409);
+    }
+    const scoreRateCorrect = Math.max(0, Math.floor(Number(question.score_rate_correct ?? 0)));
+    const scoreRateAttempts = Math.max(0, Math.floor(Number(question.score_rate_attempts ?? 0)));
+    const scoreRate = Number(question.score_rate ?? 0);
+    const expectedScoreRate = scoreRateAttempts > 0 ? Math.round(scoreRateCorrect * 100 / scoreRateAttempts) : 0;
+    const scoreRateSource = trimmed(question.score_rate_source, 500) || "platform";
+    const scoreRateUpdatedAt = trimmed(question.score_rate_updated_at, 40);
+    const scoreRateTime = scoreRateUpdatedAt ? Date.parse(scoreRateUpdatedAt) : Number.NaN;
+    if (scoreRateCorrect > scoreRateAttempts) return json({ error: "拿分率正确样本数大于总样本数，不能通过审核" }, 409);
+    if (!Number.isFinite(scoreRate) || scoreRate !== expectedScoreRate) {
+      return json({ error: "拿分率与正确样本数、总样本数计算结果不一致，不能通过审核" }, 409);
+    }
+    if (scoreRateAttempts > 0 && !trimmed(question.score_rate_scope, 120)) {
+      return json({ error: "拿分率缺少统计范围，不能通过审核" }, 409);
+    }
+    if (scoreRateSource === "platform") {
+      const platformStats = await db.prepare(`SELECT COUNT(*) AS attempts,
+        COALESCE(SUM(is_correct), 0) AS correct FROM practice_attempts WHERE question_code = ?`)
+        .bind(String(question.question_code)).first<{ attempts: number; correct: number }>();
+      if (Number(platformStats?.attempts ?? 0) !== scoreRateAttempts
+        || Number(platformStats?.correct ?? 0) !== scoreRateCorrect) {
+        return json({ error: "平台拿分率只能由系统答题记录生成，当前样本与系统统计不一致" }, 409);
+      }
+      if (scoreRateAttempts > 0 && (!Number.isFinite(scoreRateTime) || scoreRateTime > Date.now())) {
+        return json({ error: "平台拿分率统计日期无效" }, 409);
+      }
+    } else {
+      let validExternalSource = false;
+      try { validExternalSource = new URL(scoreRateSource).protocol === "https:"; } catch { validExternalSource = false; }
+      if (!validExternalSource || !Number.isFinite(scoreRateTime) || scoreRateTime > Date.now()) {
+        return json({ error: "外部拿分率必须提供可追溯的HTTPS链接和不晚于今天的统计日期" }, 409);
+      }
+    }
+  }
+  const bankRows = await db.prepare("SELECT DISTINCT bank_id FROM question_bank_items WHERE question_id = ?")
+    .bind(id).all<{ bank_id: number }>();
+  const nextStatus = decision === "approve" ? "approved" : "rejected";
+  const updated = await db.prepare(`UPDATE questions SET truth_verified = ?,
+    truth_verified_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+    review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, review_note = ?,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(decision === "approve" ? 1 : 0, decision === "approve" ? 1 : 0,
+      nextStatus, admin.id, reviewNote, id).run();
+  if (!updated.meta.changes) return json({ error: "题目审核状态未更新" }, 409);
+  if (decision === "approve") {
+    for (const bank of bankRows.results) await recomputeQuestionValueMetrics(Number(bank.bank_id));
+  }
+  return json({ ok: true, id, questionCode: question.question_code, reviewStatus: nextStatus,
+    truthVerified: decision === "approve", reviewedBy: admin.id, reviewedAt: new Date().toISOString(),
+    affectedBankIds: bankRows.results.map((bank) => Number(bank.bank_id)) });
+}
+
+async function sha256Text(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function importedQuestionSnapshot(item: ImportedQuestion) {
+  return {
+    questionCode: item.questionCode,
+    subject: item.subject,
+    module: item.module,
+    subType: item.subType ?? "",
+    stem: item.stem,
+    options: item.options ?? [],
+    answer: item.answer ?? null,
+    explanation: item.explanation ?? "",
+    technique: item.technique ?? "",
+    material: item.material ?? "",
+    prompt: item.prompt ?? "",
+    wordLimit: item.wordLimit ?? null,
+    scoringPoints: item.scoringPoints ?? [],
+    difficulty: item.difficulty ?? "中等",
+    source: item.source ?? "",
+    sourceExamType: item.sourceExamType ?? "",
+    sourceBatch: item.sourceBatch ?? "",
+    region: item.region,
+    examYear: item.examYear,
+    truthVerified: false,
+    reviewStatus: "pending_review",
+    frequency: item.frequency,
+    frequencyOccurrences: item.frequencyOccurrences ?? 0,
+    frequencyPapers: item.frequencyPapers ?? 0,
+    frequencyYears: item.frequencyYears ?? [],
+    frequencyUpdatedAt: item.frequencyUpdatedAt ?? null,
+    importanceStars: item.importanceStars,
+    importanceRuleVersion: item.importanceRuleVersion ?? "",
+    importanceReason: item.importanceReason ?? "",
+    importanceOverrideReason: item.importanceOverrideReason ?? "",
+    scoreRate: item.scoreRate,
+    scoreRateCorrect: item.scoreRateCorrect ?? 0,
+    scoreRateAttempts: item.scoreRateAttempts ?? 0,
+    scoreRateScope: item.scoreRateScope ?? "",
+    scoreRateSource: item.scoreRateSource ?? "platform",
+    scoreRateUpdatedAt: item.scoreRateUpdatedAt ?? null,
+    suggestedSeconds: item.suggestedSeconds,
+    imageUrl: item.imageUrl,
+    resourceUrl: item.resourceUrl,
+    status: "active",
+  };
+}
+
+type ImportRowError = {
+  row: number;
+  questionCode: string;
+  kind: "validation" | "duplicate" | "conflict";
+  message: string;
+  rawJson: string;
+};
+
+async function persistImportRowErrors(importId: number, chunkIndex: number, errors: ImportRowError[]) {
+  if (!errors.length) return;
+  const db = getD1();
+  const encoded = JSON.stringify(errors);
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO question_import_errors
+      (import_id, chunk_index, row_number, question_code, kind, message, raw_json)
+      SELECT ?, ?, CAST(json_extract(value, '$.row') AS INTEGER),
+        COALESCE(json_extract(value, '$.questionCode'), ''), COALESCE(json_extract(value, '$.kind'), 'validation'),
+        COALESCE(json_extract(value, '$.message'), '未知错误'), COALESCE(json_extract(value, '$.rawJson'), '{}')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+    db.prepare(`INSERT OR IGNORE INTO question_import_row_results
+      (import_id, row_number, chunk_index, status, question_code, message)
+      SELECT ?, CAST(json_extract(value, '$.row') AS INTEGER), ?, 'failed',
+        COALESCE(json_extract(value, '$.questionCode'), ''), COALESCE(json_extract(value, '$.message'), '未知错误')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+  ]);
+}
+
+async function refreshQuestionImportProgress(importId: number) {
+  const db = getD1();
+  const [rows, chunks, duplicate] = await Promise.all([
+    db.prepare(`SELECT COUNT(*) AS processed,
+      COALESCE(SUM(CASE WHEN status = 'imported' THEN 1 ELSE 0 END), 0) AS imported,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+      FROM question_import_row_results WHERE import_id = ?`).bind(importId)
+      .first<{ processed: number; imported: number; failed: number }>(),
+    db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+      COALESCE(SUM(CASE WHEN status IN ('queued','processing') THEN 1 ELSE 0 END), 0) AS remaining
+      FROM question_import_chunks WHERE import_id = ?`).bind(importId)
+      .first<{ total: number; completed: number; failed: number; remaining: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_import_errors WHERE import_id = ? AND kind = 'duplicate'")
+      .bind(importId).first<{ count: number }>(),
+  ]);
+  const job = await db.prepare(`SELECT total_rows, total_chunks, uploaded_chunks, cancel_requested, status
+    FROM question_imports WHERE id = ?`).bind(importId).first<Record<string, unknown>>();
+  if (!job) return null;
+  const processed = Number(rows?.processed ?? 0);
+  const failed = Number(rows?.failed ?? 0);
+  const systemFailedChunks = Number(chunks?.failed ?? 0);
+  const remainingChunks = Number(chunks?.remaining ?? 0);
+  let status = String(job.status);
+  let completedAt = false;
+  if (Number(job.cancel_requested) === 1) {
+    status = "cancelled";
+    completedAt = true;
+  } else if (processed >= Number(job.total_rows) && Number(job.uploaded_chunks) === Number(job.total_chunks)) {
+    status = failed > 0 ? "completed_with_errors" : "completed";
+    completedAt = true;
+  } else if (systemFailedChunks > 0 && remainingChunks === 0) {
+    status = "failed";
+    completedAt = true;
+  }
+  const errorRows = failed > 0
+    ? (await db.prepare(`SELECT row_number, message FROM question_import_errors
+        WHERE import_id = ? ORDER BY row_number LIMIT 30`).bind(importId).all<{ row_number: number; message: string }>()).results
+    : [];
+  const systemErrors = systemFailedChunks > 0
+    ? (await db.prepare(`SELECT chunk_index, error_summary FROM question_import_chunks
+        WHERE import_id = ? AND status = 'failed' ORDER BY chunk_index LIMIT 10`).bind(importId)
+      .all<{ chunk_index: number; error_summary: string }>()).results
+    : [];
+  const errorSummary = [
+    ...errorRows.map((item) => `第${item.row_number}行：${item.message}`),
+    ...systemErrors.map((item) => `分块${item.chunk_index + 1}：${item.error_summary || "系统处理失败"}`),
+  ].join("\n");
+  await db.prepare(`UPDATE question_imports SET processed_rows = ?, imported_rows = ?, failed_rows = ?,
+    duplicate_rows = ?, processed_chunks = ?, status = ?, error_summary = ?, updated_at = CURRENT_TIMESTAMP,
+    completed_at = CASE WHEN ? = 1 THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE completed_at END
+    WHERE id = ?`).bind(processed, Number(rows?.imported ?? 0), failed, Number(duplicate?.count ?? 0),
+      Number(chunks?.completed ?? 0), status, errorSummary, completedAt ? 1 : 0, importId).run();
+  if (new Set(["completed", "completed_with_errors", "cancelled"]).has(status)) {
+    await db.prepare("UPDATE question_import_chunks SET rows_json = '[]' WHERE import_id = ?").bind(importId).run();
+  }
+  return { status, processed, imported: Number(rows?.imported ?? 0), failed };
+}
+
+async function processQuestionImportChunk(importId: number, chunkId: number) {
+  const db = getD1();
+  const chunk = await db.prepare(`SELECT qic.*, qi.bank_id, qi.created_by
+    FROM question_import_chunks qic JOIN question_imports qi ON qi.id = qic.import_id
+    WHERE qic.id = ? AND qic.import_id = ?`).bind(chunkId, importId).first<Record<string, unknown>>();
+  if (!chunk) throw new Error("导入分块不存在");
+  const rows = JSON.parse(String(chunk.rows_json)) as unknown[];
+  if (!Array.isArray(rows) || rows.length !== Number(chunk.row_count)) throw new Error("持久化分块内容损坏");
+  const chunkIndex = Number(chunk.chunk_index);
+  const rowOffset = Number(chunk.row_offset);
+  const bankId = Number(chunk.bank_id);
+  const completedRows = await db.prepare("SELECT row_number FROM question_import_row_results WHERE import_id = ? AND chunk_index = ?")
+    .bind(importId, chunkIndex).all<{ row_number: number }>();
+  const completedSet = new Set(completedRows.results.map((item) => Number(item.row_number)));
+  const duplicateRows = await db.prepare(`SELECT all_codes.question_code, MIN(all_codes.row_number) AS first_row,
+    COUNT(*) AS count FROM question_import_codes all_codes
+    WHERE all_codes.import_id = ? AND all_codes.question_code IN (
+      SELECT question_code FROM question_import_codes WHERE import_id = ? AND chunk_index = ?
+    ) GROUP BY all_codes.question_code HAVING COUNT(*) > 1`)
+    .bind(importId, importId, chunkIndex).all<{ question_code: string; first_row: number; count: number }>();
+  const duplicateMap = new Map(duplicateRows.results.map((item) => [item.question_code, Number(item.first_row)]));
+  const valid: Array<{ question: ImportedQuestion; row: number; raw: unknown }> = [];
+  const errors: ImportRowError[] = [];
+  rows.forEach((raw, index) => {
+    const row = rowOffset + index + 2;
+    if (completedSet.has(row)) return;
     const result = validateImportedQuestion(raw);
-    if (result.question) valid.push({ question: result.question, row: offset + index + 2 });
-    else errors.push({ row: offset + index + 2, message: result.error ?? "未知错误" });
+    const rawObject = raw as Record<string, unknown>;
+    const questionCode = result.question?.questionCode ?? trimmed(rawObject?.questionCode, 80).toUpperCase();
+    if (!result.question) {
+      errors.push({ row, questionCode, kind: "validation", message: result.error ?? "未知错误", rawJson: JSON.stringify(raw).slice(0, 500) });
+      return;
+    }
+    const firstRow = duplicateMap.get(result.question.questionCode);
+    if (firstRow && firstRow !== row) {
+      errors.push({ row, questionCode, kind: "duplicate", message: `文件内题目编号重复，首次出现在第${firstRow}行`, rawJson: JSON.stringify(raw).slice(0, 500) });
+      return;
+    }
+    valid.push({ question: result.question, row, raw });
   });
-  let accepted = valid;
+
+  type AcceptedImport = { question: ImportedQuestion; row: number; mode: "write" | "reuse" };
+  const accepted: AcceptedImport[] = [];
   if (valid.length) {
     const placeholders = valid.map(() => "?").join(",");
-    const existingRows = await db.prepare(`SELECT q.question_code, q.subject, q.module, q.sub_type, q.stem,
-      q.options_json, q.answer, q.prompt, COUNT(DISTINCT qb.id) AS bank_count,
+    const existingRows = await db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem,
+      q.options_json, q.answer, q.prompt, q.source, q.source_exam_type, q.source_region, q.source_year, q.source_batch,
+      q.version, COUNT(DISTINCT qb.id) AS bank_count,
       MAX(CASE WHEN qb.id = ? THEN 1 ELSE 0 END) AS in_current_bank,
       GROUP_CONCAT(DISTINCT qb.name) AS bank_names
       FROM questions q
       LEFT JOIN question_bank_items qbi ON qbi.question_id = q.id
       LEFT JOIN question_banks qb ON qb.id = qbi.bank_id
       WHERE q.question_code IN (${placeholders}) GROUP BY q.id`)
-      .bind(bankId, ...valid.map((item) => item.question.questionCode))
-      .all<Record<string, unknown>>();
+      .bind(bankId, ...valid.map((item) => item.question.questionCode)).all<Record<string, unknown>>();
     const existingMap = new Map(existingRows.results.map((item) => [String(item.question_code), item]));
-    accepted = valid.filter((item) => {
+    for (const item of valid) {
       const existing = existingMap.get(item.question.questionCode);
-      if (!existing) return true;
-      if (Number(existing.in_current_bank) === 1 && Number(existing.bank_count) === 1) return true;
-      if (importedQuestionIdentityMatches(existing, item.question)) return true;
-      errors.push({ row: item.row, message: `题目编号已用于“${String(existing.bank_names ?? "其他题库")}”且核心内容不一致；共通题可复用编号，但题干、选项和答案必须一致` });
-      return false;
-    });
+      if (!existing) accepted.push({ question: item.question, row: item.row, mode: "write" });
+      else if (Number(existing.in_current_bank) === 1 && Number(existing.bank_count) === 1) {
+        accepted.push({ question: item.question, row: item.row, mode: "write" });
+      } else if (importedQuestionIdentityMatches(existing, item.question)) {
+        accepted.push({ question: item.question, row: item.row, mode: "reuse" });
+      } else {
+        errors.push({ row: item.row, questionCode: item.question.questionCode, kind: "conflict",
+          message: `题目编号已用于“${String(existing.bank_names ?? "其他题库")}”且核心内容不一致；共通题可复用编号，但题干、选项和答案必须一致`,
+          rawJson: JSON.stringify(item.raw).slice(0, 500) });
+      }
+    }
   }
+  await persistImportRowErrors(importId, chunkIndex, errors);
   if (accepted.length) {
-    const statements: D1PreparedStatement[] = [];
-    accepted.forEach(({ question: item }, index) => {
-      statements.push(
-        db.prepare(`INSERT INTO questions
-          (question_code, subject, module, sub_type, stem, options_json, answer, explanation, technique,
-           material, prompt, word_limit, scoring_points_json, difficulty, source, source_region, source_year,
-           frequency, importance_stars, score_rate, suggested_seconds, image_url, resource_url, status, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
-          ON CONFLICT(question_code) DO UPDATE SET subject = excluded.subject, module = excluded.module,
-            sub_type = excluded.sub_type, stem = excluded.stem, options_json = excluded.options_json,
-            answer = excluded.answer, explanation = excluded.explanation, technique = excluded.technique,
-            material = excluded.material, prompt = excluded.prompt, word_limit = excluded.word_limit,
-            scoring_points_json = excluded.scoring_points_json, difficulty = excluded.difficulty,
-            source = excluded.source, source_region = excluded.source_region, source_year = excluded.source_year,
-            frequency = excluded.frequency, importance_stars = excluded.importance_stars,
-            score_rate = excluded.score_rate, suggested_seconds = excluded.suggested_seconds,
-            image_url = excluded.image_url, resource_url = excluded.resource_url,
-            status = 'active', updated_at = CURRENT_TIMESTAMP`)
-          .bind(item.questionCode, item.subject, item.module, item.subType ?? "", item.stem,
-            JSON.stringify(item.options ?? []), item.answer ?? null, item.explanation ?? "", item.technique ?? "",
-            item.material ?? "", item.prompt ?? "", item.wordLimit ?? null, JSON.stringify(item.scoringPoints ?? []),
-            item.difficulty ?? "中等", item.source ?? "", item.region, item.examYear, item.frequency,
-            item.importanceStars, item.scoreRate, item.suggestedSeconds, item.imageUrl, item.resourceUrl),
-        db.prepare(`INSERT OR IGNORE INTO question_bank_items (bank_id, question_id, sort_order)
-          SELECT ?, id, ? FROM questions WHERE question_code = ?`).bind(bankId, offset + index, item.questionCode),
-      );
-    });
-    await db.batch(statements);
+    // One normalized JSON binding replaces up to 400 per-row statements. The
+    // upload endpoint caps the source chunk at 480 KiB; this second guard makes
+    // the D1 binding limit explicit after normalization/default expansion.
+    const acceptedJson = JSON.stringify(accepted.map((item) => ({
+      row: item.row,
+      mode: item.mode,
+      question: importedQuestionSnapshot(item.question),
+    })));
+    if (new TextEncoder().encode(acceptedJson).byteLength >= QUESTION_IMPORT_MAX_BINDING_BYTES) {
+      throw new Error("规范化分块达到768KB绑定上限，请减小源文件分块后重试");
+    }
+    await db.batch([
+      db.prepare(`INSERT INTO questions
+        (question_code, subject, module, sub_type, stem, options_json, answer, explanation, technique,
+         material, prompt, word_limit, scoring_points_json, difficulty, source, source_exam_type, source_region,
+         source_year, source_batch, truth_verified, truth_verified_at, review_status, reviewed_by, reviewed_at,
+         review_note, frequency, frequency_occurrences, frequency_papers, frequency_years_json, frequency_updated_at,
+         importance_stars, importance_rule_version, importance_reason, importance_override_reason, score_rate,
+         score_rate_correct, score_rate_attempts, score_rate_scope, score_rate_source, score_rate_updated_at,
+         suggested_seconds, image_url, resource_url, status, version, updated_at)
+        SELECT
+          json_extract(incoming.value, '$.question.questionCode'),
+          json_extract(incoming.value, '$.question.subject'),
+          json_extract(incoming.value, '$.question.module'),
+          COALESCE(json_extract(incoming.value, '$.question.subType'), ''),
+          json_extract(incoming.value, '$.question.stem'),
+          COALESCE(json(json_extract(incoming.value, '$.question.options')), '[]'),
+          json_extract(incoming.value, '$.question.answer'),
+          COALESCE(json_extract(incoming.value, '$.question.explanation'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.technique'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.material'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.prompt'), ''),
+          CAST(json_extract(incoming.value, '$.question.wordLimit') AS INTEGER),
+          COALESCE(json(json_extract(incoming.value, '$.question.scoringPoints')), '[]'),
+          COALESCE(json_extract(incoming.value, '$.question.difficulty'), '中等'),
+          COALESCE(json_extract(incoming.value, '$.question.source'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.sourceExamType'), ''),
+          json_extract(incoming.value, '$.question.region'),
+          CAST(json_extract(incoming.value, '$.question.examYear') AS INTEGER),
+          COALESCE(json_extract(incoming.value, '$.question.sourceBatch'), ''),
+          0, NULL, 'pending_review', NULL, NULL, '',
+          COALESCE(json_extract(incoming.value, '$.question.frequency'), ''),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyOccurrences') AS INTEGER), 0),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyPapers') AS INTEGER), 0),
+          COALESCE(json(json_extract(incoming.value, '$.question.frequencyYears')), '[]'),
+          json_extract(incoming.value, '$.question.frequencyUpdatedAt'),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.importanceStars') AS INTEGER), 0),
+          COALESCE(json_extract(incoming.value, '$.question.importanceRuleVersion'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.importanceReason'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.importanceOverrideReason'), ''),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRate') AS INTEGER), 0),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRateCorrect') AS INTEGER), 0),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRateAttempts') AS INTEGER), 0),
+          COALESCE(json_extract(incoming.value, '$.question.scoreRateScope'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.scoreRateSource'), 'platform'),
+          json_extract(incoming.value, '$.question.scoreRateUpdatedAt'),
+          COALESCE(CAST(json_extract(incoming.value, '$.question.suggestedSeconds') AS INTEGER), 60),
+          COALESCE(json_extract(incoming.value, '$.question.imageUrl'), ''),
+          COALESCE(json_extract(incoming.value, '$.question.resourceUrl'), ''),
+          'active', 1, CURRENT_TIMESTAMP
+        FROM json_each(?) AS incoming
+        WHERE json_extract(incoming.value, '$.mode') = 'write'
+          AND NOT EXISTS (SELECT 1 FROM question_import_row_results completed
+            WHERE completed.import_id = ?
+              AND completed.row_number = CAST(json_extract(incoming.value, '$.row') AS INTEGER))
+        ON CONFLICT(question_code) DO UPDATE SET
+          subject = excluded.subject, module = excluded.module, sub_type = excluded.sub_type, stem = excluded.stem,
+          options_json = excluded.options_json, answer = excluded.answer, explanation = excluded.explanation,
+          technique = excluded.technique, material = excluded.material, prompt = excluded.prompt,
+          word_limit = excluded.word_limit, scoring_points_json = excluded.scoring_points_json,
+          difficulty = excluded.difficulty, source = excluded.source, source_exam_type = excluded.source_exam_type,
+          source_region = excluded.source_region, source_year = excluded.source_year, source_batch = excluded.source_batch,
+          truth_verified = 0, truth_verified_at = NULL, review_status = 'pending_review', reviewed_by = NULL,
+          reviewed_at = NULL, review_note = '', frequency = excluded.frequency,
+          frequency_occurrences = excluded.frequency_occurrences, frequency_papers = excluded.frequency_papers,
+          frequency_years_json = excluded.frequency_years_json, frequency_updated_at = excluded.frequency_updated_at,
+          importance_stars = excluded.importance_stars, importance_rule_version = excluded.importance_rule_version,
+          importance_reason = excluded.importance_reason, importance_override_reason = excluded.importance_override_reason,
+          score_rate = excluded.score_rate, score_rate_correct = excluded.score_rate_correct,
+          score_rate_attempts = excluded.score_rate_attempts, score_rate_scope = excluded.score_rate_scope,
+          score_rate_source = excluded.score_rate_source, score_rate_updated_at = excluded.score_rate_updated_at,
+          suggested_seconds = excluded.suggested_seconds, image_url = excluded.image_url,
+          resource_url = excluded.resource_url, status = 'active', version = questions.version + 1,
+          updated_at = CURRENT_TIMESTAMP`).bind(acceptedJson, importId),
+      db.prepare(`INSERT OR IGNORE INTO question_versions
+        (question_id, version, question_code, snapshot_json, change_type, import_id, source_row, admin_user_id, review_status)
+        SELECT q.id, q.version, q.question_code, json(json_extract(incoming.value, '$.question')),
+          'import', ?, CAST(json_extract(incoming.value, '$.row') AS INTEGER), ?, q.review_status
+        FROM json_each(?) AS incoming
+        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')
+        WHERE json_extract(incoming.value, '$.mode') = 'write'
+          AND NOT EXISTS (SELECT 1 FROM question_import_row_results completed
+            WHERE completed.import_id = ?
+              AND completed.row_number = CAST(json_extract(incoming.value, '$.row') AS INTEGER))`)
+        .bind(importId, chunk.created_by ?? null, acceptedJson, importId),
+      db.prepare(`INSERT OR IGNORE INTO question_bank_items (bank_id, question_id, sort_order)
+        SELECT ?, q.id, CAST(json_extract(incoming.value, '$.row') AS INTEGER) - 2
+        FROM json_each(?) AS incoming
+        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')`)
+        .bind(bankId, acceptedJson),
+      db.prepare(`INSERT OR IGNORE INTO question_import_row_results
+        (import_id, row_number, chunk_index, status, question_code, question_version)
+        SELECT ?, CAST(json_extract(incoming.value, '$.row') AS INTEGER), ?, 'imported', q.question_code, q.version
+        FROM json_each(?) AS incoming
+        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')`)
+        .bind(importId, chunkIndex, acceptedJson),
+    ]);
   }
-  await db.prepare(`UPDATE question_imports SET imported_rows = imported_rows + ?, failed_rows = failed_rows + ?
-    WHERE id = ?`).bind(accepted.length, errors.length, importId).run();
-  return json({
-    ok: true,
-    imported: accepted.length,
-    failed: errors.length,
-    errors,
-    importedQuestions: accepted.map(({ question }) => ({
-      questionCode: question.questionCode,
-      region: question.region,
-      examYear: question.examYear,
-      truthLabel: `${question.region}-${question.examYear}`,
-      frequency: question.frequency,
-      importanceStars: question.importanceStars,
-      scoreRate: question.scoreRate,
-      suggestedSeconds: question.suggestedSeconds,
-      imageUrl: question.imageUrl,
-      resourceUrl: question.resourceUrl,
-    })),
-  });
+  const counts = await db.prepare(`SELECT COUNT(*) AS processed,
+    COALESCE(SUM(CASE WHEN status = 'imported' THEN 1 ELSE 0 END), 0) AS imported,
+    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+    FROM question_import_row_results WHERE import_id = ? AND chunk_index = ?`)
+    .bind(importId, chunkIndex).first<{ processed: number; imported: number; failed: number }>();
+  if (Number(counts?.processed ?? 0) !== Number(chunk.row_count)) throw new Error("分块行级结果不完整，可安全重试");
+  const duplicateCount = await db.prepare(`SELECT COUNT(*) AS count FROM question_import_errors
+    WHERE import_id = ? AND chunk_index = ? AND kind = 'duplicate'`).bind(importId, chunkIndex).first<{ count: number }>();
+  await db.prepare(`UPDATE question_import_chunks SET status = 'completed', imported_rows = ?, failed_rows = ?,
+    duplicate_rows = ?, error_summary = '', updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(Number(counts?.imported ?? 0), Number(counts?.failed ?? 0), Number(duplicateCount?.count ?? 0), chunkId).run();
 }
 
-async function adminFinishQuestionImport(payload: Record<string, unknown>) {
-  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  const importId = Math.floor(Number(payload.importId));
-  const errorSummary = trimmed(payload.errorSummary, 8_000);
-  if (payload.aborted === true) {
-    await getD1().prepare(`UPDATE question_imports SET status = 'failed', error_summary = ?, completed_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'processing'`).bind(errorSummary || "导入中断", importId).run();
-    return json({ ok: true });
+const INTERNAL_IMPORT_HEADER = "x-gkrl-internal-job-secret";
+
+function internalJobSecret() {
+  return String((env as unknown as { INTERNAL_JOB_SECRET?: string }).INTERNAL_JOB_SECRET ?? "").trim();
+}
+
+function sitesBypassBearerToken() {
+  return String((env as unknown as { SITES_BYPASS_BEARER_TOKEN?: string }).SITES_BYPASS_BEARER_TOKEN ?? "").trim();
+}
+
+async function internalJobSecretMatches(request: Request) {
+  const configured = internalJobSecret();
+  const provided = request.headers.get(INTERNAL_IMPORT_HEADER) ?? "";
+  if (configured.length < 32 || provided.length < 32) return false;
+  const [configuredDigest, providedDigest] = await Promise.all([
+    digestText(`gkrl-internal-job:${configured}`),
+    digestText(`gkrl-internal-job:${provided}`),
+  ]);
+  return configuredDigest === providedDigest;
+}
+
+async function requestQuestionImportContinuation(importId: number, origin: string) {
+  const secret = internalJobSecret();
+  if (secret.length < 32 || !/^https?:\/\//i.test(origin)) return false;
+  const bypassToken = sitesBypassBearerToken();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        [INTERNAL_IMPORT_HEADER]: secret,
+      };
+      // Owner-only Sites reject identity-less HTTP requests before they reach
+      // the Worker. Keep the platform-issued bypass credential in hosted
+      // secrets only; public deployments do not require it.
+      if (bypassToken) headers["OAI-Sites-Authorization"] = `Bearer ${bypassToken}`;
+      const response = await fetch(new URL("/api/app", origin), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ action: "continueQuestionImportInternal", importId }),
+      });
+      if (response.ok) return true;
+    } catch {
+      // 下一次立即重试；任务状态仍在 D1 中保持 queued，不会丢失。
+    }
   }
-  await getD1().prepare(`UPDATE question_imports SET status = CASE WHEN failed_rows > 0 THEN 'completed_with_errors' ELSE 'completed' END,
-    error_summary = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'`)
-    .bind(errorSummary, importId).run();
-  return json({ ok: true });
+  return false;
+}
+
+async function processQuestionImport(importId: number, budgetMs = 24_000, continuationOrigin = "") {
+  const db = getD1();
+  const leaseToken = crypto.randomUUID();
+  const claimed = await db.prepare(`UPDATE question_imports SET lease_token = ?, lease_until = datetime('now', '+45 seconds'),
+    status = 'processing', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), last_heartbeat_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND cancel_requested = 0 AND status IN ('queued','processing')
+    AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP)`).bind(leaseToken, importId).run();
+  if (!claimed.meta.changes) return;
+  const durableMeta = await db.prepare("SELECT total_chunks, uploaded_chunks FROM question_imports WHERE id = ? AND lease_token = ?")
+    .bind(importId, leaseToken).first<{ total_chunks: number; uploaded_chunks: number }>();
+  if (!durableMeta || Number(durableMeta.total_chunks) < 1) {
+    await db.prepare(`UPDATE question_imports SET status = 'failed',
+      error_summary = '旧版任务没有持久化分块，无法自动恢复；请使用原文件重新导入',
+      lease_token = NULL, lease_until = NULL, completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`).bind(importId, leaseToken).run();
+    return;
+  }
+  // A Worker can be evicted between claiming a chunk and writing its result.
+  // Once the job lease is reclaimed, row-level idempotency makes those stale
+  // processing chunks safe to enqueue again.
+  await db.prepare(`UPDATE question_import_chunks SET status = 'queued', updated_at = CURRENT_TIMESTAMP
+    WHERE import_id = ? AND status = 'processing'`).bind(importId).run();
+  const started = Date.now();
+  let remainingD1QueryBudget = QUESTION_IMPORT_D1_QUERY_LIMIT - QUESTION_IMPORT_D1_QUERY_RESERVE;
+  let attemptedChunks = 0;
+  try {
+    while (Date.now() - started < budgetMs
+      && attemptedChunks < QUESTION_IMPORT_MAX_CHUNKS_PER_INVOCATION
+      && remainingD1QueryBudget >= QUESTION_IMPORT_CHUNK_QUERY_BUDGET) {
+      const job = await db.prepare("SELECT cancel_requested FROM question_imports WHERE id = ? AND lease_token = ?")
+        .bind(importId, leaseToken).first<{ cancel_requested: number }>();
+      if (!job || Number(job.cancel_requested) === 1) break;
+      const chunk = await db.prepare(`SELECT id, attempts FROM question_import_chunks
+        WHERE import_id = ? AND status = 'queued' ORDER BY chunk_index LIMIT 1`).bind(importId)
+        .first<{ id: number; attempts: number }>();
+      if (!chunk) {
+        await refreshQuestionImportProgress(importId);
+        break;
+      }
+      await db.prepare(`UPDATE question_import_chunks SET status = 'processing', attempts = attempts + 1,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'queued'`).bind(chunk.id).run();
+      // processQuestionImportChunk is capped at 13 D1 statements in the
+      // validation+error+write path; reserve 15 to leave two-query headroom.
+      attemptedChunks += 1;
+      remainingD1QueryBudget -= QUESTION_IMPORT_CHUNK_QUERY_BUDGET;
+      try {
+        await processQuestionImportChunk(importId, Number(chunk.id));
+      } catch (error) {
+        const message = error instanceof Error ? error.message.slice(0, 1_000) : "分块处理失败";
+        const nextStatus = Number(chunk.attempts ?? 0) + 1 >= 3 ? "failed" : "queued";
+        await db.prepare(`UPDATE question_import_chunks SET status = ?, error_summary = ?,
+          updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(nextStatus, message, chunk.id).run();
+      }
+      await db.prepare(`UPDATE question_imports SET lease_until = datetime('now', '+45 seconds'),
+        last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`)
+        .bind(importId, leaseToken).run();
+      const progress = await refreshQuestionImportProgress(importId);
+      if (progress && new Set(["completed", "completed_with_errors", "failed", "cancelled"]).has(progress.status)) break;
+    }
+  } finally {
+    const job = await db.prepare("SELECT cancel_requested, status FROM question_imports WHERE id = ? AND lease_token = ?")
+      .bind(importId, leaseToken).first<{ cancel_requested: number; status: string }>();
+    if (job && Number(job.cancel_requested) === 1) {
+      await db.batch([
+        db.prepare("UPDATE question_import_chunks SET status = 'cancelled', rows_json = '[]', updated_at = CURRENT_TIMESTAMP WHERE import_id = ? AND status IN ('queued','processing')").bind(importId),
+        db.prepare(`UPDATE question_imports SET status = 'cancelled', lease_token = NULL, lease_until = NULL,
+          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`).bind(importId, leaseToken),
+      ]);
+    } else if (job && !new Set(["completed", "completed_with_errors", "failed", "cancelled"]).has(job.status)) {
+      await db.prepare(`UPDATE question_imports SET status = 'queued', lease_token = NULL, lease_until = NULL,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`).bind(importId, leaseToken).run();
+    } else {
+      await db.prepare("UPDATE question_imports SET lease_token = NULL, lease_until = NULL WHERE id = ? AND lease_token = ?")
+        .bind(importId, leaseToken).run();
+    }
+  }
+  const pending = await db.prepare("SELECT status FROM question_imports WHERE id = ?")
+    .bind(importId).first<{ status: string }>();
+  if (pending?.status === "queued" && continuationOrigin) {
+    await requestQuestionImportContinuation(importId, continuationOrigin);
+  }
+}
+
+async function adminImportQuestionBatch(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.import")) return adminForbidden("question.import");
+  const importId = Math.floor(Number(payload.importId));
+  const bankId = Math.floor(Number(payload.bankId));
+  const chunkIndex = Math.max(0, Math.floor(Number(payload.chunkIndex ?? 0)));
+  const rowOffset = Math.max(0, Math.floor(Number(payload.offset ?? payload.rowOffset ?? 0)));
+  if (!Array.isArray(payload.rows) || payload.rows.length < 1 || payload.rows.length > QUESTION_IMPORT_CHUNK_ROWS) {
+    return json({ error: "每个持久化分块需包含1—80道题" }, 400);
+  }
+  const db = getD1();
+  const job = await db.prepare(`SELECT id, file_hash, total_rows, total_chunks, status, cancel_requested
+    FROM question_imports WHERE id = ? AND bank_id = ?`).bind(importId, bankId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  if (trimmed(payload.fileHash, 64).toLowerCase() !== String(job.file_hash)) return json({ error: "文件指纹不一致，不能把不同文件混入同一任务" }, 409);
+  if (String(job.status) !== "uploading" || Number(job.cancel_requested) === 1) return json({ error: "任务已封存、取消或进入处理阶段" }, 409);
+  if (chunkIndex >= Number(job.total_chunks) || rowOffset + payload.rows.length > Number(job.total_rows)) {
+    return json({ error: "分块序号或行范围超出任务边界" }, 400);
+  }
+  const rowsJson = JSON.stringify(payload.rows);
+  if (new TextEncoder().encode(rowsJson).byteLength > QUESTION_IMPORT_UPLOAD_BYTES) {
+    return json({ error: "单个持久化分块超过480KB，请减小分块后重试" }, 413);
+  }
+  const payloadHash = await sha256Text(rowsJson);
+  const existing = await db.prepare(`SELECT payload_hash, row_offset, row_count FROM question_import_chunks
+    WHERE import_id = ? AND chunk_index = ?`).bind(importId, chunkIndex).first<Record<string, unknown>>();
+  if (existing) {
+    if (String(existing.payload_hash) !== payloadHash || Number(existing.row_offset) !== rowOffset
+      || Number(existing.row_count) !== payload.rows.length) {
+      return json({ error: "同一分块序号已上传不同内容；为避免覆盖，请取消任务后重新导入" }, 409);
+    }
+    return json({ ok: true, idempotent: true, chunkIndex, payloadHash });
+  }
+  const codes = payload.rows.map((raw, index) => ({
+    rowNumber: rowOffset + index + 2,
+    questionCode: trimmed((raw as Record<string, unknown>)?.questionCode, 80).toUpperCase(),
+  })).filter((item) => item.questionCode);
+  await db.batch([
+    db.prepare(`INSERT INTO question_import_chunks
+      (import_id, chunk_index, row_offset, row_count, payload_hash, rows_json, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued')`).bind(importId, chunkIndex, rowOffset, payload.rows.length, payloadHash, rowsJson),
+    db.prepare(`INSERT OR IGNORE INTO question_import_codes (import_id, chunk_index, row_number, question_code)
+      SELECT ?, ?, CAST(json_extract(value, '$.rowNumber') AS INTEGER), json_extract(value, '$.questionCode')
+      FROM json_each(?)`).bind(importId, chunkIndex, JSON.stringify(codes)),
+    db.prepare(`UPDATE question_imports SET uploaded_chunks =
+        (SELECT COUNT(*) FROM question_import_chunks WHERE import_id = ?),
+      uploaded_rows = (SELECT COALESCE(SUM(row_count), 0) FROM question_import_chunks WHERE import_id = ?),
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(importId, importId, importId),
+  ]);
+  return json({ ok: true, idempotent: false, chunkIndex, payloadHash });
+}
+
+async function questionImportDuplicatePreview(importId: number) {
+  const db = getD1();
+  const [withinFile, existing, duplicateCount, existingCount] = await Promise.all([
+    db.prepare(`SELECT question_code, COUNT(*) AS occurrences, MIN(row_number) AS first_row,
+      GROUP_CONCAT(row_number) AS rows FROM question_import_codes WHERE import_id = ?
+      GROUP BY question_code HAVING COUNT(*) > 1 ORDER BY first_row LIMIT 100`).bind(importId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT q.question_code, q.version, q.review_status, GROUP_CONCAT(DISTINCT qb.name) AS bank_names
+      FROM question_import_codes qic JOIN questions q ON q.question_code = qic.question_code
+      LEFT JOIN question_bank_items qbi ON qbi.question_id = q.id LEFT JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE qic.import_id = ? GROUP BY q.id ORDER BY q.question_code LIMIT 100`).bind(importId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COALESCE(SUM(occurrences - 1), 0) AS count FROM (
+      SELECT COUNT(*) AS occurrences FROM question_import_codes WHERE import_id = ?
+      GROUP BY question_code HAVING COUNT(*) > 1)`).bind(importId).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(DISTINCT q.id) AS count FROM question_import_codes qic
+      JOIN questions q ON q.question_code = qic.question_code WHERE qic.import_id = ?`)
+      .bind(importId).first<{ count: number }>(),
+  ]);
+  const duplicateRows = Number(duplicateCount?.count ?? 0);
+  await db.prepare("UPDATE question_imports SET duplicate_rows = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(duplicateRows, importId).run();
+  return { withinFile: withinFile.results, existing: existing.results, duplicateRows,
+    existingCount: Number(existingCount?.count ?? 0), previewTruncated: withinFile.results.length >= 100 || existing.results.length >= 100 };
+}
+
+async function adminPreviewQuestionImportDuplicates(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const job = await getD1().prepare("SELECT id FROM question_imports WHERE id = ?").bind(importId).first();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  return json({ ok: true, ...(await questionImportDuplicatePreview(importId)) });
+}
+
+async function adminFinishQuestionImport(request: Request, payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.import")) return adminForbidden("question.import");
+  const importId = Math.floor(Number(payload.importId));
+  if (payload.aborted === true) return adminCancelQuestionImport(payload);
+  const db = getD1();
+  const job = await db.prepare(`SELECT total_rows, total_chunks, uploaded_rows, uploaded_chunks, status
+    FROM question_imports WHERE id = ?`).bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  if (String(job.status) !== "uploading") return json({ error: "任务已封存或处理" }, 409);
+  const chunks = await db.prepare(`SELECT chunk_index, row_offset, row_count FROM question_import_chunks
+    WHERE import_id = ? ORDER BY row_offset`).bind(importId).all<Record<string, unknown>>();
+  let expectedOffset = 0;
+  for (const chunk of chunks.results) {
+    if (Number(chunk.row_offset) !== expectedOffset) return json({ error: `分块不连续，缺少从第${expectedOffset + 2}行开始的数据` }, 409);
+    expectedOffset += Number(chunk.row_count);
+  }
+  if (Number(job.uploaded_rows) !== Number(job.total_rows) || Number(job.uploaded_chunks) !== Number(job.total_chunks)
+    || expectedOffset !== Number(job.total_rows)) return json({ error: "文件尚未完整持久化，不能提交后台处理" }, 409);
+  const preview = await questionImportDuplicatePreview(importId);
+  await db.prepare(`UPDATE question_imports SET status = 'queued', sealed_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'uploading'`).bind(importId).run();
+  const origin = new URL(request.url).origin;
+  // Dispatch processing into a fresh internal Worker invocation. The current
+  // admin request has already spent queries on authentication, schema seeding,
+  // continuity checks and duplicate preview, so processing a chunk here could
+  // exceed D1 Free's per-invocation allowance.
+  const scheduled = scheduleRequestTask(request, () => requestQuestionImportContinuation(importId, origin));
+  const dispatched = scheduled || await requestQuestionImportContinuation(importId, origin);
+  return json({ ok: true, importId, status: "queued", backgroundScheduled: dispatched, duplicatePreview: preview });
+}
+
+async function adminGetQuestionImport(request: Request, payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare(`SELECT qi.*, qb.name AS bank_name FROM question_imports qi
+    JOIN question_banks qb ON qb.id = qi.bank_id WHERE qi.id = ?`).bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  if (new Set(["queued", "processing"]).has(String(job.status))) {
+    const origin = new URL(request.url).origin;
+    scheduleRequestTask(request, () => requestQuestionImportContinuation(importId, origin));
+  }
+  const errors = await db.prepare(`SELECT row_number, question_code, kind, message FROM question_import_errors
+    WHERE import_id = ? ORDER BY row_number LIMIT 100`).bind(importId).all<Record<string, unknown>>();
+  return json({ ok: true, job, errors: errors.results });
+}
+
+async function adminCancelQuestionImport(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare("SELECT status FROM question_imports WHERE id = ?").bind(importId).first<{ status: string }>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  if (new Set(["completed", "completed_with_errors", "failed", "cancelled"]).has(job.status)) {
+    return json({ ok: true, status: job.status, idempotent: true });
+  }
+  await db.batch([
+    db.prepare("UPDATE question_imports SET cancel_requested = 1, status = 'cancelling', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(importId),
+    db.prepare("UPDATE question_import_chunks SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE import_id = ? AND status = 'queued'").bind(importId),
+  ]);
+  const processing = await db.prepare("SELECT COUNT(*) AS count FROM question_import_chunks WHERE import_id = ? AND status = 'processing'")
+    .bind(importId).first<{ count: number }>();
+  if (Number(processing?.count ?? 0) === 0) {
+    await db.batch([
+      db.prepare(`UPDATE question_imports SET status = 'cancelled', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+        lease_token = NULL, lease_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(importId),
+      db.prepare("UPDATE question_import_chunks SET rows_json = '[]' WHERE import_id = ?").bind(importId),
+    ]);
+  }
+  return json({ ok: true, status: Number(processing?.count ?? 0) ? "cancelling" : "cancelled" });
+}
+
+async function adminRetryQuestionImport(request: Request, payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare("SELECT status FROM question_imports WHERE id = ?").bind(importId).first<{ status: string }>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  if (job.status !== "failed") return json({ error: "只有系统处理失败的任务可以安全重试；校验失败请修正原文件后新建导入" }, 409);
+  const reset = await db.prepare(`UPDATE question_import_chunks SET status = 'queued', attempts = 0, error_summary = '',
+    updated_at = CURRENT_TIMESTAMP WHERE import_id = ? AND status = 'failed'`).bind(importId).run();
+  if (!reset.meta.changes) return json({ error: "没有可重试的失败分块" }, 409);
+  await db.prepare(`UPDATE question_imports SET status = 'queued', cancel_requested = 0, completed_at = NULL,
+    lease_token = NULL, lease_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(importId).run();
+  const origin = new URL(request.url).origin;
+  const scheduled = scheduleRequestTask(request, () => requestQuestionImportContinuation(importId, origin));
+  const dispatched = scheduled || await requestQuestionImportContinuation(importId, origin);
+  return json({ ok: true, status: "queued", backgroundScheduled: dispatched });
+}
+
+function csvCell(value: unknown) {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
+async function adminDownloadQuestionImportErrors(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)));
+  const limit = 1_000;
+  const db = getD1();
+  const job = await db.prepare("SELECT file_name FROM question_imports WHERE id = ?").bind(importId).first<{ file_name: string }>();
+  if (!job) return json({ error: "导入任务不存在" }, 404);
+  const [rows, total] = await Promise.all([
+    db.prepare(`SELECT row_number, question_code, kind, message FROM question_import_errors
+      WHERE import_id = ? ORDER BY row_number LIMIT ? OFFSET ?`).bind(importId, limit, offset).all<Record<string, unknown>>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_import_errors WHERE import_id = ?").bind(importId).first<{ count: number }>(),
+  ]);
+  const content = [...(offset === 0 ? ["行号,题目编号,错误类型,错误原因"] : []), ...rows.results.map((item) =>
+    [item.row_number, item.question_code, item.kind, item.message].map(csvCell).join(","))].join("\r\n");
+  const baseName = job.file_name.replace(/\.[^.]+$/, "").slice(0, 120);
+  const nextOffset = offset + rows.results.length < Number(total?.count ?? 0) ? offset + rows.results.length : null;
+  return json({ ok: true, fileName: `${baseName}-导入错误.csv`, contentType: "text/csv;charset=utf-8",
+    content: `${offset === 0 ? "\uFEFF" : "\r\n"}${content}`, nextOffset, total: Number(total?.count ?? 0) });
+}
+
+async function adminListQuestionVersions(payload: Record<string, unknown>) {
+  const questionId = Math.floor(Number(payload.questionId));
+  const questionCode = trimmed(payload.questionCode, 80).toUpperCase();
+  const db = getD1();
+  const question = questionId > 0
+    ? await db.prepare(`SELECT q.id, q.question_code, q.version, q.review_status,
+        (SELECT COUNT(*) FROM question_bank_items qbi WHERE qbi.question_id = q.id) AS bank_count,
+        (SELECT GROUP_CONCAT(qb.name) FROM question_bank_items qbi JOIN question_banks qb ON qb.id = qbi.bank_id
+          WHERE qbi.question_id = q.id) AS bank_names FROM questions q WHERE q.id = ?`).bind(questionId).first<Record<string, unknown>>()
+    : await db.prepare(`SELECT q.id, q.question_code, q.version, q.review_status,
+        (SELECT COUNT(*) FROM question_bank_items qbi WHERE qbi.question_id = q.id) AS bank_count,
+        (SELECT GROUP_CONCAT(qb.name) FROM question_bank_items qbi JOIN question_banks qb ON qb.id = qbi.bank_id
+          WHERE qbi.question_id = q.id) AS bank_names FROM questions q WHERE q.question_code = ?`).bind(questionCode).first<Record<string, unknown>>();
+  if (!question) return json({ error: "题目不存在" }, 404);
+  const versions = await db.prepare(`SELECT qv.id, qv.version, qv.question_code, qv.snapshot_json, qv.change_type,
+    qv.import_id, qv.source_row, qv.from_version, qv.admin_user_id,
+    CASE WHEN qv.version = q.version THEN q.review_status ELSE qv.review_status END AS review_status,
+    qv.created_at, au.display_name AS admin_name FROM question_versions qv
+    JOIN questions q ON q.id = qv.question_id LEFT JOIN admin_users au ON au.id = qv.admin_user_id
+    WHERE qv.question_id = ? ORDER BY qv.version DESC LIMIT 100`).bind(Number(question.id)).all<Record<string, unknown>>();
+  return json({ ok: true, question, versions: versions.results.map((item) => ({
+    ...item, snapshot: (() => { try { return JSON.parse(String(item.snapshot_json)); } catch { return null; } })(), snapshot_json: undefined,
+  })) });
+}
+
+async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
+  const admin = adminFromPayload(payload);
+  const questionId = Math.floor(Number(payload.questionId));
+  const targetVersion = Math.floor(Number(payload.version));
+  const db = getD1();
+  const [live, target] = await Promise.all([
+    db.prepare("SELECT id, question_code, version, status FROM questions WHERE id = ?").bind(questionId).first<Record<string, unknown>>(),
+    db.prepare(`SELECT version, question_code, snapshot_json FROM question_versions
+      WHERE question_id = ? AND version = ?`).bind(questionId, targetVersion).first<Record<string, unknown>>(),
+  ]);
+  if (!live || !target) return json({ error: "题目或目标版本不存在" }, 404);
+  if (targetVersion === Number(live.version)) return json({ error: "当前已经是该版本，无需回滚" }, 409);
+  let snapshot: Record<string, unknown>;
+  try { snapshot = JSON.parse(String(target.snapshot_json)) as Record<string, unknown>; }
+  catch { return json({ error: "目标版本快照损坏，已拒绝回滚" }, 409); }
+  if (String(snapshot.questionCode) !== String(live.question_code)) return json({ error: "版本快照与当前题目不匹配" }, 409);
+  const pendingSnapshot = { ...snapshot, truthVerified: false, reviewStatus: "pending_review", status: String(live.status ?? "active") };
+  await db.batch([
+    db.prepare(`UPDATE questions SET subject = ?, module = ?, sub_type = ?, stem = ?, options_json = ?, answer = ?,
+      explanation = ?, technique = ?, material = ?, prompt = ?, word_limit = ?, scoring_points_json = ?, difficulty = ?,
+      source = ?, source_exam_type = ?, source_region = ?, source_year = ?, source_batch = ?, truth_verified = 0,
+      truth_verified_at = NULL, review_status = 'pending_review', reviewed_by = NULL, reviewed_at = NULL, review_note = '',
+      frequency = ?, frequency_occurrences = ?, frequency_papers = ?, frequency_years_json = ?, frequency_updated_at = ?,
+      importance_stars = ?, importance_rule_version = ?, importance_reason = ?, importance_override_reason = ?,
+      score_rate = ?, score_rate_correct = ?, score_rate_attempts = ?, score_rate_scope = ?, score_rate_source = ?,
+      score_rate_updated_at = ?, suggested_seconds = ?, image_url = ?, resource_url = ?, status = ?,
+      version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(String(snapshot.subject ?? ""), String(snapshot.module ?? ""), String(snapshot.subType ?? ""), String(snapshot.stem ?? ""),
+        JSON.stringify(Array.isArray(snapshot.options) ? snapshot.options : []), snapshot.answer ?? null,
+        String(snapshot.explanation ?? ""), String(snapshot.technique ?? ""), String(snapshot.material ?? ""),
+        String(snapshot.prompt ?? ""), snapshot.wordLimit ?? null, JSON.stringify(Array.isArray(snapshot.scoringPoints) ? snapshot.scoringPoints : []),
+        String(snapshot.difficulty ?? "中等"), String(snapshot.source ?? ""), String(snapshot.sourceExamType ?? ""),
+        String(snapshot.region ?? ""), snapshot.examYear ?? null, String(snapshot.sourceBatch ?? ""), String(snapshot.frequency ?? ""),
+        Number(snapshot.frequencyOccurrences ?? 0), Number(snapshot.frequencyPapers ?? 0),
+        JSON.stringify(Array.isArray(snapshot.frequencyYears) ? snapshot.frequencyYears : []), snapshot.frequencyUpdatedAt ?? null,
+        Number(snapshot.importanceStars ?? 0), String(snapshot.importanceRuleVersion ?? ""), String(snapshot.importanceReason ?? ""),
+        String(snapshot.importanceOverrideReason ?? ""), Number(snapshot.scoreRate ?? 0), Number(snapshot.scoreRateCorrect ?? 0),
+        Number(snapshot.scoreRateAttempts ?? 0), String(snapshot.scoreRateScope ?? ""), String(snapshot.scoreRateSource ?? "platform"),
+        snapshot.scoreRateUpdatedAt ?? null, Number(snapshot.suggestedSeconds ?? 60), String(snapshot.imageUrl ?? ""),
+        String(snapshot.resourceUrl ?? ""), String(live.status ?? "active"), questionId),
+    db.prepare(`INSERT INTO question_versions
+      (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
+      SELECT id, version, question_code, ?, 'rollback', ?, ?, 'pending_review' FROM questions WHERE id = ?`)
+      .bind(JSON.stringify(pendingSnapshot), targetVersion, admin?.id ?? null, questionId),
+  ]);
+  const updated = await db.prepare("SELECT version, review_status FROM questions WHERE id = ?").bind(questionId)
+    .first<{ version: number; review_status: string }>();
+  return json({ ok: true, id: questionId, version: updated?.version, reviewStatus: updated?.review_status,
+    rolledBackFromVersion: targetVersion, message: "已生成新的待审核版本；历史版本未被删除" });
 }
 
 function adminPublicShape(admin: AdminIdentity) {
@@ -2698,14 +5264,20 @@ async function adminSession(request: Request) {
   const db = getD1();
   const admin = await getAdminIdentity(db, request);
   if (!admin) return adminUnauthorized();
-  const [review, imports, scheduled] = await Promise.all([
+  const [review, imports, scheduled, reports] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review'").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status = 'processing'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('uploading','queued','processing','cancelling')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'scheduled' AND datetime(publish_at) <= datetime('now','+7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_reports WHERE status = 'pending'").first<{ count: number }>(),
   ]);
-  const pendingCounts = { review: Number(review?.count ?? 0), imports: Number(imports?.count ?? 0), scheduled: Number(scheduled?.count ?? 0) };
+  const pendingCounts = {
+    review: Number(review?.count ?? 0),
+    imports: Number(imports?.count ?? 0),
+    scheduled: Number(scheduled?.count ?? 0),
+    reports: Number(reports?.count ?? 0),
+  };
   return json({ authenticated: true, admin: adminPublicShape(admin), expiresAt: admin.expiresAt,
-    pendingCount: pendingCounts.review + pendingCounts.imports + pendingCounts.scheduled, pendingCounts });
+    pendingCount: pendingCounts.review + pendingCounts.imports + pendingCounts.scheduled + pendingCounts.reports, pendingCounts });
 }
 
 async function adminLogout(request: Request) {
@@ -2734,20 +5306,21 @@ async function adminDashboard(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "dashboard.read")) return adminForbidden("dashboard.read");
   const db = getD1();
   const [users, activeUsers, publishedContent, pendingReview, banks, questionsCount, redemptions7d,
-    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, recent] = await Promise.all([
+    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, recent] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status IN ('published','scheduled')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review'").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM question_banks").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM questions WHERE status = 'active'").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('failed','completed_with_errors')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status = 'processing'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('uploading','queued','processing','cancelling')").first<{ count: number }>(),
     db.prepare(`SELECT COUNT(*) AS count FROM question_banks b WHERE b.status = 'published'
       AND NOT EXISTS (SELECT 1 FROM question_bank_items i WHERE i.bank_id = b.id)`).first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review' AND submitted_at < datetime('now','-2 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'scheduled' AND datetime(publish_at) <= datetime('now','+7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_reports WHERE status = 'pending'").first<{ count: number }>(),
     db.prepare(`SELECT id, username, role, action, resource_type, resource_id, summary, result, created_at
       FROM admin_audit_logs ORDER BY id DESC LIMIT 12`).all(),
   ]);
@@ -2755,6 +5328,7 @@ async function adminDashboard(payload: Record<string, unknown>) {
   const todos: Array<Record<string, unknown>> = [];
   const anomalies: Array<Record<string, unknown>> = [];
   if (number(pendingReview)) todos.push({ id: "pending-review", type: "review", title: "待审核内容", description: "内容已提交，等待审核后发布", count: number(pendingReview), href: "/admin/content?status=pending_review", priority: "high" });
+  if (number(pendingReports)) todos.push({ id: "content-reports", type: "content_report", title: "用户内容报错", description: "核对题目、答案、解析或题源标签", count: number(pendingReports), href: "/admin/content?queue=reports", priority: "high" });
   if (number(processingImports)) todos.push({ id: "processing-imports", type: "import", title: "导入任务进行中", description: "题库文件仍在处理", count: number(processingImports), href: "/admin/imports", priority: "medium" });
   if (number(scheduledSoon)) todos.push({ id: "scheduled-soon", type: "schedule", title: "7天内待发布", description: "检查定时内容和素材完整性", count: number(scheduledSoon), href: "/admin/content?status=scheduled", priority: "medium" });
   if (number(failedImports)) anomalies.push({ id: "failed-imports", type: "import", title: "导入失败或有错误", description: "需要下载错误信息并修正数据", count: number(failedImports), href: "/admin/imports", severity: "error" });
@@ -2763,10 +5337,10 @@ async function adminDashboard(payload: Record<string, unknown>) {
   return json({
     metrics: {
       users: number(users), activeUsers7d: number(activeUsers), publishedContent: number(publishedContent),
-      pendingReview: number(pendingReview), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
+      pendingReview: number(pendingReview), pendingContentReports: number(pendingReports), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
     },
-    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon),
-    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon) },
+    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon) + number(pendingReports),
+    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports) },
     todos,
     anomalies,
     recentActivity: recent.results,
@@ -2782,6 +5356,7 @@ async function adminListQuestions(payload: Record<string, unknown>) {
   const keyword = trimmed(payload.keyword, 100);
   if (keyword) { conditions.push("(q.question_code LIKE ? OR q.stem LIKE ? OR q.source LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`); }
   if (payload.status) { conditions.push("q.status = ?"); binds.push(trimmed(payload.status, 30)); }
+  if (payload.reviewStatus) { conditions.push("q.review_status = ?"); binds.push(trimmed(payload.reviewStatus, 30)); }
   if (Number(payload.bankId) > 0) { conditions.push("EXISTS (SELECT 1 FROM question_bank_items qi WHERE qi.question_id = q.id AND qi.bank_id = ?)"); binds.push(Math.floor(Number(payload.bankId))); }
   const where = conditions.join(" AND ");
   const [questionBanks, questionImports, questions, total, summary, bankSummary, importSummary] = await Promise.all([
@@ -2789,23 +5364,40 @@ async function adminListQuestions(payload: Record<string, unknown>) {
       b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
       FROM question_banks b LEFT JOIN question_bank_items i ON i.bank_id = b.id GROUP BY b.id ORDER BY b.id DESC LIMIT 500`).all(),
     db.prepare(`SELECT qi.id, qi.bank_id, qb.name AS bank_name, qi.file_name, qi.file_size, qi.total_rows,
-      qi.imported_rows, qi.failed_rows, qi.status, qi.error_summary, qi.created_at, qi.completed_at
+      qi.uploaded_rows, qi.processed_rows, qi.imported_rows, qi.failed_rows, qi.duplicate_rows,
+      qi.total_chunks, qi.uploaded_chunks, qi.processed_chunks, qi.cancel_requested,
+      qi.status, qi.error_summary, qi.sealed_at, qi.started_at, qi.last_heartbeat_at,
+      qi.created_at, qi.updated_at, qi.completed_at
       FROM question_imports qi JOIN question_banks qb ON qb.id = qi.bank_id ORDER BY qi.id DESC LIMIT 200`).all(),
-    db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem, q.difficulty,
-      q.source, q.source_region, q.source_year, q.frequency, q.importance_stars, q.score_rate,
-      q.suggested_seconds, q.status, q.updated_at FROM questions q WHERE ${where}
-      ORDER BY q.id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all(),
+    db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem, q.options_json,
+      q.answer, q.explanation, q.technique, q.material, q.prompt, q.word_limit, q.scoring_points_json,
+      q.difficulty, q.source, q.source_exam_type, q.source_region, q.source_year, q.source_batch,
+      q.truth_verified, q.review_status, q.review_note, q.reviewed_by, q.reviewed_at,
+      q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
+      q.importance_stars, q.importance_rule_version, q.importance_reason, q.importance_override_reason,
+      q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope,
+      q.score_rate_source, q.score_rate_updated_at, q.suggested_seconds, q.image_url, q.resource_url,
+      q.status, q.version, q.updated_at,
+      (SELECT COUNT(*) FROM question_versions qv WHERE qv.question_id = q.id) AS version_count,
+      (SELECT GROUP_CONCAT(DISTINCT qb.name) FROM question_bank_items qbi
+        JOIN question_banks qb ON qb.id = qbi.bank_id WHERE qbi.question_id = q.id) AS bank_names,
+      (SELECT MIN(qbi.bank_id) FROM question_bank_items qbi WHERE qbi.question_id = q.id) AS bank_id
+      FROM questions q WHERE ${where}
+      ORDER BY CASE q.review_status WHEN 'pending_review' THEN 0 WHEN 'rejected' THEN 1 ELSE 2 END,
+        q.id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all(),
     db.prepare(`SELECT COUNT(*) AS count FROM questions q WHERE ${where}`).bind(...binds).first<{ count: number }>(),
     db.prepare(`SELECT COUNT(*) AS question_count,
       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
-      SUM(CASE WHEN source_year IS NULL OR source_region = '' THEN 1 ELSE 0 END) AS incomplete_count FROM questions`).first(),
+      SUM(CASE WHEN source_year IS NULL OR source_region = '' OR source = '' OR source_batch = '' THEN 1 ELSE 0 END) AS incomplete_count,
+      SUM(CASE WHEN review_status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review_count,
+      SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count FROM questions`).first(),
     db.prepare(`SELECT COUNT(*) AS total_banks,
       SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published_banks,
       SUM(CASE WHEN status = 'published' AND NOT EXISTS (
         SELECT 1 FROM question_bank_items i WHERE i.bank_id = question_banks.id
       ) THEN 1 ELSE 0 END) AS empty_published_banks FROM question_banks`).first(),
     db.prepare(`SELECT COALESCE(SUM(imported_rows), 0) AS imported_rows,
-      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_imports,
+      SUM(CASE WHEN status IN ('uploading','queued','processing','cancelling') THEN 1 ELSE 0 END) AS processing_imports,
       SUM(CASE WHEN status IN ('failed','completed_with_errors') THEN 1 ELSE 0 END) AS failed_imports
       FROM question_imports`).first(),
   ]);
@@ -2824,6 +5416,8 @@ async function adminListQuestions(payload: Record<string, unknown>) {
       question_count: Number(rawSummary.question_count ?? 0),
       active_count: Number(rawSummary.active_count ?? 0),
       incomplete_count: Number(rawSummary.incomplete_count ?? 0),
+      pendingReviewQuestions: Number(rawSummary.pending_review_count ?? 0),
+      rejectedQuestions: Number(rawSummary.rejected_count ?? 0),
       totalBanks: Number(rawBankSummary.total_banks ?? 0),
       publishedBanks: Number(rawBankSummary.published_banks ?? 0),
       emptyPublishedBanks: Number(rawBankSummary.empty_published_banks ?? 0),
@@ -2842,7 +5436,7 @@ async function adminListContent(payload: Record<string, unknown>) {
   const keyword = trimmed(payload.keyword, 100);
   if (keyword) { conditions.push("(title LIKE ? OR content_key LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`); }
   const where = conditions.join(" AND ");
-  const [content, total, media, statusCounts] = await Promise.all([
+  const [content, total, media, statusCounts, reports, reportStatusCounts] = await Promise.all([
     db.prepare(`SELECT id, content_type, content_key, title, payload_json, status, publish_at, version,
       review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at,
       (SELECT COUNT(*) FROM content_item_versions v WHERE v.content_id = content_items.id) AS version_count
@@ -2851,9 +5445,29 @@ async function adminListContent(payload: Record<string, unknown>) {
     db.prepare(`SELECT id, file_name, content_type, byte_size, storage, status, created_at,
       '/api/app?media=' || id AS url FROM media_assets ORDER BY created_at DESC LIMIT 200`).all(),
     db.prepare("SELECT status, COUNT(*) AS count FROM content_items WHERE content_type NOT IN ('exam_event','exam_notice','job_position') GROUP BY status").all(),
+    db.prepare(`SELECT cr.id, cr.content_type, cr.content_key, cr.reason_code, cr.detail, cr.context_json,
+      cr.status, cr.resolution_note, cr.created_at, cr.updated_at, cr.resolved_at,
+      CASE WHEN length(cr.user_id) <= 12 THEN substr(cr.user_id, 1, 4) || '***'
+        ELSE substr(cr.user_id, 1, 8) || '…' || substr(cr.user_id, -4) END AS reporter,
+      q.stem, q.source, q.version AS question_version,
+      COALESCE(au.display_name, au.username, '') AS resolver_name
+      FROM content_reports cr
+      LEFT JOIN questions q ON cr.content_type = 'question' AND q.question_code = cr.content_key
+      LEFT JOIN admin_users au ON au.id = cr.resolved_by
+      ORDER BY CASE cr.status WHEN 'pending' THEN 0 ELSE 1 END, cr.created_at DESC
+      LIMIT 100`).all<Record<string, unknown>>(),
+    db.prepare("SELECT status, COUNT(*) AS count FROM content_reports GROUP BY status").all<Record<string, unknown>>(),
   ]);
   const contentStatusCounts = Object.fromEntries(statusCounts.results.map((item) => [String((item as Record<string, unknown>).status), Number((item as Record<string, unknown>).count ?? 0)]));
-  return json({ content: parseContentRows(content.results), mediaAssets: media.results,
+  const reportCounts = Object.fromEntries(reportStatusCounts.results.map((item) => [String(item.status), Number(item.count ?? 0)]));
+  return json({ content: parseContentRows(content.results), mediaAssets: media.results, reports: reports.results,
+    reportSummary: {
+      total: Object.values(reportCounts).reduce((sum, value) => sum + Number(value), 0),
+      pending: reportCounts.pending ?? 0,
+      resolved: reportCounts.resolved ?? 0,
+      rejected: reportCounts.rejected ?? 0,
+      statusCounts: reportStatusCounts.results,
+    },
     pagination: { page, pageSize, total: Number(total?.count ?? 0) }, summary: {
       total: Object.values(contentStatusCounts).reduce((sum, value) => sum + Number(value), 0),
       draft: contentStatusCounts.draft ?? 0,
@@ -2911,17 +5525,18 @@ async function adminGetContent(payload: Record<string, unknown>) {
 async function adminListGrowth(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "growth.read")) return adminForbidden("growth.read");
   const db = getD1();
-  const [codes, redemptions, events, activeUsers, rewardDays, monthlyCap] = await Promise.all([
-    db.prepare(`SELECT id, code_preview, batch_name, duration_days, max_uses, used_count, status, valid_until, created_at
+  const [codes, redemptions, events, activeUsers, rewardDays, inviteeRewardDays, monthlyCap] = await Promise.all([
+    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 300`).all(),
-    db.prepare(`SELECT r.id, r.redeemed_at, r.user_id, c.code_preview, c.duration_days
+    db.prepare(`SELECT r.id, r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 300`).all(),
-    db.prepare("SELECT event_name, COUNT(*) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days') GROUP BY event_name ORDER BY count DESC").all(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
-    getConfigNumber("invite_reward_days", 3),
+    db.prepare("SELECT event_name, COUNT(*) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days') GROUP BY event_name ORDER BY count DESC").all(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    getConfigNumber("invite_reward_days", 7),
+    getConfigNumber("invitee_reward_days", 3),
     getConfigNumber("invite_monthly_cap", 30),
   ]);
-  return json({ codes: codes.results, redemptions: redemptions.results, config: { rewardDays, monthlyCap },
+  return json({ codes: codes.results, redemptions: redemptions.results, config: { rewardDays, inviteeRewardDays, monthlyCap },
     analytics: { activeUsers: Number(activeUsers?.count ?? 0), eventCounts: events.results } });
 }
 
@@ -2930,25 +5545,50 @@ async function adminListAnalytics(payload: Record<string, unknown>) {
   const db = getD1();
   const days = Number(payload.days) <= 14 ? 14 : 30;
   const windowModifier = `-${days} days`;
-  const [totalUsers, active7, active30, members, attempts30, dailyTrend, eventCounts, modules, redemptions30, invites30] = await Promise.all([
+  const [totalUsers, active7, active30, members, attempts30, dailyTrend, eventCounts, modules, redemptions30, invites30, apiMetricSummary] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-30 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM users WHERE datetime(membership_end) > CURRENT_TIMESTAMP").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM users WHERE membership_type = 'lifetime' OR datetime(membership_end) > CURRENT_TIMESTAMP").first<{ count: number }>(),
     db.prepare(`SELECT COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy FROM practice_attempts
       WHERE answered_at >= datetime('now','-30 days')`).first<{ answers: number; accuracy: number }>(),
     db.prepare(`SELECT date(created_at,'+8 hours') AS date, COUNT(DISTINCT user_id) AS active_users,
       SUM(CASE WHEN event_name = 'app_open' THEN 1 ELSE 0 END) AS opens,
       SUM(CASE WHEN event_name = 'practice_answer' THEN 1 ELSE 0 END) AS answers
-      FROM analytics_events WHERE created_at >= datetime('now', ?)
+      FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now', ?)
       GROUP BY date(created_at,'+8 hours') ORDER BY date ASC`).bind(windowModifier).all<Record<string, unknown>>(),
     db.prepare(`SELECT event_name, COUNT(*) AS count, COUNT(DISTINCT user_id) AS users
-      FROM analytics_events WHERE created_at >= datetime('now','-30 days') GROUP BY event_name ORDER BY count DESC`).all<Record<string, unknown>>(),
+      FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days') GROUP BY event_name ORDER BY count DESC`).all<Record<string, unknown>>(),
     db.prepare(`SELECT module, COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy
       FROM practice_attempts WHERE answered_at >= datetime('now','-30 days') GROUP BY module ORDER BY answers DESC`).all<Record<string, unknown>>(),
     db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-30 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM invite_relations WHERE bound_at >= datetime('now','-30 days')").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS sample_count,
+      COALESCE(SUM(CASE WHEN CAST(json_extract(event_data, '$.status') AS INTEGER) >= 500 THEN 1 ELSE 0 END), 0) AS error_5xx_count
+      FROM analytics_events
+      WHERE user_id = 'system' AND event_name = 'api_request_metric'
+        AND created_at >= datetime('now','-30 days')
+        AND json_valid(event_data) = 1
+        AND json_type(event_data, '$.durationMs') IN ('integer','real')`)
+      .first<{ sample_count: number; error_5xx_count: number }>(),
   ]);
+  const apiSampleCount = Number(apiMetricSummary?.sample_count ?? 0);
+  const apiError5xxCount = Number(apiMetricSummary?.error_5xx_count ?? 0);
+  let apiP95Ms: number | null = null;
+  if (apiSampleCount > 0) {
+    const p95Offset = Math.max(0, Math.ceil(apiSampleCount * 0.95) - 1);
+    const p95 = await db.prepare(`SELECT CAST(json_extract(event_data, '$.durationMs') AS REAL) AS duration_ms
+      FROM analytics_events
+      WHERE user_id = 'system' AND event_name = 'api_request_metric'
+        AND created_at >= datetime('now','-30 days')
+        AND json_valid(event_data) = 1
+        AND json_type(event_data, '$.durationMs') IN ('integer','real')
+      ORDER BY CAST(json_extract(event_data, '$.durationMs') AS REAL) ASC
+      LIMIT 1 OFFSET ?`).bind(p95Offset).first<{ duration_ms: number }>();
+    if (p95 && Number.isFinite(Number(p95.duration_ms))) {
+      apiP95Ms = Math.round(Number(p95.duration_ms) * 100) / 100;
+    }
+  }
   const events = eventCounts.results;
   const eventUsers = (eventName: string) => Number(events.find((item) => String(item.event_name) === eventName)?.users ?? 0);
   const funnelBase = eventUsers("app_open");
@@ -2968,7 +5608,17 @@ async function adminListAnalytics(payload: Record<string, unknown>) {
     eventCounts: events.map((item) => ({ eventName: item.event_name, count: Number(item.count ?? 0), users: Number(item.users ?? 0) })),
     moduleStats: modules.results.map((item) => ({ module: item.module, answers: Number(item.answers ?? 0), accuracy: Math.round(Number(item.accuracy ?? 0) * 10_000) / 100 })),
     growth: { redemptions30d: Number(redemptions30?.count ?? 0), invites30d: Number(invites30?.count ?? 0) },
+    apiHealth: {
+      windowDays: 30,
+      sampleCount: apiSampleCount,
+      p95Ms: apiP95Ms,
+      error5xxCount: apiError5xxCount,
+      errorRate5xx: apiSampleCount > 0 ? Math.round(apiError5xxCount / apiSampleCount * 10_000) / 100 : null,
+      state: apiSampleCount > 0 && apiP95Ms !== null ? "measured" : "collecting",
+      message: apiSampleCount > 0 && apiP95Ms !== null ? "基于近30天真实接口请求" : "等待真实数据",
+    },
     days,
+    generatedAt: new Date().toISOString(),
   });
 }
 
@@ -3099,6 +5749,34 @@ async function adminUpdateUser(payload: Record<string, unknown>) {
   return json({ ok: true, id });
 }
 
+async function adminResolveContentReport(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write") && !canAdmin(payload, "content.review")) {
+    return adminForbidden("content.write");
+  }
+  const admin = adminFromPayload(payload);
+  if (!admin) return adminForbidden("content.write");
+  const id = Math.floor(Number(payload.id));
+  const decision = String(payload.decision ?? "");
+  const resolutionNote = trimmed(payload.resolutionNote, 1000);
+  if (!(id > 0) || (decision !== "resolved" && decision !== "rejected")) {
+    return json({ error: "处理决定无效" }, 400);
+  }
+  if (resolutionNote.length < 2) return json({ error: "请填写处理说明，便于后续复核" }, 400);
+
+  const db = getD1();
+  const updated = await db.prepare(`UPDATE content_reports SET status = ?, resolved_by = ?, resolution_note = ?,
+    resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`)
+    .bind(decision, admin.id, resolutionNote, id).run();
+  if (!updated.meta.changes) {
+    const current = await db.prepare("SELECT id, status FROM content_reports WHERE id = ?")
+      .bind(id).first<{ id: number; status: string }>();
+    if (!current) return json({ error: "内容报错记录不存在" }, 404);
+    if (current.status === decision) return json({ ok: true, id, status: decision, duplicate: true });
+    return json({ error: "该报错已被其他管理员处理，请刷新列表" }, 409);
+  }
+  return json({ ok: true, id, status: decision });
+}
+
 async function adminSubmitContentReview(payload: Record<string, unknown>) {
   payload.status = "pending_review";
   return adminSetContentStatus(payload);
@@ -3150,9 +5828,18 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminStartQuestionImport: ["question.import"],
   adminImportQuestionBatch: ["question.import"],
   adminFinishQuestionImport: ["question.import"],
+  adminPreviewQuestionImportDuplicates: ["question.import"],
+  adminGetQuestionImport: ["question.read", "question.import"],
+  adminCancelQuestionImport: ["question.import"],
+  adminRetryQuestionImport: ["question.import"],
+  adminDownloadQuestionImportErrors: ["question.read", "question.import"],
+  adminListQuestionVersions: ["question.read"],
+  adminRollbackQuestionVersion: ["question.write"],
+  adminReviewQuestion: ["question.review"],
   adminCreateUser: ["users.manage"],
   adminSetUserStatus: ["users.manage"],
   adminUpdateUser: ["users.manage"],
+  adminResolveContentReport: ["content.write", "content.review"],
   adminReviewContent: ["content.review"],
   adminSubmitContentReview: ["content.write", "radar.write"],
 };
@@ -3161,13 +5848,16 @@ const ADMIN_WRITE_ACTIONS = new Set([
   "adminCreateCodes", "adminDisableCode", "adminUpdateConfig", "adminUpsertContentBatch",
   "adminDisableContent", "adminSetContentStatus", "adminRollbackContent", "adminDuplicateContent",
   "adminUpsertQuestionBank", "adminSetQuestionBankStatus", "adminStartQuestionImport",
-  "adminImportQuestionBatch", "adminFinishQuestionImport", "adminCreateUser", "adminSetUserStatus",
-  "adminUpdateUser", "adminSubmitContentReview", "adminReviewContent",
+  "adminImportQuestionBatch", "adminFinishQuestionImport", "adminCancelQuestionImport", "adminRetryQuestionImport",
+  "adminRollbackQuestionVersion", "adminCreateUser", "adminSetUserStatus",
+  "adminUpdateUser", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
 ]);
 
 function resourceTypeForAdminAction(action: string) {
+  if (action.includes("ContentReport")) return "content_report";
   if (action.includes("QuestionImport")) return "question_import";
   if (action.includes("QuestionBank")) return "question_bank";
+  if (action.includes("Question")) return "question";
   if (action.includes("Content")) return "content";
   if (action.includes("Code")) return "redemption_code";
   if (action.includes("Config")) return "config";
@@ -3177,6 +5867,25 @@ function resourceTypeForAdminAction(action: string) {
 
 function adminHasAnyPermission(admin: AdminIdentity, permissions: AdminPermission[]) {
   return permissions.some((permission) => hasAdminPermission(admin, permission));
+}
+
+const AUDIT_SECRET_KEY = /(password|passphrase|admintoken|tokenhash|secret|cookie|authorization|sessiontoken|codehash|plaintext|privatekey)/i;
+const AUDIT_CODE_KEY = /^(code|codes|redemptioncodes)$/i;
+
+function sanitizeAuditValue(value: unknown, key = "", depth = 0): unknown {
+  if (AUDIT_SECRET_KEY.test(key) || AUDIT_CODE_KEY.test(key)) return "[REDACTED]";
+  if (depth >= 4) return "[TRUNCATED]";
+  if (Array.isArray(value)) {
+    if (/^(rows|questions|items)$/i.test(key)) return `[${value.length} records omitted]`;
+    return value.slice(0, 20).map((item) => sanitizeAuditValue(item, "item", depth + 1));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .slice(0, 60)
+      .map(([childKey, childValue]) => [childKey, sanitizeAuditValue(childValue, childKey, depth + 1)]));
+  }
+  if (typeof value === "string") return value.length > 500 ? `${value.slice(0, 500)}…[truncated]` : value;
+  return value;
 }
 
 async function auditAdminResponse(
@@ -3196,7 +5905,7 @@ async function auditAdminResponse(
     resourceId: String(resourceId ?? ""),
     summary: response.ok ? `${action} 操作成功` : `${action} 操作失败`,
     result: response.ok ? "success" : "failure",
-    details: { request: payload, response: responseBody },
+    details: sanitizeAuditValue({ request: payload, response: responseBody }) as Record<string, unknown>,
   });
 }
 
@@ -3237,15 +5946,32 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminSetQuestionBankStatus") response = await adminSetQuestionBankStatus(payload);
   else if (action === "adminStartQuestionImport") response = await adminStartQuestionImport(payload);
   else if (action === "adminImportQuestionBatch") response = await adminImportQuestionBatch(payload);
-  else if (action === "adminFinishQuestionImport") response = await adminFinishQuestionImport(payload);
+  else if (action === "adminPreviewQuestionImportDuplicates") response = await adminPreviewQuestionImportDuplicates(payload);
+  else if (action === "adminFinishQuestionImport") response = await adminFinishQuestionImport(request, payload);
+  else if (action === "adminGetQuestionImport") response = await adminGetQuestionImport(request, payload);
+  else if (action === "adminCancelQuestionImport") response = await adminCancelQuestionImport(payload);
+  else if (action === "adminRetryQuestionImport") response = await adminRetryQuestionImport(request, payload);
+  else if (action === "adminDownloadQuestionImportErrors") response = await adminDownloadQuestionImportErrors(payload);
+  else if (action === "adminListQuestionVersions") response = await adminListQuestionVersions(payload);
+  else if (action === "adminRollbackQuestionVersion") response = await adminRollbackQuestionVersion(payload);
+  else if (action === "adminReviewQuestion") response = await adminReviewQuestion(payload);
   else if (action === "adminCreateUser") response = await adminCreateUser(payload);
   else if (action === "adminSetUserStatus") response = await adminSetUserStatus(payload);
   else if (action === "adminUpdateUser") response = await adminUpdateUser(payload);
+  else if (action === "adminResolveContentReport") response = await adminResolveContentReport(payload);
   else if (action === "adminSubmitContentReview") response = await adminSubmitContentReview(payload);
   else if (action === "adminReviewContent") response = await adminReviewContent(payload);
   else return json({ error: "未知管理操作" }, 400);
   await auditAdminResponse(request, admin, action, payload, response);
   return response;
+}
+
+function adminRequestIsSameOrigin(request: Request) {
+  const origin = request.headers.get("origin");
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite === "cross-site") return false;
+  if (!origin) return true;
+  try { return new URL(origin).origin === new URL(request.url).origin; } catch { return false; }
 }
 
 export async function GET(request: Request) {
@@ -3255,14 +5981,33 @@ export async function GET(request: Request) {
     const mediaId = url.searchParams.get("media");
     if (mediaId) return serveMedia(mediaId, request);
     return await bootstrap(request);
-  } catch (error) { return json({ error: error instanceof Error ? error.message : "初始化失败" }, 500); }
+  } catch { return json({ error: "服务暂时不可用，请稍后重试", code: "INTERNAL_ERROR" }, 500); }
 }
 
 export async function POST(request: Request) {
   try {
+    // The durable import continuation only runs after an upload task has
+    // already proven the schema exists. Handle it before the additive runtime
+    // bootstrap so a cold self-fetch keeps its full D1 Free query allowance for
+    // the import chunk itself.
+    if (request.headers.has(INTERNAL_IMPORT_HEADER)) {
+      if (!(await internalJobSecretMatches(request))) {
+        return json({ error: "内部任务凭证无效" }, 403);
+      }
+      const internalPayload = await request.json() as Record<string, unknown>;
+      if (String(internalPayload.action ?? "") !== "continueQuestionImportInternal") {
+        return json({ error: "内部任务类型无效" }, 400);
+      }
+      const importId = Math.floor(Number(internalPayload.importId));
+      if (!Number.isFinite(importId) || importId < 1) return json({ error: "导入任务无效" }, 400);
+      const scheduled = scheduleRequestTask(request, () => processQuestionImport(importId, 24_000, new URL(request.url).origin));
+      if (!scheduled) return json({ error: "后台执行上下文不可用" }, 503);
+      return json({ ok: true, accepted: true }, 202);
+    }
     await ensureSchema();
     await seedDefaults();
     if ((request.headers.get("content-type") ?? "").toLowerCase().includes("multipart/form-data")) {
+      if (!adminRequestIsSameOrigin(request)) return json({ error: "跨站管理请求已拒绝" }, 403);
       const admin = await getAdminIdentity(getD1(), request);
       if (!admin) return adminUnauthorized();
       if (!hasAdminPermission(admin, "media.upload")) {
@@ -3282,6 +6027,7 @@ export async function POST(request: Request) {
     }
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action ?? "");
+    if (action.startsWith("admin") && !adminRequestIsSameOrigin(request)) return json({ error: "跨站管理请求已拒绝" }, 403);
     if (action === "adminLogin") return adminLogin(request, payload);
     if (action === "adminSession") return adminSession(request);
     if (action === "adminLogout") return adminLogout(request);
@@ -3290,21 +6036,41 @@ export async function POST(request: Request) {
       return dispatchAdminAction(request, payload, action);
     }
     const identity = await ensureUser(request);
+    const verifiedLearningActions = new Set([
+      "saveEssayAttempt", "redeem", "bindInvite",
+      "createTestOrder", "completeTestPayment", "recordDailyCheckin", "submitContentReport",
+    ]);
+    if (!identity.signedIn && verifiedLearningActions.has(action)) {
+      const response = json({
+        error: "请先登录后继续；答题次数、错题进度与会员权益需要绑定到同一账号",
+        code: "VERIFIED_ACCOUNT_REQUIRED",
+      }, 403);
+      if (identity.setCookie) response.headers.set("set-cookie", identity.setCookie);
+      return response;
+    }
     let response: Response;
     if (action === "saveProgress") response = await saveProgress(identity.userId, payload);
     else if (action === "saveExamProfile") response = await saveExamProfile(identity.userId, payload);
+    else if (action === "searchJobPositions") response = await searchJobPositions(identity.userId, payload);
     else if (action === "toggleQuestionBank") response = await toggleQuestionBank(identity.userId, payload);
     else if (action === "getPracticeBatch") response = await getPracticeBatch(identity.userId, payload);
     else if (action === "getEssayPracticeBatch") response = await getEssayPracticeBatch(identity.userId, payload);
-    else if (action === "submitPracticeAnswer") response = await submitPracticeAnswer(identity.userId, payload);
-    else if (action === "updateQuestionMeta") response = await updateQuestionMeta(identity.userId, payload);
+    else if (action === "saveEssayAttempt") response = await saveEssayAttempt(identity.userId, payload);
+    else if (action === "submitPracticeAnswer") response = await submitPracticeAnswer(identity.userId, payload, identity.signedIn);
+    else if (action === "updateQuestionMeta") response = await updateQuestionMeta(identity.userId, payload, identity.signedIn);
+    else if (action === "submitContentReport") response = await submitContentReport(identity.userId, payload);
+    else if (action === "getPracticeSessionSummary") response = await getPracticeSessionSummary(identity.userId, payload);
+    else if (action === "recordDailyCheckin") response = await recordDailyCheckin(identity.userId, payload);
     else if (action === "bindInvite") response = await bindInvite(identity.userId, payload);
     else if (action === "redeem") response = await redeem(identity.userId, payload);
+    else if (action === "getCommerceProducts") response = await getCommerceProducts(request, identity.userId);
+    else if (action === "createTestOrder") response = await createTestOrder(request, identity.userId, payload);
+    else if (action === "completeTestPayment") response = await completeTestPayment(request, identity.userId, payload);
     else if (action === "trackEvent") response = await trackEvent(identity.userId, payload);
     else response = json({ error: "未知操作" }, 400);
     if (identity.setCookie) response.headers.set("set-cookie", identity.setCookie);
     return response;
-  } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "请求失败" }, 500);
+  } catch {
+    return json({ error: "请求暂时失败，请稍后重试", code: "INTERNAL_ERROR" }, 500);
   }
 }

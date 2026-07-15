@@ -5,6 +5,7 @@ import { Alert, Card, Col, Row, Statistic } from "antd";
 import QuestionBankManager, { type QuestionBankItem, type QuestionImportItem } from "../../QuestionBankManager";
 import { useAdminSession } from "../../AdminShell";
 import AdminPageFrame from "../_components/AdminPageFrame";
+import QuestionReviewQueue from "../_components/QuestionReviewQueue";
 import { useAdminDomain } from "../_components/useAdminDomain";
 
 type QuestionDomain = {
@@ -17,6 +18,7 @@ type QuestionDomain = {
     incomplete_count?: number | string;
     totalBanks?: number;
     publishedBanks?: number;
+    pendingReviewQuestions?: number | string;
   };
 };
 
@@ -28,6 +30,7 @@ export default function QuestionBanksPage() {
   const [notice, setNotice] = useState("");
   const canRead = can("question.read");
   const canWrite = can("question.write");
+  const canReview = can("question.review");
   const summary = data.summary ?? {};
 
   return (
@@ -41,13 +44,15 @@ export default function QuestionBanksPage() {
     >
       {!canRead ? <Alert showIcon type="warning" message="当前角色没有题库查看权限" /> : <>
         {notice && <Alert closable showIcon type="info" message={notice} onClose={() => setNotice("")} style={{ marginBottom: 18 }} />}
-        {!canWrite && <Alert showIcon type="warning" message="只读模式" description="你可以查看题库状态，但不能新建、编辑、发布或下线。" style={{ marginBottom: 18 }} />}
+        {!canWrite && !canReview && <Alert showIcon type="warning" message="只读模式" description="你可以查看题库与审核状态，但不能修改。" style={{ marginBottom: 18 }} />}
+        {canReview && !canWrite && <Alert showIcon type="success" message="审核模式" description="你可以核验待审真题，但不能修改题库或导入题目。" style={{ marginBottom: 18 }} />}
         <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
           <Col xs={12} lg={6}><Card><Statistic title="题库总数" value={summary.totalBanks ?? data.questionBanks.length} /></Card></Col>
-          <Col xs={12} lg={6}><Card><Statistic title="已发布" value={summary.publishedBanks ?? data.questionBanks.filter((item) => item.status === "published").length} /></Card></Col>
+          <Col xs={12} lg={6}><Card><Statistic title="待审核真题" value={Number(summary.pendingReviewQuestions ?? 0)} valueStyle={{ color: Number(summary.pendingReviewQuestions ?? 0) > 0 ? "#d97706" : undefined }} /></Card></Col>
           <Col xs={12} lg={6}><Card><Statistic title="真题总量" value={Number(summary.question_count ?? data.questionBanks.reduce((sum, item) => sum + Number(item.question_count || 0), 0))} /></Card></Col>
           <Col xs={12} lg={6}><Card><Statistic title="标签待完善" value={Number(summary.incomplete_count ?? 0)} valueStyle={{ color: Number(summary.incomplete_count ?? 0) > 0 ? "#cf5f45" : undefined }} /></Card></Col>
         </Row>
+        <QuestionReviewQueue canReview={canReview} onMessage={setNotice} onChanged={reload} />
         <QuestionBankManager
           view="banks"
           banks={data.questionBanks}

@@ -1,0 +1,121 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: grid;
+  place-items: end center;
+  padding: 20px;
+  background: rgb(8 24 42 / 58%);
+  backdrop-filter: blur(5px);
+}
+
+.card {
+  position: relative;
+  width: min(100%, 520px);
+  max-height: min(90dvh, 820px);
+  overflow: auto;
+  padding: 26px 22px calc(22px + env(safe-area-inset-bottom));
+  border: 1px solid rgb(255 255 255 / 72%);
+  border-radius: 28px 28px 18px 18px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(8 33 52 / 28%);
+  color: #172a3d;
+}
+
+.close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: #f0f4f7;
+  color: #687989;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hero { padding-right: 32px; }
+.eyebrow { color: #17816b; font-size: 13px; font-weight: 800; letter-spacing: .04em; }
+.hero h2 { margin: 7px 0 8px; font-size: clamp(23px, 5.5vw, 30px); line-height: 1.2; letter-spacing: -.03em; }
+.hero p { margin: 0; color: #66798b; font-size: 14px; line-height: 1.65; }
+
+.valueStrip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 18px;
+  padding: 13px 8px;
+  border-radius: 18px;
+  background: #f2f8f6;
+}
+.valueStrip div { display: grid; gap: 2px; text-align: center; }
+.valueStrip strong { color: #11745f; font-size: 19px; }
+.valueStrip span { color: #789087; font-size: 11px; }
+
+.product {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #dceae5;
+  border-radius: 20px;
+  background: linear-gradient(145deg, #f8fcfa, #fffaf1);
+}
+.productTop { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.productTop span { color: #8b7d64; font-size: 11px; font-weight: 700; }
+.productTop h3 { margin: 3px 0 0; font-size: 18px; }
+.price { display: flex; align-items: baseline; color: #e56b36; white-space: nowrap; }
+.price small { font-size: 15px; font-weight: 800; }
+.price strong { font-size: 34px; line-height: 1; letter-spacing: -.05em; }
+.price span { color: #9a745e; font-size: 11px; }
+.product > p { margin: 13px 0 8px; color: #b4572e; font-size: 13px; font-weight: 800; }
+.product ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.product li { color: #4f6374; font-size: 13px; line-height: 1.45; }
+.product li::before { content: "✓"; margin-right: 7px; color: #17816b; font-weight: 900; }
+
+.loading, .error, .testNotice, .unavailableNotice, .order {
+  margin-top: 14px;
+  padding: 13px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+}
+.loading { background: #f4f6f8; color: #758492; }
+.testNotice, .unavailableNotice { display: grid; gap: 3px; }
+.testNotice { border: 1px solid #bce1d6; background: #eefaf6; color: #216c5a; }
+.unavailableNotice { border: 1px solid #ecd8b6; background: #fff8e9; color: #795b2c; }
+.testNotice span, .unavailableNotice span { font-size: 12px; line-height: 1.45; opacity: .85; }
+.order { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; background: #f4f6f8; color: #5c6d7b; }
+.order b { overflow-wrap: anywhere; color: #24394c; }
+.order small { grid-column: 1 / -1; }
+.error { margin-bottom: 0; background: #fff0ee; color: #a53e34; line-height: 1.5; }
+
+.actions { display: grid; gap: 10px; margin-top: 16px; }
+.primary, .secondary {
+  display: grid;
+  min-height: 48px;
+  place-items: center;
+  border-radius: 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.primary { border: 0; background: #16785f; color: #fff; box-shadow: 0 8px 20px rgb(22 120 95 / 22%); }
+.primary:disabled { background: #aab5bd; box-shadow: none; cursor: not-allowed; }
+.secondary { border: 1px solid #dbe3e8; background: #fff; color: #41596c; }
+.footnote { margin: 10px 2px 0; color: #93a0aa; font-size: 11px; line-height: 1.45; text-align: center; }
+
+@media (min-width: 620px) {
+  .backdrop { place-items: center; }
+  .card { border-radius: 28px; }
+}
+
+@media (max-width: 390px) {
+  .backdrop { padding: 0; }
+  .card { border-radius: 24px 24px 0 0; }
+  .valueStrip { grid-template-columns: repeat(2, 1fr); row-gap: 10px; }
+  .productTop { align-items: flex-start; }
+}

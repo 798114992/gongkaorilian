@@ -37,7 +37,7 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(app, /bankCanPowerDailyPractice/);
   assert.match(app, /备考组合配置缺口/);
   assert.match(app, /bank\.questionCount > 0/);
-  assert.match(app, /bank\.examYear === target\.examYear/);
+  assert.match(app, /bankYearSupportsTarget\(bank\.examYear, target\.examYear\)/);
   assert.doesNotMatch(app, /label: "题库提醒"/);
   assert.match(app, /精选标准/);
   assert.match(app, /取消/);
@@ -121,7 +121,8 @@ test("learners can combine national and multiple provincial exam targets and ban
   assert.match(toggleBank, /targetCode/);
   assert.doesNotMatch(toggleBank, /请先切换目标考试再添加这套题库/);
 
-  assert.match(practiceBatch, /const selected = await selectedBankCodes\(userId\)/);
+  assert.match(practiceBatch, /const \[selected, membership\] = await Promise\.all\(\[selectedBankCodes\(userId\), userMembership\(userId\)\]\)/);
+  assert.match(practiceBatch, /effectivePracticeBankCodes\(userId, selected, active\)/);
   assert.match(practiceBatch, /requested\.length \? requested : selected/);
   assert.match(practiceBatch, /loadExamProfile\(userId\)/);
   assert.match(practiceBatch, /urgentTargets/);
@@ -202,9 +203,11 @@ test("account sync and redemption protections are server side", async () => {
   const route = await readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8");
   assert.match(route, /oai-authenticated-user-email/);
   assert.match(route, /acct_/);
-  assert.match(route, /used_count < max_uses/);
-  assert.match(route, /used_count = MAX\(0, used_count - 1\)/);
-  assert.match(route, /UPDATE OR IGNORE redemptions/);
+  assert.match(route, /INSERT OR IGNORE INTO redemptions/);
+  assert.match(route, /SELECT COUNT\(\*\) FROM redemptions r WHERE r\.code_id = c\.id/);
+  assert.match(route, /UPDATE redemptions SET status = 'completed'/);
+  assert.match(route, /INSERT OR IGNORE INTO membership_ledger/);
+  assert.doesNotMatch(route, /used_count = MAX\(0, used_count - 1\)/);
 });
 
 test("the protected admin console includes routed operations, review, imports and analytics", async () => {
@@ -255,11 +258,21 @@ test("the protected admin console includes routed operations, review, imports an
   assert.match(bankManager, /adminUpsertQuestionBank/);
   assert.match(bankManager, /adminStartQuestionImport/);
   assert.match(bankManager, /adminImportQuestionBatch/);
-  assert.match(bankManager, /offset \+= 40/);
+  assert.match(bankManager, /const IMPORT_CHUNK_SIZE = 80/);
+  assert.match(bankManager, /buildPersistentImportChunks\(rows\)/);
+  assert.match(bankManager, /chunkIndex < persistentChunks\.length/);
+  assert.match(bankManager, /adminPreviewQuestionImportDuplicates/);
+  assert.match(bankManager, /adminCancelQuestionImport/);
+  assert.match(bankManager, /adminRetryQuestionImport/);
+  assert.match(bankManager, /adminDownloadQuestionImportErrors/);
+  assert.match(bankManager, /adminRollbackQuestionVersion/);
+  assert.match(bankManager, /fileHash: selectedFileHash/);
   assert.match(adminAuth, /PBKDF2/);
-  assert.match(adminAuth, /ensureBootstrapAdmin/);
-  assert.match(adminAuth, /isBootstrapSecret/);
-  assert.match(adminAuth, /WHERE username = 'admin'/);
+  assert.match(adminAuth, /createBootstrapAdmin/);
+  assert.match(adminAuth, /SELECT COUNT\(\*\) AS count FROM admin_users/);
+  assert.match(adminAuth, /if \(Number\(existingCount\?\.count \?\? 0\) > 0\) return false/);
+  assert.match(adminAuth, /WHERE username = \?/);
+  assert.doesNotMatch(adminAuth, /UPDATE admin_users SET password_hash/);
   assert.match(adminAuth, /HttpOnly; Secure; SameSite=Strict/);
   assert.match(adminAuth, /ADMIN_SESSION_SECONDS = 60 \* 60 \* 12/);
   assert.match(route, /admin_audit_logs/);

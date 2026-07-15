@@ -44,7 +44,7 @@ const ROLE_OPTIONS: Array<{ value: AdminRole; label: string; description: string
   { value: "question_editor", label: "题库运营", description: "维护题库及导入真题", capabilities: ["题库配置", "题目导入", "导入记录"] },
   { value: "radar_editor", label: "招考运营", description: "维护公告、节点和职位", capabilities: ["招考公告", "考试节点", "职位表"] },
   { value: "growth_operator", label: "增长运营", description: "管理兑换码与邀请奖励", capabilities: ["兑换码", "兑换记录", "邀请奖励"] },
-  { value: "reviewer", label: "审核发布", description: "审核、发布、下架及回滚", capabilities: ["审核通过/驳回", "发布/下架", "版本回滚"] },
+  { value: "reviewer", label: "审核发布", description: "审核内容与真题，负责发布、下架及回滚", capabilities: ["内容审核", "真题核验", "发布/下架", "版本回滚"] },
   { value: "read_only", label: "只读人员", description: "只查看已授权业务数据", capabilities: ["查看工作台", "查看业务数据", "不可修改"] },
 ];
 const roleLabel = (role: string) => ROLE_OPTIONS.find((item) => item.value === role)?.label ?? role;

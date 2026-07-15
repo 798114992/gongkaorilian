@@ -1,6 +1,6 @@
 export const ADMIN_SESSION_COOKIE = "gkrl_admin_session";
 export const ADMIN_SESSION_SECONDS = 60 * 60 * 12;
-export const ADMIN_PASSWORD_ITERATIONS = 100_000;
+export const ADMIN_PASSWORD_ITERATIONS = 210_000;
 
 export const ADMIN_ROLES = [
   "super_admin",
@@ -23,6 +23,7 @@ export const ADMIN_PERMISSIONS = [
   "question.read",
   "question.write",
   "question.import",
+  "question.review",
   "radar.read",
   "radar.write",
   "growth.read",
@@ -48,6 +49,7 @@ const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
     "content.review",
     "content.publish",
     "question.read",
+    "question.review",
     "radar.read",
     "audit.read",
   ],
@@ -242,39 +244,20 @@ async function passwordMatches(password: string, row: AdminUserRow) {
   return constantTimeEqual(actual, row.password_hash);
 }
 
-async function ensureBootstrapAdmin(db: AdminDatabase, configuredSecret: string) {
-  if (!configuredSecret) return;
-  const existing = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
-    password_iterations, role, status FROM admin_users WHERE username = 'admin' ORDER BY id ASC LIMIT 1`).first<AdminUserRow>();
-  if (existing && existing.status === "active" && existing.role === "super_admin") return;
-
+async function createBootstrapAdmin(db: AdminDatabase, configuredSecret: string) {
+  if (!configuredSecret) return false;
+  // ADMIN_TOKEN is an installation bootstrap secret, never a permanent
+  // alternate password. Once any administrator exists it must not be able to
+  // reset or bypass the password stored in the database.
+  const existingCount = await db.prepare("SELECT COUNT(*) AS count FROM admin_users")
+    .first<{ count: number }>();
+  if (Number(existingCount?.count ?? 0) > 0) return false;
   const record = await createPasswordRecord(configuredSecret);
-  const sessionReset = db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
-    WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`);
-  if (existing) {
-    await db.batch([
-      db.prepare(`UPDATE admin_users SET
-        display_name = '超级管理员',
-        password_hash = ?,
-        password_salt = ?,
-        password_iterations = ?,
-        role = 'super_admin',
-        status = 'active',
-        updated_at = CURRENT_TIMESTAMP
-        WHERE username = 'admin'`)
-        .bind(record.hash, record.salt, record.iterations),
-      sessionReset,
-    ]);
-    return;
-  }
-
-  await db.batch([
-    db.prepare(`INSERT INTO admin_users
-      (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
-      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)`)
-      .bind(record.hash, record.salt, record.iterations),
-    sessionReset,
-  ]);
+  const inserted = await db.prepare(`INSERT OR IGNORE INTO admin_users
+    (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
+    VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)`)
+    .bind(record.hash, record.salt, record.iterations).run();
+  return Boolean(inserted.meta.changes);
 }
 
 function readCookie(request: Request, name: string) {
@@ -326,19 +309,14 @@ export async function authenticateAdmin(
   const password = String(passwordValue ?? "");
   if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(username) || !password || password.length > 512) return null;
 
-  const isBootstrapAdmin = username === "admin" && Boolean(configuredSecret);
-  const isBootstrapSecret = isBootstrapAdmin && constantTimeEqual(password, configuredSecret);
-  if (isBootstrapSecret) await ensureBootstrapAdmin(db, configuredSecret);
+  if (username === "admin" && configuredSecret && constantTimeEqual(password, configuredSecret)) {
+    await createBootstrapAdmin(db, configuredSecret);
+  }
 
   const row = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
     password_iterations, role, status FROM admin_users WHERE username = ? ORDER BY id ASC LIMIT 1`).bind(username).first<AdminUserRow>();
   if (!row || row.status !== "active") return null;
-  if (isBootstrapAdmin) {
-    if (isBootstrapSecret && row.role !== "super_admin") return null;
-    if (!isBootstrapSecret && !(await passwordMatches(password, row))) return null;
-  } else if (!(await passwordMatches(password, row))) {
-    return null;
-  }
+  if (!(await passwordMatches(password, row))) return null;
 
   const token = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await sha256(token);

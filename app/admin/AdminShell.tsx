@@ -174,7 +174,7 @@ const NAVIGATION: NavigationItem[] = [
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   super_admin: [
     "dashboard.read", "content.read", "content.write", "content.review", "content.publish",
-    "question.read", "question.write", "question.import", "radar.read", "radar.write",
+    "question.read", "question.write", "question.import", "question.review", "radar.read", "radar.write",
     "growth.read", "growth.write", "media.upload", "analytics.read", "system.read",
     "users.manage", "audit.read",
   ],
@@ -182,7 +182,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   question_editor: ["dashboard.read", "question.read", "question.write", "question.import", "media.upload"],
   radar_editor: ["dashboard.read", "radar.read", "radar.write", "media.upload"],
   growth_operator: ["dashboard.read", "growth.read", "growth.write", "analytics.read"],
-  reviewer: ["dashboard.read", "content.read", "content.review", "content.publish", "question.read", "radar.read", "audit.read"],
+  reviewer: ["dashboard.read", "content.read", "content.review", "content.publish", "question.read", "question.review", "radar.read", "audit.read"],
   read_only: ["dashboard.read", "content.read", "question.read", "radar.read", "growth.read", "analytics.read", "system.read", "audit.read"],
 };
 

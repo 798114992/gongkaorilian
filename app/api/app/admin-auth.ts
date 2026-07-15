@@ -245,25 +245,35 @@ async function passwordMatches(password: string, row: AdminUserRow) {
 async function ensureBootstrapAdmin(db: AdminDatabase, configuredSecret: string) {
   if (!configuredSecret) return;
   const existing = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
-    password_iterations, role, status FROM admin_users WHERE username = 'admin'`).first<AdminUserRow>();
+    password_iterations, role, status FROM admin_users WHERE username = 'admin' ORDER BY id ASC LIMIT 1`).first<AdminUserRow>();
   if (existing && existing.status === "active" && existing.role === "super_admin") return;
 
   const record = await createPasswordRecord(configuredSecret);
+  const sessionReset = db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
+    WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`);
+  if (existing) {
+    await db.batch([
+      db.prepare(`UPDATE admin_users SET
+        display_name = '超级管理员',
+        password_hash = ?,
+        password_salt = ?,
+        password_iterations = ?,
+        role = 'super_admin',
+        status = 'active',
+        updated_at = CURRENT_TIMESTAMP
+        WHERE username = 'admin'`)
+        .bind(record.hash, record.salt, record.iterations),
+      sessionReset,
+    ]);
+    return;
+  }
+
   await db.batch([
     db.prepare(`INSERT INTO admin_users
       (username, display_name, password_hash, password_salt, password_iterations, role, status, updated_at)
-      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)
-      ON CONFLICT(username) DO UPDATE SET
-        display_name = '超级管理员',
-        password_hash = excluded.password_hash,
-        password_salt = excluded.password_salt,
-        password_iterations = excluded.password_iterations,
-        role = 'super_admin',
-        status = 'active',
-        updated_at = CURRENT_TIMESTAMP`)
+      VALUES ('admin', '超级管理员', ?, ?, ?, 'super_admin', 'active', CURRENT_TIMESTAMP)`)
       .bind(record.hash, record.salt, record.iterations),
-    db.prepare(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP
-      WHERE admin_user_id = (SELECT id FROM admin_users WHERE username = 'admin') AND revoked_at IS NULL`),
+    sessionReset,
   ]);
 }
 
@@ -321,7 +331,7 @@ export async function authenticateAdmin(
   if (isBootstrapSecret) await ensureBootstrapAdmin(db, configuredSecret);
 
   const row = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
-    password_iterations, role, status FROM admin_users WHERE username = ?`).bind(username).first<AdminUserRow>();
+    password_iterations, role, status FROM admin_users WHERE username = ? ORDER BY id ASC LIMIT 1`).bind(username).first<AdminUserRow>();
   if (!row || row.status !== "active") return null;
   if (isBootstrapAdmin) {
     if (!isBootstrapSecret || row.role !== "super_admin") return null;

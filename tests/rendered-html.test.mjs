@@ -259,7 +259,7 @@ test("the protected admin console includes routed operations, review, imports an
   assert.match(adminAuth, /PBKDF2/);
   assert.match(adminAuth, /ensureBootstrapAdmin/);
   assert.match(adminAuth, /isBootstrapSecret/);
-  assert.match(adminAuth, /ON CONFLICT\(username\) DO UPDATE/);
+  assert.match(adminAuth, /WHERE username = 'admin'/);
   assert.match(adminAuth, /HttpOnly; Secure; SameSite=Strict/);
   assert.match(adminAuth, /ADMIN_SESSION_SECONDS = 60 \* 60 \* 12/);
   assert.match(route, /admin_audit_logs/);

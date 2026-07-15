@@ -93,6 +93,30 @@ function safeChallengeUrl(attemptId: string) {
   return url.toString();
 }
 
+function avatarClassFor(result: QuizResult) {
+  if (result.result.key === "director") return "director";
+  if (result.result.key === "section_chief") return "section-chief";
+  if (result.result.key === "staff") return "staff";
+  if (result.correctCount === 0 || result.result.key === "free_soul") return "free-soul";
+  return "staff";
+}
+
+function avatarTitleFor(result: QuizResult) {
+  const key = avatarClassFor(result);
+  if (key === "director") return "低调，统筹感已经藏不住了";
+  if (key === "section-chief") return "会听话，也会把事办明白";
+  if (key === "staff") return "先稳住基本盘，办公室语感上线";
+  return "体制外自由灵魂，反向满分也很稀有";
+}
+
+function resultTaglineFor(result: QuizResult) {
+  const key = avatarClassFor(result);
+  if (key === "director") return "你不是来答题的，你像是来主持会议的。";
+  if (key === "section-chief") return "差一点就开始安排别人写材料了。";
+  if (key === "staff") return "能听懂暗号，但偶尔还会被“原则上”绕一下。";
+  return "你精准避开了所有标准答案，这何尝不是一种天赋。";
+}
+
 export default function QuizFeature({ notify, trackEvent }: Props) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"intro" | "question" | "result" | "review">("intro");
@@ -250,6 +274,11 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
           <h2>测测你有没有“局长”思维？</h2>
           <p>随机10道题，每次都不一样。答完生成段位卡，还能发起同题挑战。</p>
         </div>
+        <div className="quiz-teaser-visual" aria-hidden="true">
+          <i />
+          <b>局</b>
+          <em />
+        </div>
         <button onClick={() => openQuiz()}>开始测试</button>
       </section>
 
@@ -279,6 +308,10 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
 
           {view === "question" && attempt && currentQuestion && <div className="quiz-question-view">
             <div className="quiz-progress-line"><span>{progressText}</span><i style={{ width: `${((currentIndex + 1) / attempt.questions.length) * 100}%` }} /></div>
+            <div className="quiz-question-bubble">
+              <b>办公室暗号识别中</b>
+              <span>{answeredCount} 道已锁定，看看你的语感能不能一路稳住</span>
+            </div>
             <div className="quiz-question-head">
               <span>{currentQuestion.category}</span>
               <b>{currentQuestion.difficulty === "hard" ? "稍有难度" : currentQuestion.difficulty === "easy" ? "热身题" : "标准题"}</b>
@@ -300,11 +333,31 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
 
           {view === "result" && result && <div className="quiz-result-view">
             <div className={`quiz-result-card theme-${result.result.theme}`}>
+              <div className={`quiz-avatar-stage avatar-${avatarClassFor(result)}`} aria-hidden="true">
+                <div className="quiz-avatar-burst"><i /><i /><i /></div>
+                <div className="quiz-anime-avatar">
+                  <i className="avatar-hair" />
+                  <i className="avatar-face">
+                    <span className="avatar-eye left" />
+                    <span className="avatar-eye right" />
+                    <span className="avatar-blush left" />
+                    <span className="avatar-blush right" />
+                    <span className="avatar-mouth" />
+                  </i>
+                  <i className="avatar-body" />
+                  <i className="avatar-prop" />
+                </div>
+                <div className="quiz-avatar-badge">{result.result.badgeLabel || "测试结果"}</div>
+              </div>
               <span>{result.result.badgeLabel || "测试结果"}</span>
               <h1>{result.result.title}</h1>
+              <p className="quiz-result-tagline">{resultTaglineFor(result)}</p>
               <div className="quiz-score-ring"><b>{result.scorePercent}%</b><small>局长思维指数</small></div>
               <p>{result.result.description}</p>
-              <strong>答对 {result.correctCount}/{result.total} 题</strong>
+              <div className="quiz-result-mini-stats">
+                <div><b>{result.correctCount}/{result.total}</b><span>答对题数</span></div>
+                <div><b>{avatarTitleFor(result)}</b><span>头像判词</span></div>
+              </div>
               <em>{result.notableChoice}</em>
               <small>公考日练 · 测测你有没有“局长”思维？</small>
             </div>

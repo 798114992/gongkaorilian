@@ -15,6 +15,9 @@ export type QuestionBankItem = {
   cover_color: "blue" | "orange" | "green" | "purple";
   status: "draft" | "published";
   question_count: number | string;
+  import_count?: number | string;
+  selection_count?: number | string;
+  active_session_count?: number | string;
   updated_at: string;
 };
 
@@ -25,6 +28,7 @@ export type QuestionImportItem = {
   file_name: string;
   file_size: number;
   file_hash: string;
+  duplicate_strategy?: "reject" | "preserve_metrics" | "replace_external_metrics";
   total_rows: number;
   uploaded_rows: number;
   processed_rows: number;
@@ -96,7 +100,13 @@ type CanonicalQuestion = {
   resourceUrl: string;
 };
 
-type ManagedQuestion = CanonicalQuestion & { id: number; status?: "active" | "disabled"; bankNames?: string };
+type ManagedQuestion = CanonicalQuestion & {
+  id: number;
+  version: number;
+  status?: "active" | "disabled";
+  reviewStatus?: "pending_review" | "approved" | "rejected";
+  bankNames?: string;
+};
 
 type RowIssue = { row: number; message: string };
 type RowAdvisory = { row: number; message: string };
@@ -111,8 +121,7 @@ type Props = {
   canPublish?: boolean;
 };
 
-// 后端单题CRUD接口接通后改为 true；默认隐藏，避免运营人员触发未实现动作。
-const ENABLE_SINGLE_QUESTION_ADMIN = false;
+const ENABLE_SINGLE_QUESTION_ADMIN = true;
 
 const emptyBank = {
   bankCode: "",
@@ -134,15 +143,8 @@ const templateRows = [
     真题年份: 2024,
     来源: "广东省公务员录用考试行政职业能力测验真题",
     真题已核验: "否/待核验",
-    来源考试类型: "广东省考",
-    来源批次: "2024年广东省考",
-    考频出现次数: 4,
-    考频有效试卷数: 5,
-    近5年出现年份: "2020|2021|2022|2024",
-    重要星级: 5,
-    重要性规则版本: "priority-v1",
-    重要性理由: "近5年持续出现，且属于大纲核心考点",
-    重要性覆盖理由: "",
+    来源考试类型: "provincial",
+    来源批次: "GD-2024-XC-A",
     拿分率正确首答数: "",
     拿分率有效首答数: "",
     拿分率统计范围: "",
@@ -173,15 +175,8 @@ const templateRows = [
     真题年份: 2024,
     来源: "广东省公务员录用考试申论真题",
     真题已核验: "否/待核验",
-    来源考试类型: "广东省考",
-    来源批次: "2024年广东省考",
-    考频出现次数: "",
-    考频有效试卷数: "",
-    近5年出现年份: "",
-    重要星级: "",
-    重要性规则版本: "",
-    重要性理由: "",
-    重要性覆盖理由: "",
+    来源考试类型: "provincial",
+    来源批次: "GD-2024-SL-A",
     拿分率正确首答数: "",
     拿分率有效首答数: "",
     拿分率统计范围: "",
@@ -222,20 +217,6 @@ function optionalInteger(row: Record<string, unknown>, names: string[]) {
   return Number.isInteger(value) ? value : Number.NaN;
 }
 
-function parseFrequencyYears(row: Record<string, unknown>) {
-  return Array.from(new Set(cell(row, ["近5年出现年份", "考频年份", "frequencyYears"])
-    .split(/[|｜,，、；;\s]+/)
-    .map((value) => Number(value))
-    .filter((value) => Number.isInteger(value) && value >= 1990 && value <= new Date().getFullYear())))
-    .sort((left, right) => left - right);
-}
-
-function derivedFrequency(occurrences: number | null, papers: number | null, years: number[]): CanonicalQuestion["frequency"] {
-  if (!occurrences || !papers || !years.length || !Number.isFinite(occurrences) || !Number.isFinite(papers)) return "";
-  const coverage = occurrences / papers;
-  return coverage >= 0.55 ? "高频" : coverage >= 0.25 ? "中频" : "低频";
-}
-
 function normalizeRow(row: Record<string, unknown>): CanonicalQuestion {
   const subjectRaw = cell(row, ["科目", "subject"]);
   const subject = subjectRaw.includes("申论") ? "申论" : subjectRaw.includes("行测") ? "行测" : subjectRaw;
@@ -247,11 +228,6 @@ function normalizeRow(row: Record<string, unknown>): CanonicalQuestion {
   const scoringRaw = cell(row, ["采分点", "评分点", "scoringPoints"]);
   const wordValue = Number(cell(row, ["字数限制", "wordLimit"]));
   const examYear = Number(cell(row, ["真题年份", "年份", "examYear"]));
-  const importanceRaw = cell(row, ["重要星级", "星级", "importanceStars"]);
-  const importanceStars = importanceRaw ? Number(importanceRaw) : null;
-  const frequencyOccurrences = optionalInteger(row, ["考频出现次数", "frequencyOccurrences"]);
-  const frequencyPapers = optionalInteger(row, ["考频有效试卷数", "有效试卷数", "frequencyPapers"]);
-  const frequencyYears = parseFrequencyYears(row);
   const scoreRateCorrect = optionalInteger(row, ["拿分率正确首答数", "正确首答数", "scoreRateCorrect"]);
   const scoreRateAttempts = optionalInteger(row, ["拿分率有效首答数", "有效首答样本数", "scoreRateAttempts"]);
   const scoreRate = scoreRateAttempts && scoreRateCorrect !== null && Number.isFinite(scoreRateCorrect) && Number.isFinite(scoreRateAttempts)
@@ -280,14 +256,15 @@ function normalizeRow(row: Record<string, unknown>): CanonicalQuestion {
     truthVerified: false,
     sourceExamType: cell(row, ["来源考试类型", "sourceExamType"]),
     sourceBatch: cell(row, ["来源批次", "sourceBatch"]),
-    frequency: derivedFrequency(frequencyOccurrences, frequencyPapers, frequencyYears),
-    frequencyOccurrences,
-    frequencyPapers,
-    frequencyYears,
-    importanceStars,
-    importanceRuleVersion: cell(row, ["重要性规则版本", "importanceRuleVersion"]),
-    importanceReason: cell(row, ["重要性理由", "importanceReason"]),
-    importanceOverrideReason: cell(row, ["重要性覆盖理由", "覆盖理由", "importanceOverrideReason"]),
+    // 考频与星级由已审核真题样本计算，文件字段不会进入可信指标。
+    frequency: "",
+    frequencyOccurrences: null,
+    frequencyPapers: null,
+    frequencyYears: [],
+    importanceStars: null,
+    importanceRuleVersion: "",
+    importanceReason: "",
+    importanceOverrideReason: "",
     scoreRate: scoreRate !== null && scoreRate >= 0 && scoreRate <= 100 ? scoreRate : null,
     scoreRateCorrect,
     scoreRateAttempts,
@@ -311,20 +288,6 @@ function validateRow(row: CanonicalQuestion, index: number): RowIssue[] {
   if (!row.sourceBatch) issues.push({ row: line, message: "来源批次不能为空，同一套试卷请填写同一批次" });
   if (!row.region) issues.push({ row: line, message: "地区不能为空，国考题填写国考" });
   if (!row.examYear) issues.push({ row: line, message: "真题年份必须填写四位年份" });
-  const hasFrequencyMetric = row.frequencyOccurrences !== null || row.frequencyPapers !== null || row.frequencyYears.length > 0;
-  if (hasFrequencyMetric && (row.frequencyOccurrences === null || row.frequencyPapers === null || !row.frequencyYears.length)) {
-    issues.push({ row: line, message: "考频指标需同时填写出现次数、有效试卷数和近5年出现年份" });
-  }
-  if (row.frequencyOccurrences !== null && (!Number.isInteger(row.frequencyOccurrences) || row.frequencyOccurrences < 1)) issues.push({ row: line, message: "填写考频指标时，出现次数必须是正整数" });
-  if (row.frequencyPapers !== null && (!Number.isInteger(row.frequencyPapers) || row.frequencyPapers < 1)) issues.push({ row: line, message: "考频有效试卷数必须是正整数" });
-  if (row.frequencyOccurrences !== null && row.frequencyPapers !== null && row.frequencyOccurrences > row.frequencyPapers) issues.push({ row: line, message: "考频出现次数不能大于有效试卷数" });
-  if (row.frequencyYears.length > 5) issues.push({ row: line, message: "近5年出现年份最多填写5个年份" });
-
-  const hasImportanceMetric = row.importanceStars !== null || Boolean(row.importanceRuleVersion || row.importanceReason || row.importanceOverrideReason);
-  if (row.importanceStars !== null && (!Number.isInteger(row.importanceStars) || row.importanceStars < 1 || row.importanceStars > 5)) issues.push({ row: line, message: "重要星级必须是1—5的整数" });
-  if (hasImportanceMetric && (!row.importanceStars || !row.importanceRuleVersion || !(row.importanceReason || row.importanceOverrideReason))) {
-    issues.push({ row: line, message: "重要度需同时填写1—5星、规则版本，以及规则理由或人工覆盖理由" });
-  }
 
   const hasScoreMetric = row.scoreRateCorrect !== null || row.scoreRateAttempts !== null || Boolean(row.scoreRateScope || row.scoreRateSource || row.scoreRateUpdatedAt);
   if (hasScoreMetric && (row.scoreRateCorrect === null || row.scoreRateAttempts === null || !row.scoreRateScope || !row.scoreRateSource || !row.scoreRateUpdatedAt)) {
@@ -439,6 +402,7 @@ export default function QuestionBankManager({
   const [importStage, setImportStage] = useState<0 | 1 | 2 | 3>(0);
   const [importResult, setImportResult] = useState("");
   const [activeImportId, setActiveImportId] = useState(0);
+  const [duplicateStrategy, setDuplicateStrategy] = useState<"reject" | "preserve_metrics" | "replace_external_metrics">("reject");
   const [versionQuestionCode, setVersionQuestionCode] = useState("");
   const [versionQuestion, setVersionQuestion] = useState<Record<string, unknown> | null>(null);
   const [questionVersions, setQuestionVersions] = useState<QuestionVersionItem[]>([]);
@@ -452,6 +416,10 @@ export default function QuestionBankManager({
   const api = adminApiRequest;
 
   const selectedBank = useMemo(() => banks.find((bank) => String(bank.id) === selectedBankId), [banks, selectedBankId]);
+  const editingBank = useMemo(() => banks.find((bank) => bank.id === editingBankId) ?? null, [banks, editingBankId]);
+  const editingBankIdentityLocked = Boolean(editingBank && (editingBank.status === "published"
+    || Number(editingBank.question_count ?? 0) > 0 || Number(editingBank.import_count ?? 0) > 0
+    || Number(editingBank.selection_count ?? 0) > 0 || Number(editingBank.active_session_count ?? 0) > 0));
   const activeServerImportKey = useMemo(() => imports.filter((item) => AUTO_POLL_IMPORT_STATUSES.has(item.status))
     .map((item) => item.id).join(","), [imports]);
 
@@ -500,9 +468,16 @@ export default function QuestionBankManager({
 
   const saveQuestion = async () => {
     if (!editingQuestion) return;
+    if (!canEdit) return onMessage("当前角色没有编辑题目的权限");
+    const original = questionResults.find((item) => item.id === editingQuestion.id);
+    if (original && Number(original.importanceStars ?? 0) !== Number(editingQuestion.importanceStars ?? 0)
+      && editingQuestion.importanceOverrideReason.trim().length < 5) {
+      return onMessage("人工调整重要星级时，请填写至少5个字的覆盖理由");
+    }
     try {
-      await api({ action: "adminUpsertQuestion", id: editingQuestion.id, question: editingQuestion });
-      onMessage("单题修改已保存");
+      const result = await api({ action: "adminUpsertQuestion", id: editingQuestion.id,
+        expectedVersion: editingQuestion.version, question: editingQuestion });
+      onMessage(result.unchanged ? "没有检测到需要保存的修改" : "单题修改已保存，并已回到待审核状态");
       setEditingQuestion(null);
       await searchQuestions();
     } catch (error) {
@@ -511,9 +486,10 @@ export default function QuestionBankManager({
   };
 
   const toggleQuestionStatus = async (question: ManagedQuestion) => {
+    if (!canEdit) return onMessage("当前角色没有停用或恢复题目的权限");
     try {
       const status = question.status === "disabled" ? "active" : "disabled";
-      await api({ action: "adminSetQuestionStatus", id: question.id, status });
+      await api({ action: "adminSetQuestionStatus", id: question.id, expectedVersion: question.version, status });
       onMessage(status === "disabled" ? "题目已停用，不再进入训练" : "题目已恢复使用");
       await searchQuestions();
     } catch (error) {
@@ -575,8 +551,8 @@ export default function QuestionBankManager({
       ["字段组", "字段", "要求", "说明"],
       ["真题可信", "地区、真题年份、来源", "必填", "前台统一显示为地区-年份，如广东-2024；来源填写可追溯的官方试卷或出处"],
       ["真题可信", "真题已核验", "固定为否/待核验", "上传者无权自审；导入后由审核员核对来源、地区、年份和来源批次"],
-      ["考频", "考频出现次数、考频有效试卷数、近5年出现年份", "整组可选", "有数据时必须整组填写；系统按同考试范围近5年样本计算高/中/低频，不接受人工直接填考频"],
-      ["重要度", "重要星级、重要性规则版本、重要性理由/覆盖理由", "整组可选", "星级表示训练优先级，不等于难度；人工覆盖必须留下覆盖理由"],
+      ["考频", "系统自动计算", "无需填写", "只按已审核真题的稳定试卷批次计算高/中/低频，文件中的同名字段会被忽略"],
+      ["重要度", "系统自动计算", "无需填写", "星级由考频、年份覆盖和近期持续性计算；文件不能注入人工星级，人工覆盖只能在审核后台留痕操作"],
       ["拿分率", "正确首答数、有效首答数、统计范围、参考链接、统计日期", "整组可选", "仅允许导入可追溯的外部参考数据；平台拿分率由真实有效首答自动计算，模板不预填示例数值"],
       ["缺失策略", "考频/重要度/拿分率", "允许暂缺", "缺失不会阻断导入，也绝不默认成中频、3星或60%；分别显示样本积累中、待评估、样本积累中"],
     ]);
@@ -651,6 +627,7 @@ export default function QuestionBankManager({
           totalRows: rows.length,
           chunkSize: IMPORT_CHUNK_SIZE,
           totalChunks: persistentChunks.length,
+          duplicateStrategy,
         });
         importId = Number(start.importId);
         setActiveImportId(importId);
@@ -682,8 +659,11 @@ export default function QuestionBankManager({
         .slice(0, 5).map((item) => `${String((item as Record<string, unknown>).question_code)}（行${String((item as Record<string, unknown>).rows)}）`).join("、");
       const existingSamples = (Array.isArray(duplicatePreview.existing) ? duplicatePreview.existing : [])
         .slice(0, 5).map((item) => `${String((item as Record<string, unknown>).question_code)}（${String((item as Record<string, unknown>).bank_names ?? "未关联题库")}）`).join("、");
+      const duplicateStrategyLabel = duplicateStrategy === "reject" ? "拒绝覆盖已存在题号"
+        : duplicateStrategy === "preserve_metrics" ? "更新单库题目但保留现有拿分率样本"
+          : "使用文件中的可追溯外部拿分率并重新审核";
       if ((fileDuplicates > 0 || existingCount > 0) && !window.confirm(
-        `重复预览：文件内有 ${fileDuplicates} 个重复题号（后续重复行会记为失败），另有 ${existingCount} 个题号已存在（同题复用或同库更新）。${duplicateSamples ? `\n文件内示例：${duplicateSamples}` : ""}${existingSamples ? `\n已存在示例：${existingSamples}` : ""}\n确认提交后台处理？`,
+        `重复预览：文件内有 ${fileDuplicates} 个重复题号（后续重复行会记为失败），另有 ${existingCount} 个题号已存在。当前策略：${duplicateStrategyLabel}。${duplicateSamples ? `\n文件内示例：${duplicateSamples}` : ""}${existingSamples ? `\n已存在示例：${existingSamples}` : ""}\n确认提交后台处理？`,
       )) {
         await api({ action: "adminCancelQuestionImport", importId });
         setActiveImportId(0);
@@ -801,12 +781,13 @@ export default function QuestionBankManager({
 
   const rollbackQuestionVersion = async (version: number) => {
     const questionId = Number(versionQuestion?.id ?? 0);
+    const expectedVersion = Number(versionQuestion?.version ?? 0);
     const sharedWarning = Number(versionQuestion?.bank_count ?? 0) > 1
       ? `\n注意：该题被 ${String(versionQuestion?.bank_count)} 个题库共用（${String(versionQuestion?.bank_names ?? "")}），新版本审核通过后会共同生效。`
       : "";
-    if (!questionId || !window.confirm(`确认基于 v${version} 生成一个新的待审核版本？当前版本和历史记录都不会被删除。${sharedWarning}`)) return;
+    if (!questionId || !expectedVersion || !window.confirm(`确认基于 v${version} 生成一个新的待审核版本？当前版本和历史记录都不会被删除。${sharedWarning}`)) return;
     try {
-      const result = await api({ action: "adminRollbackQuestionVersion", questionId, version });
+      const result = await api({ action: "adminRollbackQuestionVersion", questionId, version, expectedVersion });
       onMessage(String(result.message ?? "已生成待审核回滚版本"));
       await loadQuestionVersions();
       await onReload();
@@ -819,13 +800,19 @@ export default function QuestionBankManager({
     <>
       {view === "banks" && <section className="admin-panel bank-config-panel">
         <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2><small>省考按省份独立建库；国省共通题可复用同一题目编号，系统会跨库去重。</small></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
+        {editingBankId && <Alert showIcon type={editingBankIdentityLocked ? "warning" : "info"}
+          message={editingBankIdentityLocked ? "题库身份范围已锁定" : "当前是纯草稿空库，可调整范围"}
+          description={editingBankIdentityLocked
+            ? "题库编码、考试类型、省份、适用年份和科目已参与题目、导入、用户书架、练习或发布关系，不能原地修改；范围变化请复制为新题库。名称、简介、封面和上下线状态仍可调整。"
+            : "题库编码创建后仍不可修改；在尚未发布、没有题目、导入、用户选择和进行中练习前，可调整考试类型、省份、年份和科目。"}
+          style={{ marginBottom: 16 }} />}
         <div className="form-grid bank-form-grid">
-          <label>题库编码<input value={bankForm.bankCode} onChange={(event) => setBankForm({ ...bankForm, bankCode: event.target.value.toUpperCase() })} placeholder="如 GD-XC-2027" /></label>
+          <label>题库编码<input value={bankForm.bankCode} disabled={Boolean(editingBankId)} onChange={(event) => setBankForm({ ...bankForm, bankCode: event.target.value.toUpperCase() })} placeholder="如 GD-XC-2027" /><small>{editingBankId ? "编码用于用户书架、练习记录和题目关联，创建后不可修改" : "保存后永久不可修改，请按地区、科目和年份规划编码"}</small></label>
           <label>题库名称<input value={bankForm.name} onChange={(event) => setBankForm({ ...bankForm, name: event.target.value })} placeholder="如 2027广东省考·行测综合" /></label>
-          <label>考试类型<select value={bankForm.examType} onChange={(event) => setBankForm({ ...bankForm, examType: event.target.value, province: event.target.value === "provincial" ? bankForm.province : "" })}><option value="national">国考</option><option value="provincial">省考</option><option value="special">专项题库</option></select></label>
-          <label>省份<input value={bankForm.province} disabled={bankForm.examType !== "provincial"} onChange={(event) => setBankForm({ ...bankForm, province: event.target.value })} placeholder={bankForm.examType === "provincial" ? "省考必填，如广东" : "仅省考题库需要填写"} /></label>
-          <label>适用年份<input type="number" min="2020" max="2100" value={bankForm.examYear} onChange={(event) => setBankForm({ ...bankForm, examYear: Number(event.target.value) })} /></label>
-          <label>科目<select value={bankForm.subject} onChange={(event) => setBankForm({ ...bankForm, subject: event.target.value })}><option>行测</option><option>申论</option><option>综合</option></select></label>
+          <label>考试类型<select value={bankForm.examType} disabled={editingBankIdentityLocked} onChange={(event) => setBankForm({ ...bankForm, examType: event.target.value, province: event.target.value === "provincial" ? bankForm.province : "" })}><option value="national">国考</option><option value="provincial">省考</option><option value="special">专项题库</option></select></label>
+          <label>省份<input value={bankForm.province} disabled={editingBankIdentityLocked || bankForm.examType !== "provincial"} onChange={(event) => setBankForm({ ...bankForm, province: event.target.value })} placeholder={bankForm.examType === "provincial" ? "省考必填，如广东" : "仅省考题库需要填写"} /></label>
+          <label>适用年份<input type="number" min="2020" max="2100" value={bankForm.examYear} disabled={editingBankIdentityLocked} onChange={(event) => setBankForm({ ...bankForm, examYear: Number(event.target.value) })} /></label>
+          <label>科目<select value={bankForm.subject} disabled={editingBankIdentityLocked} onChange={(event) => setBankForm({ ...bankForm, subject: event.target.value })}><option>行测</option><option>申论</option><option>综合</option></select></label>
           <label>封面颜色<select value={bankForm.coverColor} onChange={(event) => setBankForm({ ...bankForm, coverColor: event.target.value })}><option value="blue">公考蓝</option><option value="orange">活力橙</option><option value="green">成长绿</option><option value="purple">进阶紫</option></select></label>
           <label>初始状态<select value={bankForm.status} onChange={(event) => setBankForm({ ...bankForm, status: event.target.value })}><option value="draft">草稿</option><option value="published">发布</option></select></label>
           <label className="wide">题库简介<textarea value={bankForm.description} onChange={(event) => setBankForm({ ...bankForm, description: event.target.value })} placeholder="适用人群、题目范围和更新说明" /></label>
@@ -850,6 +837,7 @@ export default function QuestionBankManager({
         />
         <div className="upload-toolbar">
           <label>导入到题库<select value={selectedBankId} onChange={(event) => setSelectedBankId(event.target.value)}><option value="">请选择目标题库</option>{banks.map((bank) => <option key={bank.id} value={bank.id}>{bank.name}（{bank.question_count}题）</option>)}</select></label>
+          <label>已存在题号处理<select value={duplicateStrategy} disabled={Boolean(activeImportId)} onChange={(event) => setDuplicateStrategy(event.target.value as typeof duplicateStrategy)}><option value="reject">拒绝覆盖（推荐）</option><option value="preserve_metrics">更新题干解析，保留现有拿分率样本</option><option value="replace_external_metrics">用本文件外部样本替换（需HTTPS来源并重新审核）</option></select><small>平台真实作答样本不会被默认值覆盖；选择外部替换后仍只进入待审核。</small></label>
           <label className="upload-dropzone"><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void readFile(file); }} /><span>{readingFile ? "正在读取文件…" : selectedFile ? selectedFile.name : "点击选择 XLSX / XLS / CSV 文件"}</span><small>最大20MB / 800题；超出请按年份或地区拆分，首行必须是模板字段名</small></label>
         </div>
 
@@ -888,20 +876,35 @@ export default function QuestionBankManager({
           <label>搜索关键词<div style={{ display: "flex", gap: 8 }}><input value={questionSearch} onChange={(event) => setQuestionSearch(event.target.value)} placeholder="题目编号、题干或来源" onKeyDown={(event) => { if (event.key === "Enter") void searchQuestions(); }} /><button type="button" onClick={() => void searchQuestions()}>{searchingQuestions ? "搜索中…" : "搜索"}</button></div></label>
         </div>
         {editingQuestion && <div className="import-preview">
-          <div className="admin-panel-title"><div><span>编辑单题</span><h2>{editingQuestion.questionCode}</h2></div><button onClick={() => setEditingQuestion(null)}>取消</button></div>
+          <div className="admin-panel-title"><div><span>编辑单题 · 当前 v{editingQuestion.version}</span><h2>{editingQuestion.questionCode}</h2><small>题目编号永久不变；内容或标签有实质修改后会生成新版本，并回到待审核状态。</small></div><button onClick={() => setEditingQuestion(null)}>取消</button></div>
+          <Alert showIcon type="warning" message="考频和平台拿分率为系统指标" description="考频根据同范围已审核真题试卷样本计算；平台拿分率根据真实有效首答计算。两项均只读，不能在单题编辑中手工改百分比。" style={{ marginBottom: 16 }} />
           <div className="form-grid bank-form-grid">
+            <label>科目<select value={editingQuestion.subject} onChange={(event) => setEditingQuestion({ ...editingQuestion, subject: event.target.value })}><option>行测</option><option>申论</option></select></label>
+            <label>模块<input value={editingQuestion.module} onChange={(event) => setEditingQuestion({ ...editingQuestion, module: event.target.value })} /></label>
+            <label>子题型<input value={editingQuestion.subType} onChange={(event) => setEditingQuestion({ ...editingQuestion, subType: event.target.value })} /></label>
             <label>地区<input value={editingQuestion.region} onChange={(event) => setEditingQuestion({ ...editingQuestion, region: event.target.value })} /></label>
-            <label>真题年份<input type="number" value={editingQuestion.examYear ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, examYear: Number(event.target.value) || null })} /></label>
-            <label>考频<select value={editingQuestion.frequency} onChange={(event) => setEditingQuestion({ ...editingQuestion, frequency: event.target.value as CanonicalQuestion["frequency"] })}><option>高频</option><option>中频</option><option>低频</option></select></label>
-            <label>重要星级<input type="number" min="1" max="5" value={editingQuestion.importanceStars ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, importanceStars: Number(event.target.value) || null })} /></label>
-            <label>拿分率<input type="number" min="0" max="100" value={editingQuestion.scoreRate ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, scoreRate: Number(event.target.value) })} /></label>
-            <label>建议用时（秒）<input type="number" min="1" value={editingQuestion.suggestedSeconds ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, suggestedSeconds: Number(event.target.value) || null })} /></label>
+            <label>真题年份<input type="number" min="1990" max={new Date().getFullYear()} value={editingQuestion.examYear ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, examYear: Number(event.target.value) || null })} /></label>
+            <label>来源考试类型<input value={editingQuestion.sourceExamType} onChange={(event) => setEditingQuestion({ ...editingQuestion, sourceExamType: event.target.value })} placeholder="如 provincial / national" /></label>
+            <label className="wide">真题来源<input value={editingQuestion.source} onChange={(event) => setEditingQuestion({ ...editingQuestion, source: event.target.value })} /></label>
+            <label className="wide">来源批次<input value={editingQuestion.sourceBatch} onChange={(event) => setEditingQuestion({ ...editingQuestion, sourceBatch: event.target.value })} placeholder="同一套试卷保持一致" /></label>
+            <label className="wide">题干 / 材料<textarea value={editingQuestion.stem} onChange={(event) => setEditingQuestion({ ...editingQuestion, stem: event.target.value })} /></label>
+            {editingQuestion.subject === "行测" ? <>
+              {editingQuestion.options.map((option, index) => <label key={`${editingQuestion.id}-option-${index}`} className="wide">{String.fromCharCode(65 + index)}选项<input value={option} onChange={(event) => setEditingQuestion({ ...editingQuestion, options: editingQuestion.options.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} /></label>)}
+              <label>正确答案<select value={editingQuestion.answer ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, answer: event.target.value || null })}><option value="">请选择</option>{editingQuestion.options.map((_, index) => <option key={index} value={String.fromCharCode(65 + index)}>{String.fromCharCode(65 + index)}</option>)}</select></label>
+            </> : <label className="wide">申论作答任务<textarea value={editingQuestion.prompt} onChange={(event) => setEditingQuestion({ ...editingQuestion, prompt: event.target.value })} /></label>}
+            <label className="wide">解析 / 参考答案<textarea value={editingQuestion.explanation} onChange={(event) => setEditingQuestion({ ...editingQuestion, explanation: event.target.value })} /></label>
+            <label className="wide">解题技巧<textarea value={editingQuestion.technique} onChange={(event) => setEditingQuestion({ ...editingQuestion, technique: event.target.value })} /></label>
+            <label>考频（系统）<input value={editingQuestion.frequency || "样本积累中"} disabled /><small>{editingQuestion.frequencyPapers ? `${editingQuestion.frequencyOccurrences ?? 0}/${editingQuestion.frequencyPapers}份试卷 · ${editingQuestion.frequencyYears.join("、")}` : "至少3套、3个年份后形成可靠标签"}</small></label>
+            <label>重要星级<input type="number" min="1" max="5" value={editingQuestion.importanceStars || ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, importanceStars: Number(event.target.value) || null })} /><small>人工调整必须在下方留下覆盖理由</small></label>
+            <label className="wide">重要星级人工覆盖理由<textarea value={editingQuestion.importanceOverrideReason} onChange={(event) => setEditingQuestion({ ...editingQuestion, importanceOverrideReason: event.target.value })} placeholder="说明为什么需要偏离系统计算，至少5个字" /></label>
+            <label>拿分率（系统）<input value={editingQuestion.scoreRateAttempts ? `${editingQuestion.scoreRate}%` : "样本积累中"} disabled /><small>{editingQuestion.scoreRateAttempts ? `${editingQuestion.scoreRateCorrect ?? 0}/${editingQuestion.scoreRateAttempts}个有效首答 · ${editingQuestion.scoreRateSource === "platform" ? "平台自动统计" : "外部可追溯样本"}` : "满100个有效首答后前台展示"}</small></label>
+            <label>建议用时（秒）<input type="number" min="10" max="3600" value={editingQuestion.suggestedSeconds ?? ""} onChange={(event) => setEditingQuestion({ ...editingQuestion, suggestedSeconds: Number(event.target.value) || null })} /></label>
             <label className="wide">图片地址<input value={editingQuestion.imageUrl} onChange={(event) => setEditingQuestion({ ...editingQuestion, imageUrl: event.target.value })} /></label>
             <label className="wide">资源地址<input value={editingQuestion.resourceUrl} onChange={(event) => setEditingQuestion({ ...editingQuestion, resourceUrl: event.target.value })} /></label>
           </div>
-          <button className="admin-primary" onClick={() => void saveQuestion()}>保存单题修改</button>
+          <button className="admin-primary" disabled={!canEdit} onClick={() => void saveQuestion()}>保存并提交复审</button>
         </div>}
-        {questionResults.length > 0 && <div className="admin-table-wrap"><table><thead><tr><th>题目</th><th>真题标签</th><th>价值标签</th><th>题库</th><th>状态</th><th>操作</th></tr></thead><tbody>{questionResults.map((question) => <tr key={question.id}><td><b>{question.questionCode}</b><small>{question.module} · {question.subType}</small></td><td>{question.region}-{question.examYear}</td><td>{question.frequency} · {question.importanceStars}星 · {question.scoreRate}%</td><td>{question.bankNames ?? "—"}</td><td><span className={`status ${question.status === "disabled" ? "disabled" : "published"}`}>{question.status === "disabled" ? "已停用" : "使用中"}</span></td><td><button onClick={() => setEditingQuestion(question)}>编辑标签</button><button onClick={() => void toggleQuestionStatus(question)}>{question.status === "disabled" ? "恢复" : "停用"}</button></td></tr>)}</tbody></table></div>}
+        {questionResults.length > 0 && <div className="admin-table-wrap"><table><thead><tr><th>题目</th><th>真题标签</th><th>价值标签</th><th>题库</th><th>状态</th><th>操作</th></tr></thead><tbody>{questionResults.map((question) => <tr key={question.id}><td><b>{question.questionCode}</b><small>{question.module} · {question.subType} · v{question.version}</small></td><td>{question.region}-{question.examYear}</td><td>{question.frequency || "考频积累中"} · {question.importanceStars ? `${question.importanceStars}星` : "重要度待评估"} · {question.scoreRateAttempts && question.scoreRateAttempts >= 100 ? `${question.scoreRate}%` : "拿分率积累中"}</td><td>{question.bankNames || "—"}</td><td><span className={`status ${question.status === "disabled" ? "disabled" : question.reviewStatus === "approved" ? "published" : "pending_review"}`}>{question.status === "disabled" ? "已停用" : question.reviewStatus === "approved" ? "使用中" : "待审核"}</span></td><td><button disabled={!canEdit} onClick={() => setEditingQuestion(question)}>编辑单题</button><button disabled={!canEdit} onClick={() => void toggleQuestionStatus(question)}>{question.status === "disabled" ? "恢复" : "停用"}</button></td></tr>)}</tbody></table></div>}
       </section>}
 
       {view === "imports" && <section className="admin-panel table-panel">
@@ -910,7 +913,7 @@ export default function QuestionBankManager({
           const uploadPercent = Math.round((Number(item.uploaded_rows || 0) / Math.max(1, Number(item.total_rows || 0))) * 100);
           const processPercent = Math.round((Number(item.processed_rows || 0) / Math.max(1, Number(item.total_rows || 0))) * 100);
           const statusLabel = item.status === "uploading" ? "等待完整上传" : item.status === "queued" ? "后台排队" : item.status === "processing" ? "后台处理中" : item.status === "cancelling" ? "正在取消" : item.status === "cancelled" ? "已取消" : item.status === "completed" ? "已完成" : item.status === "failed" ? "系统处理失败" : "完成但有错行";
-          return <tr key={item.id}><td>{new Date(item.created_at).toLocaleString("zh-CN")}</td><td><b>{item.bank_name}</b><small>{item.file_name}</small></td><td>{item.uploaded_rows}/{item.total_rows} 行<small>{uploadPercent}% · {item.uploaded_chunks}/{item.total_chunks} 分块</small></td><td>{item.imported_rows} 成功 / {item.failed_rows} 失败<small>{processPercent}% · 文件内重复 {item.duplicate_rows || 0}</small></td><td><span className={`status ${item.status}`}>{statusLabel}</span></td><td className="preview-text">{item.error_summary ? <details><summary>查看原因</summary><pre style={{ whiteSpace: "pre-wrap", maxWidth: 320 }}>{item.error_summary}</pre></details> : "—"}</td><td><div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          return <tr key={item.id}><td>{new Date(item.created_at).toLocaleString("zh-CN")}</td><td><b>{item.bank_name}</b><small>{item.file_name}</small><small>重复策略：{item.duplicate_strategy === "replace_external_metrics" ? "外部样本替换" : item.duplicate_strategy === "preserve_metrics" ? "保留现有拿分率" : "拒绝覆盖"}</small></td><td>{item.uploaded_rows}/{item.total_rows} 行<small>{uploadPercent}% · {item.uploaded_chunks}/{item.total_chunks} 分块</small></td><td>{item.imported_rows} 成功 / {item.failed_rows} 失败<small>{processPercent}% · 文件内重复 {item.duplicate_rows || 0}</small></td><td><span className={`status ${item.status}`}>{statusLabel}</span></td><td className="preview-text">{item.error_summary ? <details><summary>查看原因</summary><pre style={{ whiteSpace: "pre-wrap", maxWidth: 320 }}>{item.error_summary}</pre></details> : "—"}</td><td><div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {item.status === "uploading" ? <button disabled={!canEdit} onClick={() => retryImport(item)}>选择原文件续传</button> : null}
             {item.status === "failed" ? <button disabled={!canEdit} onClick={() => void retryServerImport(item.id)}>安全重试分块</button> : null}
             {item.status === "completed_with_errors" ? <button disabled={!canEdit} onClick={() => retryImport(item)}>修正文件后新建</button> : null}

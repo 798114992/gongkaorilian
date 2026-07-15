@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Alert, Button, Card, Col, Empty, Input, List, Modal, Row, Space, Statistic, Tag, Typography } from "antd";
-import AdminContentManager, { type AdminContentItem } from "../../AdminContentManager";
+import AdminContentManager, { type AdminContentItem, type ContentImportItem } from "../../AdminContentManager";
 import { useAdminSession } from "../../AdminShell";
 import { adminApi } from "../_components/adminApi";
 import AdminPageFrame from "../_components/AdminPageFrame";
@@ -28,7 +28,8 @@ type ContentReportItem = {
 
 type ContentDomain = {
   content: AdminContentItem[];
-  mediaAssets?: unknown[];
+  contentImports?: ContentImportItem[];
+  mediaAssets?: Array<{ id: string; file_name: string; content_type: string; byte_size: number; access_level: "free" | "member"; url: string }>;
   pagination?: { page?: number; pageSize?: number; total?: number };
   summary?: { statusCounts?: Array<{ status: string; count: number | string }> };
   reports?: ContentReportItem[];
@@ -138,6 +139,8 @@ export default function ContentPage() {
         <AdminContentManager
           scope="content"
           items={data.content}
+          contentImports={data.contentImports}
+          mediaAssets={data.mediaAssets}
           canEdit={canWrite}
           canReview={canReview}
           canPublish={canPublish}

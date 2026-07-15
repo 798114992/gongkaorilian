@@ -16,12 +16,52 @@ import {
   revokeAdminSession,
   writeAdminAudit,
 } from "./admin-auth";
+import {
+  QUESTION_BANK_CAN_PUBLISH_SQL,
+  QUESTION_BANK_PUBLISHABLE_ITEM_SQL,
+  inspectQuestionBankIdentityChange,
+  questionMatchesQuestionBankScope,
+} from "./question-bank-policy.mjs";
+import { RELIABLE_FREQUENCY_SQL } from "./study-insights-sql.mjs";
+import { eligibleFirstAttemptSql, platformScoreRateIncrementSql } from "./score-rate-sql.mjs";
+import { QUESTION_VALUE_METRICS_SQL, questionValueMetricBindsForReview } from "./question-value-metrics-sql.mjs";
+import { ABANDONED_DAILY_CARRY_SQL, summarizeDailyCarry } from "./daily-carry.mjs";
+import { audioReferencePolicy, managedMediaAssetId, mediaUrlForAsset } from "./media-policy.mjs";
+import { validatePublishableContent } from "./content-publishability.mjs";
+import { BOOTSTRAP_MAX_REQUESTS } from "../../bootstrap-retry.mjs";
+import { effectiveDailyPlanMinutes, requiredDailyQuestionCount } from "./daily-plan-policy.mjs";
+import { practiceSessionSubmissionPolicy } from "./practice-session-policy.mjs";
+import {
+  CLAIM_DAILY_FREE_AUDIO_SQL,
+  COUNT_DAILY_FREE_AUDIO_SQL,
+  dailyAudioPreviewIndex,
+} from "./audio-quota.mjs";
 
 export const dynamic = "force-dynamic";
 
 const USER_COOKIE = "gkrl_uid";
+const DEVICE_COOKIE = "gkrl_device";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 const USER_SESSION_SECONDS = 60 * 60 * 24 * 30;
+const ANONYMOUS_SESSION_SECONDS = 60 * 60 * 24 * 7;
+const ANONYMOUS_SESSION_PREFIX = "anon1";
+const DEVICE_SESSION_PREFIX = "device2";
+const LEGACY_DEVICE_SESSION_PREFIX = "device1";
+let processAnonymousSecret: Uint8Array | null = null;
+let defaultsReady = false;
+let defaultsPromise: Promise<void> | null = null;
+const DEFAULT_SEED_VERSION = "2026-07-15-v1";
+const passiveBootstrapWindows = new Map<string, { startedAt: number; count: number }>();
+const publicWriteWindows = new Map<string, { startedAt: number; count: number }>();
+const PUBLIC_ACTIONS = new Set([
+  "saveProgress", "saveExamProfile", "searchJobPositions", "toggleQuestionBank", "getPracticeBatch",
+  "getEssayPracticeBatch", "saveEssayAttempt", "submitPracticeAnswer", "updateQuestionMeta",
+  "submitContentReport", "getPracticeSessionSummary", "recordDailyCheckin", "bindInvite", "redeem",
+  "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
+]);
+const PASSIVE_PUBLIC_ACTIONS = new Set([
+  "searchJobPositions", "getEssayPracticeBatch", "getPracticeSessionSummary", "getCommerceProducts",
+]);
 const TRIAL_DAYS = 3;
 const TRIAL_SOURCE = "welcome-trial-v1";
 const EVENT_NAMES = new Set([
@@ -119,6 +159,85 @@ const QUESTION_IMPORT_CHUNK_QUERY_BUDGET = 15;
 const QUESTION_IMPORT_MAX_CHUNKS_PER_INVOCATION = Math.max(1, Math.floor(
   (QUESTION_IMPORT_D1_QUERY_LIMIT - QUESTION_IMPORT_D1_QUERY_RESERVE) / QUESTION_IMPORT_CHUNK_QUERY_BUDGET,
 ));
+const QUESTION_IMPORT_WRITE_GUARD_SQL = `EXISTS (
+  SELECT 1 FROM question_import_chunks import_lease
+  JOIN question_imports import_job ON import_job.id = import_lease.import_id
+  JOIN question_banks import_bank ON import_bank.id = import_job.bank_id
+  WHERE import_lease.id = ? AND import_lease.import_id = ?
+    AND import_lease.status = 'processing'
+    AND import_job.status = 'processing' AND import_job.cancel_requested = 0
+    AND import_job.lease_token = ? AND import_bank.status = 'draft'
+)`;
+const QUESTION_IMPORT_POST_STATE_SQL = `(q.version = CASE
+    WHEN json_extract(incoming.value, '$.mode') = 'write'
+      THEN CAST(json_extract(incoming.value, '$.expectedVersion') AS INTEGER) + 1
+    ELSE CAST(json_extract(incoming.value, '$.expectedVersion') AS INTEGER) END
+  AND q.subject = json_extract(incoming.value, '$.question.subject')
+  AND q.module = json_extract(incoming.value, '$.question.module')
+  AND COALESCE(q.sub_type, '') = COALESCE(json_extract(incoming.value, '$.question.subType'), '')
+  AND q.stem = json_extract(incoming.value, '$.question.stem')
+  AND q.options_json = COALESCE(json(json_extract(incoming.value, '$.question.options')), '[]')
+  AND COALESCE(q.answer, '') = COALESCE(json_extract(incoming.value, '$.question.answer'), '')
+  AND COALESCE(q.prompt, '') = COALESCE(json_extract(incoming.value, '$.question.prompt'), '')
+  AND q.source = COALESCE(json_extract(incoming.value, '$.question.source'), '')
+  AND q.source_exam_type = COALESCE(json_extract(incoming.value, '$.question.sourceExamType'), '')
+  AND q.source_region = json_extract(incoming.value, '$.question.region')
+  AND q.source_year = CAST(json_extract(incoming.value, '$.question.examYear') AS INTEGER)
+  AND q.source_batch = COALESCE(json_extract(incoming.value, '$.question.sourceBatch'), '')
+  AND (json_extract(incoming.value, '$.mode') = 'reuse' OR (
+    q.truth_verified = 0 AND q.review_status = 'pending_review' AND q.status = 'active'
+    AND q.explanation = COALESCE(json_extract(incoming.value, '$.question.explanation'), '')
+    AND q.technique = COALESCE(json_extract(incoming.value, '$.question.technique'), '')
+    AND q.material = COALESCE(json_extract(incoming.value, '$.question.material'), '')
+    AND COALESCE(q.word_limit, 0) = COALESCE(CAST(json_extract(incoming.value, '$.question.wordLimit') AS INTEGER), 0)
+    AND q.scoring_points_json = COALESCE(json(json_extract(incoming.value, '$.question.scoringPoints')), '[]')
+    AND q.difficulty = COALESCE(json_extract(incoming.value, '$.question.difficulty'), '中等')
+    AND q.frequency = COALESCE(json_extract(incoming.value, '$.question.frequency'), '')
+    AND q.frequency_occurrences = COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyOccurrences') AS INTEGER), 0)
+    AND q.frequency_papers = COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyPapers') AS INTEGER), 0)
+    AND q.frequency_years_json = COALESCE(json(json_extract(incoming.value, '$.question.frequencyYears')), '[]')
+    AND COALESCE(q.frequency_updated_at, '') = COALESCE(json_extract(incoming.value, '$.question.frequencyUpdatedAt'), '')
+    AND q.importance_stars = COALESCE(CAST(json_extract(incoming.value, '$.question.importanceStars') AS INTEGER), 0)
+    AND q.importance_rule_version = COALESCE(json_extract(incoming.value, '$.question.importanceRuleVersion'), '')
+    AND q.importance_reason = COALESCE(json_extract(incoming.value, '$.question.importanceReason'), '')
+    AND q.importance_override_reason = COALESCE(json_extract(incoming.value, '$.question.importanceOverrideReason'), '')
+    AND q.score_rate = COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRate') AS INTEGER), 0)
+    AND q.score_rate_correct = COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRateCorrect') AS INTEGER), 0)
+    AND q.score_rate_attempts = COALESCE(CAST(json_extract(incoming.value, '$.question.scoreRateAttempts') AS INTEGER), 0)
+    AND q.score_rate_scope = COALESCE(json_extract(incoming.value, '$.question.scoreRateScope'), '')
+    AND q.score_rate_source = COALESCE(json_extract(incoming.value, '$.question.scoreRateSource'), 'platform')
+    AND COALESCE(q.score_rate_updated_at, '') = COALESCE(json_extract(incoming.value, '$.question.scoreRateUpdatedAt'), '')
+    AND q.suggested_seconds = COALESCE(CAST(json_extract(incoming.value, '$.question.suggestedSeconds') AS INTEGER), 60)
+    AND q.image_url = COALESCE(json_extract(incoming.value, '$.question.imageUrl'), '')
+    AND q.resource_url = COALESCE(json_extract(incoming.value, '$.question.resourceUrl'), '')
+  )))`;
+const QUESTION_NOT_LOCKED_BY_IMPORT_SQL = `NOT EXISTS (
+  SELECT 1 FROM question_import_codes import_code
+  JOIN question_imports import_job ON import_job.id = import_code.import_id
+  WHERE import_code.question_code = questions.question_code
+    AND import_job.cancel_requested = 0
+    AND import_job.status IN ('uploading','queued','processing','cancelling')
+)`;
+// Large content imports fan out into fixed worker slots after the complete file
+// is durably sealed. Each slot owns at most five chunks, so a 50,000-row
+// position table continues after the browser closes without creating a long
+// recursive Worker call chain. Chunk SQL uses json_each and stays well below
+// D1's per-invocation query and bound-parameter budgets.
+const CONTENT_IMPORT_CHUNK_ROWS = 1_000;
+const CONTENT_IMPORT_MAX_FILE_ROWS = 50_000;
+const CONTENT_IMPORT_MAX_CHUNKS = 75;
+const CONTENT_IMPORT_UPLOAD_BYTES = 700 * 1024;
+const CONTENT_IMPORT_WORKER_SLOTS = 15;
+const CONTENT_IMPORT_CHUNKS_PER_SLOT = 5;
+const CONTENT_IMPORT_DUPLICATE_STRATEGIES = new Set(["reject", "skip", "update_draft"]);
+const CONTENT_IMPORT_WRITE_GUARD_SQL = `EXISTS (
+  SELECT 1 FROM content_import_chunks guarded_chunk
+  JOIN content_imports guarded_job ON guarded_job.id = guarded_chunk.import_id
+  WHERE guarded_chunk.id = ? AND guarded_chunk.lease_token = ?
+    AND guarded_chunk.status = 'processing' AND guarded_job.id = ?
+    AND guarded_job.cancel_requested = 0 AND guarded_job.status IN ('queued','processing')
+)`;
+const QUESTION_IMPORT_DUPLICATE_STRATEGIES = new Set(["reject", "preserve_metrics", "replace_external_metrics"]);
 
 type UserRow = {
   id: string;
@@ -174,6 +293,11 @@ type Identity = {
   signedIn: boolean;
   provider: "chatgpt" | "device";
   displayName: string;
+  persistent: boolean;
+  accountMerged?: boolean;
+  bootstrapDeferred?: boolean;
+  bootstrapStage?: "identity_prepared" | "device_merge_checked" | "account_merged";
+  setCookie?: string[];
 };
 
 type ImportedQuestion = {
@@ -384,12 +508,23 @@ function targetSecondsFor(question: Pick<ResolvedQuestion, "module" | "knowledge
   return 60;
 }
 
-function json(data: unknown, status = 200, cookie?: string) {
+function appendCookies(headers: Headers, cookies?: string | string[]) {
+  for (const cookie of Array.isArray(cookies) ? cookies : cookies ? [cookies] : []) {
+    headers.append("set-cookie", cookie);
+  }
+}
+
+function cookieHeaders(...cookies: Array<string | undefined>) {
+  const values = cookies.filter((cookie): cookie is string => Boolean(cookie));
+  return values.length ? values : undefined;
+}
+
+function json(data: unknown, status = 200, cookies?: string | string[]) {
   const headers = new Headers({
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store, private",
   });
-  if (cookie) headers.set("set-cookie", cookie);
+  appendCookies(headers, cookies);
   return new Response(JSON.stringify(data), { status, headers });
 }
 
@@ -402,12 +537,62 @@ function readCookie(request: Request, name: string) {
   return null;
 }
 
-function validUserId(value: string | null): value is string {
-  return Boolean(value && (/^[0-9a-f-]{36}$/i.test(value) || /^acct_[0-9a-f]{32}$/i.test(value)));
+function allowPassiveBootstrap(request: Request) {
+  const now = Date.now();
+  const forwarded = request.headers.get("cf-connecting-ip")
+    || request.headers.get("x-real-ip")
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "unknown";
+  const current = passiveBootstrapWindows.get(forwarded);
+  if (!current || now - current.startedAt >= 60_000) {
+    passiveBootstrapWindows.set(forwarded, { startedAt: now, count: 1 });
+  } else {
+    current.count += 1;
+    if (current.count > 120) return false;
+  }
+  if (passiveBootstrapWindows.size > 2_048) {
+    for (const [key, value] of passiveBootstrapWindows) {
+      if (now - value.startedAt >= 60_000 || passiveBootstrapWindows.size > 1_900) {
+        passiveBootstrapWindows.delete(key);
+      }
+      if (passiveBootstrapWindows.size <= 1_900) break;
+    }
+  }
+  return true;
 }
 
-function validLegacyDeviceId(value: string | null): value is string {
-  return Boolean(value && /^[0-9a-f-]{36}$/i.test(value));
+function allowPublicWrite(request: Request, action: string) {
+  const now = Date.now();
+  const client = request.headers.get("cf-connecting-ip")
+    || request.headers.get("x-real-ip")
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "unknown";
+  const consume = (key: string, limit: number) => {
+    const current = publicWriteWindows.get(key);
+    if (!current || now - current.startedAt >= 60_000) {
+      publicWriteWindows.set(key, { startedAt: now, count: 1 });
+      return true;
+    }
+    current.count += 1;
+    return current.count <= limit;
+  };
+  // The aggregate bucket prevents an attacker from multiplying the allowance
+  // by cycling through every valid public action. Unknown actions never reach
+  // this function because POST rejects them before identity persistence.
+  if (!consume(`${client}:*`, 240)) return false;
+  const limit = action === "submitPracticeAnswer" ? 120 : action === "trackEvent" ? 180 : 60;
+  if (!consume(`${client}:${action}`, limit)) return false;
+  if (publicWriteWindows.size > 4_096) {
+    for (const [storedKey, value] of publicWriteWindows) {
+      if (now - value.startedAt >= 60_000 || publicWriteWindows.size > 3_800) publicWriteWindows.delete(storedKey);
+      if (publicWriteWindows.size <= 3_800) break;
+    }
+  }
+  return true;
+}
+
+function validUserId(value: string | null): value is string {
+  return Boolean(value && (/^[0-9a-f-]{36}$/i.test(value) || /^acct_[0-9a-f]{32}$/i.test(value)));
 }
 
 function validSessionToken(value: string | null): value is string {
@@ -417,6 +602,16 @@ function validSessionToken(value: string | null): value is string {
 function cookieHeader(request: Request, sessionToken: string) {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return `${USER_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure}`;
+}
+
+function anonymousCookieHeader(request: Request, sessionToken: string) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${USER_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${ANONYMOUS_SESSION_SECONDS}${secure}`;
+}
+
+function deviceCookieHeader(request: Request, token: string) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${DEVICE_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${secure}`;
 }
 
 function normalizeCode(value: string) {
@@ -429,6 +624,80 @@ async function digestText(value: string) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function base64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+function constantTimeStringEqual(first: string, second: string) {
+  if (first.length !== second.length) return false;
+  let difference = 0;
+  for (let index = 0; index < first.length; index += 1) {
+    difference |= first.charCodeAt(index) ^ second.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+async function anonymousSessionSignature(value: string) {
+  const bindings = env as unknown as Record<string, string | undefined>;
+  const configured = bindings.USER_SESSION_SECRET || bindings.INTERNAL_JOB_SECRET || bindings.ADMIN_TOKEN;
+  // A process-local fallback is intentionally non-durable: in local preview a
+  // passive visitor may receive a fresh anonymous id after an isolate restart,
+  // but an unsigned/guessable id is never accepted. Production has a secret.
+  // Workers forbid randomness during module initialization. Production uses
+  // USER_SESSION_SECRET; this lazy fallback exists only for local development
+  // and is initialized inside a request execution context.
+  if (!configured && !processAnonymousSecret) processAnonymousSecret = crypto.getRandomValues(new Uint8Array(32));
+  const secret = configured ? new TextEncoder().encode(configured) : processAnonymousSecret!;
+  const key = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return base64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value))));
+}
+
+async function issueAnonymousSession(userId: string) {
+  const expiresAt = Math.floor(Date.now() / 1000) + ANONYMOUS_SESSION_SECONDS;
+  const value = `${ANONYMOUS_SESSION_PREFIX}.${userId}.${expiresAt}`;
+  return `${value}.${await anonymousSessionSignature(value)}`;
+}
+
+async function anonymousSessionUserId(token: string | null) {
+  if (!token || token.length > 180) return null;
+  const parts = token.split(".");
+  if (parts.length !== 4 || parts[0] !== ANONYMOUS_SESSION_PREFIX || !validUserId(parts[1])) return null;
+  const expiresAt = Number(parts[2]);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isInteger(expiresAt) || expiresAt <= now || expiresAt > now + ANONYMOUS_SESSION_SECONDS + 60) return null;
+  const value = `${parts[0]}.${parts[1]}.${parts[2]}`;
+  const expected = await anonymousSessionSignature(value);
+  return constantTimeStringEqual(expected, parts[3]) ? { userId: parts[1], token } : null;
+}
+
+type DeviceSession = { deviceId: string; lastAccountId: string | null; token: string; linked: boolean };
+
+async function issueDeviceSession(deviceId: string, lastAccountId: string | null) {
+  const expiresAt = Math.floor(Date.now() / 1000) + COOKIE_MAX_AGE;
+  const account = lastAccountId && /^acct_[0-9a-f]{32}$/i.test(lastAccountId) ? lastAccountId : "-";
+  const value = `${DEVICE_SESSION_PREFIX}.${deviceId}.${account}.${expiresAt}`;
+  return `${value}.${await anonymousSessionSignature(value)}`;
+}
+
+async function deviceSessionValue(token: string | null): Promise<DeviceSession | null> {
+  if (!token || token.length > 240) return null;
+  const parts = token.split(".");
+  if (parts.length !== 5 || !new Set([DEVICE_SESSION_PREFIX, LEGACY_DEVICE_SESSION_PREFIX]).has(parts[0])
+    || !/^[0-9a-f-]{36}$/i.test(parts[1])) return null;
+  const lastAccountId = parts[2] === "-" ? null : parts[2];
+  if (lastAccountId && !/^acct_[0-9a-f]{32}$/i.test(lastAccountId)) return null;
+  const expiresAt = Number(parts[3]);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isInteger(expiresAt) || expiresAt <= now || expiresAt > now + COOKIE_MAX_AGE + 60) return null;
+  const value = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
+  const expected = await anonymousSessionSignature(value);
+  return constantTimeStringEqual(expected, parts[4])
+    ? { deviceId: parts[1], lastAccountId, token, linked: parts[0] === DEVICE_SESSION_PREFIX }
+    : null;
+}
+
 function randomSessionToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   let binary = "";
@@ -436,15 +705,22 @@ function randomSessionToken() {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
 }
 
-async function sessionUserId(token: string | null) {
+async function sessionUserId(token: string | null, touch = true) {
   if (!validSessionToken(token)) return null;
   const tokenHash = await digestText(`gongkao-session:${token}`);
-  const row = await getD1().prepare(`SELECT user_id FROM user_sessions
-    WHERE token_hash = ? AND revoked_at IS NULL AND datetime(expires_at) > CURRENT_TIMESTAMP`)
+  // A session row is not identity proof on its own. Older builds could issue a
+  // token after an invite-code collision silently skipped the users insert.
+  // Joining users makes those orphan sessions self-healing instead of causing
+  // every later bootstrap to fail forever.
+  const row = await getD1().prepare(`SELECT s.user_id FROM user_sessions s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.token_hash = ? AND s.revoked_at IS NULL AND datetime(s.expires_at) > CURRENT_TIMESTAMP`)
     .bind(tokenHash).first<{ user_id: string }>();
   if (!row?.user_id) return null;
-  await getD1().prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
-    .bind(tokenHash).run();
+  if (touch) {
+    await getD1().prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
+      .bind(tokenHash).run();
+  }
   return { userId: row.user_id, token };
 }
 
@@ -527,7 +803,7 @@ function displayNameFromHeaders(request: Request) {
 }
 
 async function migrateDeviceUser(deviceId: string, accountId: string) {
-  if (deviceId === accountId || !validUserId(deviceId) || deviceId.startsWith("acct_")) return;
+  if (deviceId === accountId || !validUserId(deviceId) || deviceId.startsWith("acct_")) return false;
   const db = getD1();
   const [device, account, deviceState, accountState] = await Promise.all([
     db.prepare("SELECT membership_type, membership_end FROM users WHERE id = ?").bind(deviceId).first<{ membership_type: string; membership_end: string | null }>(),
@@ -535,7 +811,7 @@ async function migrateDeviceUser(deviceId: string, accountId: string) {
     db.prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(deviceId).first<{ progress_json: string }>(),
     db.prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(accountId).first<{ progress_json: string }>(),
   ]);
-  if (!device) return;
+  if (!device) return false;
   const progress = mergeProgressJson(deviceState?.progress_json, accountState?.progress_json);
   await db.batch([
     db.prepare("UPDATE users SET membership_type = ?, membership_end = ? WHERE id = ?")
@@ -649,6 +925,7 @@ async function migrateDeviceUser(deviceId: string, accountId: string) {
     db.prepare("DELETE FROM user_states WHERE user_id = ?").bind(deviceId),
     db.prepare("DELETE FROM users WHERE id = ?").bind(deviceId),
   ]);
+  return true;
 }
 
 async function grantWelcomeTrial(userId: string) {
@@ -668,20 +945,64 @@ async function grantWelcomeTrial(userId: string) {
   ]);
 }
 
-async function ensureUser(request: Request) {
+async function ensureIdentityRows(userId: string) {
   const db = getD1();
+  const compactId = userId.replaceAll("-", "").replace("acct_", "").toUpperCase();
+  const ensureState = () => db.prepare(`INSERT OR IGNORE INTO user_states (user_id, progress_json)
+    SELECT id, '{}' FROM users WHERE id = ?`).bind(userId).run();
+  // The deterministic first candidate keeps invite links stable while moving
+  // from 32 to 64 bits of identity material. Random suffixes bound the tiny
+  // remaining collision case without ever issuing a session for a missing user.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inviteCode = attempt === 0
+      ? `GK${compactId.slice(0, 16)}`
+      : `GK${compactId.slice(0, 8)}${crypto.randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+    try {
+      // The id conflict branch preserves every historical invite code and also
+      // lets concurrent initialization of the same account converge. A unique
+      // invite-code collision belongs to another account, throws, and retries.
+      const ready = await db.prepare(`INSERT INTO users (id, invite_code) VALUES (?, ?)
+        ON CONFLICT(id) DO UPDATE SET invite_code = users.invite_code
+        RETURNING id`).bind(userId, inviteCode).first<{ id: string }>();
+      if (ready?.id !== userId) continue;
+      await ensureState();
+      return;
+    } catch {
+      // Bounded retry below; no verification, trial or session is issued until
+      // a users row for this exact identity was returned by SQLite.
+    }
+  }
+  throw new Error("IDENTITY_USER_ROW_NOT_CREATED");
+}
+
+async function linkDeviceAccount(deviceHash: string, userId: string) {
+  await getD1().prepare(`INSERT INTO device_account_links (device_hash, user_id, first_seen_at, last_seen_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(device_hash, user_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP`)
+    .bind(deviceHash, userId).run();
+}
+
+async function ensureUser(request: Request, options: { persist?: boolean } = {}) {
+  const db = getD1();
+  const shouldPersist = options.persist !== false;
   const cookieValue = readCookie(request, USER_COOKIE);
-  const activeSession = await sessionUserId(cookieValue);
+  const rawDeviceToken = readCookie(request, DEVICE_COOKIE);
+  const deviceSession = await deviceSessionValue(rawDeviceToken);
+  const deviceId = deviceSession?.deviceId ?? crypto.randomUUID();
+  const activeSession = await sessionUserId(cookieValue, shouldPersist);
+  const anonymousSession = activeSession ? null : await anonymousSessionUserId(cookieValue);
   const email = request.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() ?? "";
   const signedOutAccountSession = Boolean(activeSession?.userId.startsWith("acct_") && !email);
   if (signedOutAccountSession && activeSession) {
     const tokenHash = await digestText(`gongkao-session:${activeSession.token}`);
     await db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(tokenHash).run();
   }
-  // One-way compatibility for the legacy raw device UUID cookie. Account ids
-  // are never trusted without the authenticated identity header.
-  const legacyDeviceId = !activeSession && validLegacyDeviceId(cookieValue) ? cookieValue : null;
-  const cookieUserId = signedOutAccountSession ? legacyDeviceId : activeSession?.userId ?? legacyDeviceId;
+  // A client-supplied raw UUID is never identity proof. Device data may only
+  // flow into an account from an opaque database session or from the signed
+  // anonymous-session envelope verified above.
+  const cookieUserId = signedOutAccountSession
+    ? null
+    : activeSession?.userId ?? anonymousSession?.userId ?? null;
   let identity: Identity;
 
   if (email) {
@@ -691,6 +1012,7 @@ async function ensureUser(request: Request) {
       signedIn: true,
       provider: "chatgpt",
       displayName: displayNameFromHeaders(request),
+      persistent: true,
     };
   } else {
     identity = {
@@ -698,42 +1020,97 @@ async function ensureUser(request: Request) {
       signedIn: false,
       provider: "device",
       displayName: "设备体验用户",
+      persistent: Boolean(activeSession && !signedOutAccountSession),
     };
   }
 
-  const inviteCode = `GK${identity.userId.replaceAll("-", "").replace("acct_", "").slice(0, 8).toUpperCase()}`;
-  await db.batch([
-    db.prepare("INSERT OR IGNORE INTO users (id, invite_code) VALUES (?, ?)").bind(identity.userId, inviteCode),
-    db.prepare("INSERT OR IGNORE INTO user_states (user_id, progress_json) VALUES (?, '{}')").bind(identity.userId),
-  ]);
+  const sessionSwitchedAccountId = identity.signedIn && activeSession?.userId.startsWith("acct_")
+    && activeSession.userId !== identity.userId ? activeSession.userId : "";
+  const deviceSwitchedAccountId = identity.signedIn && deviceSession?.lastAccountId
+    && deviceSession.lastAccountId !== identity.userId ? deviceSession.lastAccountId : "";
+  const switchedAccountId = sessionSwitchedAccountId || deviceSwitchedAccountId;
+  const shouldLinkDeviceAccount = identity.signedIn
+    && (!deviceSession?.linked || deviceSession.lastAccountId !== identity.userId);
+  const deviceHash = shouldLinkDeviceAccount ? await digestText(`gongkao-device:${deviceId}`) : "";
+  const deviceCookieNeeded = !deviceSession
+    || (identity.signedIn && (!deviceSession.linked || deviceSession.lastAccountId !== identity.userId));
+  const nextDeviceToken = deviceCookieNeeded
+    ? await issueDeviceSession(deviceId, identity.signedIn ? identity.userId : deviceSession?.lastAccountId ?? null)
+    : null;
+  const setDeviceCookie = nextDeviceToken ? deviceCookieHeader(request, nextDeviceToken) : undefined;
+
+  // Reading the public bootstrap must not create three durable rows per
+  // cookie-less request. Keep a signed, tamper-evident device identity in an
+  // HttpOnly cookie and materialize it only on the first real learning action.
+  if (!shouldPersist && !identity.signedIn && !identity.persistent) {
+    const mayReuseAnonymous = anonymousSession?.userId === identity.userId;
+    const token = mayReuseAnonymous ? anonymousSession.token : await issueAnonymousSession(identity.userId);
+    return {
+      ...identity,
+      setCookie: cookieHeaders(
+        mayReuseAnonymous ? undefined : anonymousCookieHeader(request, token),
+        setDeviceCookie,
+      ),
+    };
+  }
+  // A valid opaque session proves that the identity rows were materialized
+  // before the token was issued. Reuse it for both reads and writes so a POST
+  // preparation response can be retried exactly once and then reach the
+  // business handler without repeating the preparation stage forever.
+  if (!signedOutAccountSession && activeSession?.userId === identity.userId && !switchedAccountId) {
+    if (shouldLinkDeviceAccount) await linkDeviceAccount(deviceHash, identity.userId);
+    return { ...identity, persistent: true, setCookie: cookieHeaders(setDeviceCookie) };
+  }
+
+  await ensureIdentityRows(identity.userId);
+  identity.persistent = true;
   if (identity.signedIn) {
     await db.prepare("UPDATE users SET verified_at = COALESCE(verified_at, CURRENT_TIMESTAMP) WHERE id = ?")
       .bind(identity.userId).run();
+    if (shouldLinkDeviceAccount) await linkDeviceAccount(deviceHash, identity.userId);
   }
-  const switchedAccountId = identity.signedIn && activeSession?.userId.startsWith("acct_")
-    && activeSession.userId !== identity.userId ? activeSession.userId : "";
   if (switchedAccountId) {
-    // 只记录“同一浏览器会话明确切换两个已验证账号”这一强信号，不做侵入式设备指纹。
-    const switchedTokenHash = await digestText(`gongkao-session:${activeSession!.token}`);
-    await db.batch([
-      db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
-        .bind(switchedTokenHash),
+    // A signed device envelope survives logout, so A -> logout -> B remains a
+    // strong same-browser signal without collecting an invasive fingerprint.
+    const switchStatements: D1PreparedStatement[] = [];
+    if (sessionSwitchedAccountId && activeSession) {
+      const switchedTokenHash = await digestText(`gongkao-session:${activeSession.token}`);
+      switchStatements.push(db.prepare("UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?")
+        .bind(switchedTokenHash));
+    }
+    switchStatements.push(
       db.prepare(`INSERT INTO analytics_events (user_id, event_name, event_data)
         VALUES (?, 'account_switch_detected', ?)`).bind(identity.userId,
-        JSON.stringify({ otherUserId: switchedAccountId, signal: "same_browser_account_switch" })),
+        JSON.stringify({ otherUserId: switchedAccountId, signal: "signed_device_account_switch" })),
       db.prepare(`INSERT INTO analytics_events (user_id, event_name, event_data)
         VALUES (?, 'account_switch_detected', ?)`).bind(switchedAccountId,
-        JSON.stringify({ otherUserId: identity.userId, signal: "same_browser_account_switch" })),
-    ]);
+        JSON.stringify({ otherUserId: identity.userId, signal: "signed_device_account_switch" })),
+    );
+    await db.batch(switchStatements);
   }
-  if (identity.signedIn && validUserId(cookieUserId) && cookieUserId !== identity.userId) {
-    await migrateDeviceUser(cookieUserId, identity.userId);
-  }
+  const deviceMergeAttempted = Boolean(identity.signedIn && validUserId(cookieUserId)
+    && !cookieUserId.startsWith("acct_") && cookieUserId !== identity.userId);
+  const accountMerged = deviceMergeAttempted
+    ? await migrateDeviceUser(cookieUserId!, identity.userId)
+    : false;
   if (identity.signedIn) await grantWelcomeTrial(identity.userId);
   const mayReuseSession = !signedOutAccountSession && activeSession?.userId === identity.userId;
   const sessionToken = mayReuseSession ? activeSession.token : await issueUserSession(identity.userId);
-  const setCookie = mayReuseSession ? undefined : cookieHeader(request, sessionToken);
-  return { ...identity, setCookie };
+  const setCookie = cookieHeaders(
+    mayReuseSession ? undefined : cookieHeader(request, sessionToken),
+    setDeviceCookie,
+  );
+  // This branch initialized identity rows, may have granted the welcome trial,
+  // and issued a new opaque session. It must never continue into the read-heavy
+  // bootstrap in the same D1 invocation. A missing anonymous device row still
+  // counts as a completed merge check and is safe to retry with the new cookie.
+  return {
+    ...identity,
+    setCookie,
+    accountMerged,
+    bootstrapDeferred: true,
+    bootstrapStage: accountMerged ? "account_merged" : deviceMergeAttempted ? "device_merge_checked" : "identity_prepared",
+  };
 }
 
 async function seedDefaults() {
@@ -753,30 +1130,53 @@ async function seedDefaults() {
     db.prepare("UPDATE redemption_codes SET status = 'disabled' WHERE batch_name = '内测演示码'"),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('gk-2027', '2027国考行测', 'national', NULL, 2027, '行测', '按国考命题结构整理，支持后台持续导入真题与专项题。', 'navy', 'published')`),
+      VALUES ('gk-2027', '2027国考行测', 'national', NULL, 2027, '行测', '按国考命题结构整理，支持后台持续导入真题与专项题。', 'navy', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('joint-provincial-2027', '2027省考联考通用', 'special', '多省', 2027, '行测', '用于省考共通模块训练，各省差异题仍放在对应省份独立题库。', 'green', 'published')`),
+      VALUES ('joint-provincial-2027', '2027省考联考通用', 'special', '多省', 2027, '行测', '用于省考共通模块训练，各省差异题仍放在对应省份独立题库。', 'green', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('gd-2027', '2027广东省考行测', 'provincial', '广东', 2027, '行测', '广东省考独立题库，题型、题量与考情单独维护。', 'orange', 'published')`),
+      VALUES ('gd-2027', '2027广东省考行测', 'provincial', '广东', 2027, '行测', '广东省考独立题库，题型、题量与考情单独维护。', 'orange', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('zj-2027', '2027浙江省考行测', 'provincial', '浙江', 2027, '行测', '浙江省考独立题库，题型、题量与考情单独维护。', 'blue', 'published')`),
+      VALUES ('zj-2027', '2027浙江省考行测', 'provincial', '浙江', 2027, '行测', '浙江省考独立题库，题型、题量与考情单独维护。', 'blue', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('sd-2027', '2027山东省考行测', 'provincial', '山东', 2027, '行测', '山东省考独立题库，题型、题量与考情单独维护。', 'green', 'published')`),
+      VALUES ('sd-2027', '2027山东省考行测', 'provincial', '山东', 2027, '行测', '山东省考独立题库，题型、题量与考情单独维护。', 'green', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('police-post', '公安岗专项', 'special', '全国', NULL, '综合', '面向公安岗考生的专业科目与岗位专项练习。', 'navy', 'published')`),
+      VALUES ('police-post', '公安岗专项', 'special', '全国', NULL, '综合', '面向公安岗考生的专业科目与岗位专项练习。', 'navy', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('law-enforcement', '行政执法专项', 'special', '全国', NULL, '综合', '聚焦行政执法类岗位高频法律与实务考点。', 'orange', 'published')`),
+      VALUES ('law-enforcement', '行政执法专项', 'special', '全国', NULL, '综合', '聚焦行政执法类岗位高频法律与实务考点。', 'orange', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('public-institution', '事业单位职测', 'special', '全国', NULL, '综合', '事业单位职测与综合应用能力日练入口。', 'blue', 'published')`),
+      VALUES ('public-institution', '事业单位职测', 'special', '全国', NULL, '综合', '事业单位职测与综合应用能力日练入口。', 'blue', 'draft')`),
   ]);
   await seedDefaultContentOnce();
+  await db.prepare(`INSERT INTO configs (key, value, updated_at)
+    VALUES ('default_system_seed_version', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+    .bind(DEFAULT_SEED_VERSION).run();
+}
+
+async function ensureDefaults() {
+  if (defaultsReady) return;
+  if (!defaultsPromise) {
+    defaultsPromise = (async () => {
+      // One cold-isolate read replaces the old unconditional 15+ statement seed
+      // batch. Production migrations write this marker after provisioning all
+      // defaults, keeping a signed-in bootstrap inside D1 Free's query budget.
+      const marker = await getD1().prepare("SELECT value FROM configs WHERE key = 'default_system_seed_version'")
+        .first<{ value: string }>();
+      if (marker?.value !== DEFAULT_SEED_VERSION) await seedDefaults();
+      defaultsReady = true;
+    })().catch((error) => {
+      defaultsPromise = null;
+      throw error;
+    });
+  }
+  await defaultsPromise;
 }
 
 async function seedDefaultContentOnce() {
@@ -793,25 +1193,25 @@ async function seedDefaultContentOnce() {
   const statements: D1PreparedStatement[] = [];
   for (const day of defaultPracticeDays) {
     statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
-      (content_type, content_key, title, payload_json, status, version)
-      VALUES ('practice_day', ?, ?, ?, 'published', 1)`)
-      .bind(`day-${day.day}`, `第${day.day}天日练`, JSON.stringify({ ...day, questions: [] })));
+      (content_type, content_key, title, payload_json, access_level, status, version)
+      VALUES ('practice_day', ?, ?, ?, ?, 'published', 1)`)
+      .bind(`day-${day.day}`, `第${day.day}天日练`, JSON.stringify({ ...day, questions: [] }), day.day === 1 ? "free" : "member"));
   }
   for (const track of defaultAudioTracks) {
     statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
-      (content_type, content_key, title, payload_json, status, version)
-      VALUES ('audio_track', ?, ?, ?, 'published', 1)`)
-      .bind(track.id, track.title, JSON.stringify(track)));
+      (content_type, content_key, title, payload_json, access_level, status, version)
+      VALUES ('audio_track', ?, ?, ?, ?, 'draft', 1)`)
+      .bind(track.id, track.title, JSON.stringify(track), track.id === defaultAudioTracks[0]?.id ? "free" : "member"));
   }
   for (const preset of presets) {
     statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
-      (content_type, content_key, title, payload_json, status, version)
-      VALUES ('drill_preset', ?, ?, ?, 'published', 1)`)
+      (content_type, content_key, title, payload_json, access_level, status, version)
+      VALUES ('drill_preset', ?, ?, ?, 'free', 'published', 1)`)
       .bind(`drill-${preset.id}`, preset.title, JSON.stringify(preset)));
   }
   statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
-    (content_type, content_key, title, payload_json, status, version)
-    VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'published', 1)`)
+    (content_type, content_key, title, payload_json, access_level, status, version)
+    VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'free', 'published', 1)`)
     .bind(JSON.stringify(DEFAULT_STRATEGY)));
   statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_content_seed_version', '1')"));
   await db.batch(statements);
@@ -1085,7 +1485,7 @@ function questionValueRank(
   return normalizedScorePenalty + normalizedFrequencyPenalty + normalizedImportancePenalty;
 }
 
-function questionFingerprint(question: ResolvedQuestion) {
+function questionFingerprint(question: Pick<ResolvedQuestion, "stem" | "options">) {
   const compact = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[\s，。；：、,.!?！？:;"'“”‘’（）()【】\[\]]+/g, "");
   return `${compact(question.stem)}|${question.options.map(compact).join("|")}`;
 }
@@ -1130,7 +1530,7 @@ async function selectedBankCodes(userId: string) {
 }
 
 async function effectivePracticeBankCodes(userId: string, selected: string[], membershipActive: boolean) {
-  if (membershipActive || selected.length <= 1) return selected;
+  if (membershipActive) return selected;
   const row = await getD1().prepare(`SELECT uqb.bank_code
     FROM user_question_banks uqb
     JOIN question_banks qb ON qb.bank_code = uqb.bank_code AND qb.status = 'published'
@@ -1139,10 +1539,90 @@ async function effectivePracticeBankCodes(userId: string, selected: string[], me
       JOIN questions q ON q.id = qbi.question_id
       WHERE qbi.bank_id = qb.id AND q.status = 'active'
         AND q.truth_verified = 1 AND q.review_status = 'approved'
-        AND ((qb.subject = '申论' AND q.subject = '申论') OR (qb.subject <> '申论' AND q.subject = '行测'))
+        AND qb.subject <> '申论' AND q.subject = '行测'
     )
     ORDER BY uqb.added_at, uqb.bank_code LIMIT 1`).bind(userId).first<{ bank_code: string }>();
-  return row?.bank_code ? [row.bank_code] : selected.slice(0, 1);
+  return row?.bank_code ? [row.bank_code] : [];
+}
+
+const DAILY_REQUIRED_QUESTION_COUNT = 5;
+const DAILY_READINESS_SCAN_LIMIT = 640;
+
+type DailyReadiness = {
+  ready: boolean;
+  distinctQuestionCount: number;
+  requiredQuestionCount: number;
+  effectiveBankCodes: string[];
+  planMinutes: number;
+};
+
+async function loadDailyReadiness(userId: string, membershipActive: boolean, requestedPlanMinutes?: unknown): Promise<DailyReadiness> {
+  const db = getD1();
+  const [profile, strategy] = await Promise.all([
+    loadExamProfile(userId),
+    membershipActive ? loadStrategyConfig() : Promise.resolve(null),
+  ]);
+  const planMinutes = effectiveDailyPlanMinutes(profile.dailyMinutes, requestedPlanMinutes, membershipActive);
+  const requiredQuestionCount = requiredDailyQuestionCount(strategy, planMinutes, membershipActive);
+  if (!profile.onboarded) {
+    return { ready: false, distinctQuestionCount: 0, requiredQuestionCount, effectiveBankCodes: [], planMinutes };
+  }
+  // A main national/provincial bank must match one of the learner's real
+  // targets and recent exam years. Special banks are auxiliary only: they can
+  // enrich a valid target prescription, but can never make an unrelated or
+  // special-only shelf appear ready.
+  const banks = await db.prepare(`SELECT qb.bank_code, qb.exam_type, qb.province, qb.exam_year, qb.subject
+    FROM user_question_banks uqb
+    JOIN question_banks qb ON qb.bank_code = uqb.bank_code
+    WHERE uqb.user_id = ? AND qb.status = 'published' AND qb.subject <> '申论'
+      AND EXISTS (
+        SELECT 1 FROM question_bank_items qbi
+        JOIN questions q ON q.id = qbi.question_id
+        WHERE qbi.bank_id = qb.id AND q.status = 'active' AND q.subject = '行测'
+          AND q.truth_verified = 1 AND q.review_status = 'approved'
+      )
+    ORDER BY uqb.added_at, uqb.bank_code LIMIT 64`)
+    .bind(userId).all<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string }>();
+  const targetBanks = banks.results.filter((bank) => bankMatchesDailyTarget(bank, profile));
+  const auxiliaryBanks = targetBanks.length
+    ? banks.results.filter((bank) => bank.exam_type === "special")
+    : [];
+  const effectiveRows = membershipActive ? [...targetBanks, ...auxiliaryBanks] : targetBanks.slice(0, 1);
+  const effectiveBankCodes = Array.from(new Set(effectiveRows.map((row) => String(row.bank_code))));
+  if (!effectiveBankCodes.length) {
+    return { ready: false, distinctQuestionCount: 0, requiredQuestionCount, effectiveBankCodes, planMinutes };
+  }
+  const placeholders = effectiveBankCodes.map(() => "?").join(",");
+  // Exact duplicates are collapsed in SQLite first; the bounded result is then
+  // passed through the same NFKC/punctuation fingerprint used by daily grouping.
+  // 640 is the existing candidate ceiling and prevents bootstrap from reading an
+  // unbounded member library merely to decide a five-question readiness gate.
+  const rows = await db.prepare(`WITH exact_content AS (
+      SELECT MIN(q.id) AS id, q.stem, q.options_json
+      FROM questions q
+      JOIN question_bank_items qbi ON qbi.question_id = q.id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE qb.bank_code IN (${placeholders}) AND qb.status = 'published' AND qb.subject <> '申论'
+        AND q.status = 'active' AND q.subject = '行测'
+        AND q.truth_verified = 1 AND q.review_status = 'approved'
+      GROUP BY q.stem, q.options_json
+      ORDER BY MIN(q.id)
+      LIMIT ${DAILY_READINESS_SCAN_LIMIT}
+    )
+    SELECT stem, options_json FROM exact_content ORDER BY id`)
+    .bind(...effectiveBankCodes).all<{ stem: string; options_json: string }>();
+  const fingerprints = new Set(rows.results.map((row) => questionFingerprint({
+    stem: String(row.stem),
+    options: parseOptions(String(row.options_json ?? "[]")),
+  })));
+  const distinctQuestionCount = fingerprints.size;
+  return {
+    ready: distinctQuestionCount >= requiredQuestionCount,
+    distinctQuestionCount,
+    requiredQuestionCount,
+    effectiveBankCodes,
+    planMinutes,
+  };
 }
 
 async function loadDailyUsage(userId: string, dateKey = chinaDateKey()) {
@@ -1150,6 +1630,17 @@ async function loadDailyUsage(userId: string, dateKey = chinaDateKey()) {
     WHERE user_id = ? AND date_key = ?`).bind(userId, dateKey)
     .first<{ practice_count: number; audio_count: number }>();
   return { practice: Number(row?.practice_count ?? 0), audio: Number(row?.audio_count ?? 0) };
+}
+
+async function grantDailyFreeAudio(userId: string, assetId: string, dateKey = chinaDateKey()) {
+  const db = getD1();
+  await db.batch([
+    db.prepare(CLAIM_DAILY_FREE_AUDIO_SQL).bind(userId, dateKey, assetId, userId),
+    db.prepare(COUNT_DAILY_FREE_AUDIO_SQL).bind(userId, dateKey),
+  ]);
+  const granted = await db.prepare(`SELECT asset_id FROM user_daily_audio_access
+    WHERE user_id = ? AND date_key = ?`).bind(userId, dateKey).first<{ asset_id: string }>();
+  return granted?.asset_id === assetId;
 }
 
 type PracticeSessionRow = {
@@ -1162,6 +1653,25 @@ type PracticeSessionRow = {
   review_added: number;
   elapsed_seconds: number;
 };
+
+type DailyCarry = {
+  answered: number;
+  correct: number;
+  reviewAdded: number;
+  elapsedSeconds: number;
+  questionCodes: string[];
+};
+
+const EMPTY_DAILY_CARRY: DailyCarry = {
+  answered: 0, correct: 0, reviewAdded: 0, elapsedSeconds: 0, questionCodes: [],
+};
+
+async function loadAbandonedDailyCarry(userId: string, dateKey: string, maxQuestions = 20): Promise<DailyCarry> {
+  const rows = await getD1().prepare(ABANDONED_DAILY_CARRY_SQL).bind(userId, dateKey).all<{
+      question_code: string; is_correct: number; uncertain: number; confidence: string; overtime: number; duration_ms: number;
+    }>();
+  return summarizeDailyCarry(rows.results, maxQuestions);
+}
 
 function safeStringArray(value: unknown, max = 100) {
   try {
@@ -1230,6 +1740,21 @@ function bankMatchesTargets(bank: { exam_type: string; province?: string | null 
   return profile.targets.some((target) => target.examType === "省考" && normalizeProvince(target.province) === province);
 }
 
+function bankMatchesDailyTarget(
+  bank: { exam_type: string; province?: string | null; exam_year?: number | null },
+  profile: LoadedExamProfile,
+) {
+  if (bank.exam_type === "special") return false;
+  const bankYear = Number(bank.exam_year ?? 0);
+  return profile.targets.some((target) => {
+    const scopeMatches = bank.exam_type === "national"
+      ? target.examType === "国考"
+      : bank.exam_type === "provincial" && target.examType === "省考"
+        && normalizeProvince(bank.province) === normalizeProvince(target.province);
+    return scopeMatches && (!bankYear || (bankYear <= target.examYear && bankYear >= target.examYear - 4));
+  });
+}
+
 function displayExamType(value: string) {
   return value === "national" ? "国考" : value === "provincial" ? "省考" : "专项";
 }
@@ -1247,9 +1772,9 @@ function normalizeProvince(value: unknown) {
     .replace(/省$|市$/, "");
 }
 
-async function loadQuestionBanks(userId: string) {
+async function loadQuestionBanks(userId: string, membershipActiveOverride?: boolean) {
   const db = getD1();
-  const [selected, rows, profile] = await Promise.all([
+  const [selected, rows, profile, membership] = await Promise.all([
     selectedBankCodes(userId),
     db.prepare(`SELECT qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year, qb.subject,
       qb.description, qb.cover_color,
@@ -1261,17 +1786,24 @@ async function loadQuestionBanks(userId: string) {
       COUNT(DISTINCT CASE WHEN datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP THEN q.question_code END) AS due_count
       FROM question_banks qb
       LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
-      LEFT JOIN questions q ON q.id = qbi.question_id AND q.status = 'active'
-        AND q.truth_verified = 1 AND q.review_status = 'approved'
+      LEFT JOIN questions q ON q.id = qbi.question_id
+        AND ${QUESTION_BANK_PUBLISHABLE_ITEM_SQL}
       LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
       WHERE qb.status = 'published'
-      GROUP BY qb.id ORDER BY qb.updated_at DESC`).bind(userId).all<{
+      GROUP BY qb.id HAVING COUNT(DISTINCT q.id) > 0
+      ORDER BY qb.updated_at DESC`).bind(userId).all<{
         bank_code: string; name: string; exam_type: string; province: string | null; exam_year: number | null;
         subject: string; description: string; cover_color: string; practice_question_count: number; essay_question_count: number; studied_count: number; mastered_count: number;
         weak_count: number; due_count: number;
       }>(),
     loadExamProfile(userId),
+    membershipActiveOverride === undefined ? userMembership(userId) : Promise.resolve(null),
   ]);
+  const membershipActive = membershipActiveOverride ?? membershipIsActive(membership);
+  const availableFreeBankCode = membershipActive ? "" : selected.find((code) => {
+    const row = rows.results.find((candidate) => candidate.bank_code === code);
+    return Boolean(row && row.subject !== "申论" && Number(row.practice_question_count) > 0);
+  }) ?? "";
   return rows.results.map((row) => {
     const targetMatch = bankMatchesTargets(row, profile);
     const matchingTarget = profile.targets.find((target) => row.exam_type === "national"
@@ -1283,6 +1815,8 @@ async function loadQuestionBanks(userId: string) {
     const mismatchReason = targetMatch ? "" : row.exam_type === "provincial"
       ? `添加后会同步加入“${normalizeProvince(row.province) || "该省"}省考”报考目标。`
       : row.exam_type === "national" ? "添加后会同步加入“国考”报考目标。" : "可作为专项题库加入。";
+    const added = selected.includes(row.bank_code);
+    const practiceAvailable = added && (membershipActive || row.bank_code === availableFreeBankCode);
     return {
     code: row.bank_code,
     name: row.name,
@@ -1297,7 +1831,9 @@ async function loadQuestionBanks(userId: string) {
     masteredCount: Number(row.mastered_count),
     weakCount: Number(row.weak_count),
     dueCount: Number(row.due_count),
-    added: selected.includes(row.bank_code),
+    added,
+    practiceAvailable,
+    locked: added && !practiceAvailable,
     targetMatch,
     recommended,
     scopeLabel,
@@ -1363,23 +1899,28 @@ async function loadStudyInsights(userId: string) {
       FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}
         AND date(answered_at, '+8 hours') BETWEEN date('now', '+8 hours', '-13 days') AND date('now', '+8 hours', '-7 days')`).bind(userId)
       .first<{ total: number; correct: number; active_days: number; avg_duration: number; wrong_total: number; repeated_wrong: number }>(),
-    db.prepare(`SELECT DISTINCT q.knowledge_point FROM practice_attempts pa
+    db.prepare(`SELECT DISTINCT COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) AS knowledge_point
+      FROM practice_attempts pa
       JOIN questions q ON q.question_code = pa.question_code
-      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND q.frequency_reliable = 1
-        AND q.frequency_occurrences >= 3 AND TRIM(q.knowledge_point) <> ''
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND ${RELIABLE_FREQUENCY_SQL}
+        AND q.frequency_occurrences >= 3
+        AND COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) IS NOT NULL
         AND date(pa.answered_at, '+8 hours') = date('now', '+8 hours')
       ORDER BY q.frequency_occurrences DESC LIMIT 6`).bind(userId).all<{ knowledge_point: string }>(),
-    db.prepare(`SELECT COUNT(DISTINCT q.knowledge_point) AS total FROM practice_attempts pa
+    db.prepare(`SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), ''))) AS total
+      FROM practice_attempts pa
       JOIN questions q ON q.question_code = pa.question_code
-      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND q.frequency_reliable = 1
-        AND q.frequency_occurrences >= 3 AND TRIM(q.knowledge_point) <> ''
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND ${RELIABLE_FREQUENCY_SQL}
+        AND q.frequency_occurrences >= 3
         AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')`).bind(userId).first<{ total: number }>(),
-    db.prepare(`SELECT DISTINCT q.knowledge_point FROM practice_attempts pa
+    db.prepare(`SELECT DISTINCT COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) AS knowledge_point
+      FROM practice_attempts pa
       JOIN questions q ON q.question_code = pa.question_code
       JOIN user_question_progress uqp ON uqp.user_id = pa.user_id AND uqp.question_code = pa.question_code
       WHERE pa.user_id = ? AND pa.apply_status = 'applied' AND uqp.state = 'mastered'
-        AND TRIM(q.knowledge_point) <> '' AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
-      ORDER BY q.knowledge_point LIMIT 5`).bind(userId).all<{ knowledge_point: string }>(),
+        AND COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) IS NOT NULL
+        AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
+      ORDER BY knowledge_point LIMIT 5`).bind(userId).all<{ knowledge_point: string }>(),
   ]);
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
@@ -1541,10 +2082,12 @@ async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
 }
 
 async function loadContent(membershipActive: boolean, profile?: LoadedExamProfile) {
-  const rows = await getD1().prepare(`SELECT content_type, content_key, title, payload_json, version
+  const rows = await getD1().prepare(`SELECT content_type, content_key, title, payload_json, access_level, version
     FROM content_items WHERE content_type <> 'job_position' AND status IN ('published', 'scheduled')
       AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
-    ORDER BY id ASC`).all<{ content_type: string; content_key: string; payload_json: string }>();
+      AND (? = 1 OR access_level = 'free')
+    ORDER BY id ASC`).bind(membershipActive ? 1 : 0)
+    .all<{ content_type: string; content_key: string; payload_json: string; access_level: "free" | "member" }>();
   const dayMap = new Map<string, PracticeDay>();
   const audioMap = new Map<string, AudioTrack>();
   const examEventMap = new Map<string, PublishedExamEvent>();
@@ -1570,7 +2113,18 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
         const day = parsed as PracticeDay;
         dayMap.set(`day-${Number(day.day) || dayMap.size + 1}`, day);
       }
-      if (row.content_type === "audio_track") audioMap.set(row.content_key, parsed as AudioTrack);
+      if (row.content_type === "audio_track") {
+        const track = parsed as AudioTrack;
+        const managedAssetId = managedMediaAssetId(track.audioUrl);
+        audioMap.set(row.content_key, {
+          ...track,
+          // Never send a public/static or third-party audio URL to learners.
+          // Historical rows fall back to the transcript/TTS path until an
+          // operator uploads a managed asset and passes the release gate.
+          audioUrl: managedAssetId ? mediaUrlForAsset(managedAssetId) : undefined,
+          accessLevel: row.access_level,
+        });
+      }
       const envelope: Record<string, unknown> = {
         id: row.content_key,
         contentKey: row.content_key,
@@ -1746,8 +2300,17 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
       wordLimit: Math.max(20, Math.min(5_000, Math.round(Number(source.wordLimit)) || 150)),
     };
   }
-  const practiceDays = Array.from(dayMap.values()).sort((a, b) => a.day - b.day);
+  const practiceDays = Array.from(dayMap.values()).sort((a, b) => a.day - b.day).map((day) => ({
+    ...day,
+    // 正式客观题只能经受控练习 API 下发，避免 bootstrap 预泄露答案/解析。
+    questions: [],
+    // 申论采分点和参考表达只能按服务端阶段解锁；CMS 日历只保留
+    // 非答案型表达素材，不能成为“先看答案”的旁路。
+    essay: { ...day.essay, material: "", prompt: "", reference: "", scoringPoints: [] },
+  }));
   const audioTracks = Array.from(audioMap.values()).sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0));
+  const previewAudioIndex = dailyAudioPreviewIndex(chinaDateKey(), audioTracks.length);
+  const previewAudioTracks = previewAudioIndex >= 0 ? audioTracks.slice(previewAudioIndex, previewAudioIndex + 1) : [];
   const examEvents = Array.from(examEventMap.values()).sort((a, b) => a.eventDate.localeCompare(b.eventDate));
   const examNotices = Array.from(examNoticeMap.values()).sort((a, b) => b.publishDate.localeCompare(a.publishDate));
   const jobPositions = Array.from(jobPositionMap.values()).sort((a, b) => a.targetLabel.localeCompare(b.targetLabel) || a.department.localeCompare(b.department));
@@ -1757,27 +2320,30 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
     examEvents,
     examNotices,
     jobPositions,
-    morningReads,
-    currentAffairs: currentAffairsContent,
-    essayMicros,
+    // 原始 CMS 载荷不直接下发。运营内容先被上方的固定交互 DTO
+    // 归一化，避免把未使用字段和答案型字段一并暴露给浏览器。
+    morningReads: [],
+    currentAffairs: [],
+    essayMicros: [],
     drillPresets: drillPresets.sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0)),
     strategyConfig,
   };
   if (membershipActive) return { ...common, access: "premium" as const };
 
-  const previewDay = practiceDays[0] ? clone(practiceDays[0]) : null;
-  if (previewDay) {
-    // Free users are limited by server-side daily usage, not by hiding the
-    // explanation of a question they have already answered.
-    previewDay.questions = previewDay.questions.slice(0, 5);
-    previewDay.currentAffairs = previewDay.currentAffairs.slice(0, 3);
-    previewDay.essay.expressions = previewDay.essay.expressions.slice(0, 1);
-  }
+  const previewDays = practiceDays.map((day) => ({
+    ...clone(day),
+    // 申论正式作答是会员能力；即便运营把一条日历素材设为免费，
+    // bootstrap 也只下发表达素材，绝不下发题干、采分点或参考答案。
+    essay: { expressions: [], material: "", prompt: "", reference: "", scoringPoints: [], wordLimit: 0 },
+  }));
   return {
     ...common,
-    practiceDays: previewDay ? [previewDay] : [],
-    audioTracks: audioTracks.slice(0, 1),
-    jobPositions: jobPositions.slice(0, 12),
+    practiceDays: previewDays,
+    audioTracks: previewAudioTracks,
+    jobPositions: [],
+    morningReads: [],
+    currentAffairs: [],
+    essayMicros: [],
     access: "preview" as const,
   };
 }
@@ -1822,20 +2388,24 @@ function parseJobPosition(contentKey: string, payloadJson: string, dataVersion =
 }
 
 async function searchJobPositions(userId: string, payload: Record<string, unknown>) {
-  const profile = await loadExamProfile(userId);
+  const [profile, membership] = await Promise.all([loadExamProfile(userId), userMembership(userId)]);
+  const membershipActive = membershipIsActive(membership);
   const allowedTargets = new Set(profile.targets.map((target) => target.code));
   const requestedTargets = Array.isArray(payload.targetCodes)
     ? payload.targetCodes.map(String).filter((code) => allowedTargets.has(code))
     : [];
-  const targetCodes = (requestedTargets.length ? requestedTargets : Array.from(allowedTargets)).slice(0, 32);
+  const targetCodes = (requestedTargets.length ? requestedTargets : Array.from(allowedTargets)).slice(0, membershipActive ? 32 : 1);
   if (!targetCodes.length) return json({ positions: [], total: 0, page: 1, pageSize: 30 });
-  const candidate = payload.candidateProfile && typeof payload.candidateProfile === "object"
+  const candidate = membershipActive && payload.candidateProfile && typeof payload.candidateProfile === "object"
     ? payload.candidateProfile as Record<string, unknown> : {};
-  const keyword = trimmed(payload.keyword, 80);
-  const pageSize = Math.max(1, Math.min(50, Math.floor(Number(payload.pageSize)) || 30));
-  const page = Math.max(1, Math.floor(Number(payload.page)) || 1);
-  const clauses = [`json_extract(payload_json, '$.targetCode') IN (${targetCodes.map(() => "?").join(",")})`];
-  const bindings: unknown[] = [...targetCodes];
+  const keyword = membershipActive ? trimmed(payload.keyword, 80) : "";
+  const pageSize = membershipActive ? Math.max(1, Math.min(50, Math.floor(Number(payload.pageSize)) || 30)) : 3;
+  const page = membershipActive ? Math.max(1, Math.floor(Number(payload.page)) || 1) : 1;
+  const clauses = [
+    "(? = 1 OR ci.access_level = 'free')",
+    `json_extract(payload_json, '$.targetCode') IN (${targetCodes.map(() => "?").join(",")})`,
+  ];
+  const bindings: unknown[] = [membershipActive ? 1 : 0, ...targetCodes];
   const addInclusiveFilter = (field: string, value: unknown) => {
     const normalized = trimmed(value, 80);
     if (!normalized) return;
@@ -1861,30 +2431,101 @@ async function searchJobPositions(userId: string, payload: Record<string, unknow
     bindings.push(...Array(5).fill(`%${keyword}%`));
   }
   const rows = await getD1().prepare(`SELECT content_key, payload_json, version, updated_at, COUNT(*) OVER() AS total_count
-    FROM content_items WHERE content_type = 'job_position' AND status IN ('published', 'scheduled')
+    FROM content_items ci WHERE content_type = 'job_position' AND status IN ('published', 'scheduled')
       AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
       AND ${clauses.join(" AND ")}
     ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`)
     .bind(...bindings, pageSize, (page - 1) * pageSize).all<{ content_key: string; payload_json: string; version: number; updated_at: string; total_count: number }>();
   const positions = rows.results.map((row) => parseJobPosition(row.content_key, row.payload_json, row.version, row.updated_at))
     .filter((item): item is PublishedJobPosition => Boolean(item));
-  return json({ positions, total: Number(rows.results[0]?.total_count ?? 0), page, pageSize });
+  return json({
+    positions,
+    total: Number(rows.results[0]?.total_count ?? 0),
+    page,
+    pageSize,
+    limited: !membershipActive,
+    limits: membershipActive ? null : { targetCount: 1, resultCount: 3, personalizedFilters: false, comparison: false },
+  });
 }
 
 async function bootstrap(request: Request) {
   await ensureSchema();
-  await seedDefaults();
-  const identity = await ensureUser(request);
-  if (identity.signedIn) await reconcileInviteReward(identity.userId);
+  await ensureDefaults();
+  const identity = await ensureUser(request, { persist: false });
+  if (identity.bootstrapDeferred) {
+    // Identity creation, welcome-trial grant, new session issuance and every
+    // device→account merge check are intentionally isolated from the full
+    // response. The next request uses the opaque session cookie just issued.
+    return json({
+      retryBootstrap: true,
+      bootstrapStage: identity.bootstrapStage ?? "identity_prepared",
+      accountMerged: Boolean(identity.accountMerged),
+      maxBootstrapRequests: BOOTSTRAP_MAX_REQUESTS,
+    }, 200, identity.setCookie);
+  }
+  if (!identity.persistent && !identity.signedIn) {
+    const examProfile: LoadedExamProfile = {
+      onboarded: false,
+      dailyMinutes: 30,
+      targets: [],
+      examType: "国考",
+      province: "",
+      examYear: new Date().getFullYear() + 1,
+      examDate: null,
+    };
+    const [content, questionBanks] = await Promise.all([
+      loadContent(false, examProfile),
+      loadQuestionBanks(identity.userId, false),
+    ]);
+    return json({
+      user: {
+        id: identity.userId,
+        inviteCode: `GK${identity.userId.replaceAll("-", "").slice(0, 8).toUpperCase()}`,
+        membershipType: "duration",
+        membershipEnd: null,
+        membershipActive: false,
+        signedIn: false,
+        authProvider: identity.provider,
+        displayName: identity.displayName,
+      },
+      content,
+      progress: { checkins: [] },
+      progressVersion: 0,
+      examProfile,
+      questionBanks,
+      dailyReadiness: { ready: false, distinctQuestionCount: 0, requiredQuestionCount: 5, effectiveBankCodes: [], planMinutes: 10 },
+      dailyPracticeCompleted: false,
+      studyInsights: {
+        total: 0, accuracy: 0, avgSeconds: 0, uncertainCount: 0, overtimeCount: 0, dueCount: 0,
+        stateCounts: { learning: 0, weak: 0, mastered: 0 }, modules: [], recent: [],
+        today: { total: 0, correct: 0, repairedDue: 0, wrong: 0, hesitant: 0, guessed: 0, overtime: 0, avgSeconds: 0, accuracyDelta: null, avgSecondsDelta: null, highFrequencyPoints: [] },
+        weekly: { total: 0, accuracy: 0, activeDays: 0, avgSeconds: 0, highFrequencyCoverage: 0, repeatErrorRate: null, accuracyDelta: null, avgSecondsDelta: null, repeatErrorRateDelta: null, masteredPoints: [], nextIssues: [] },
+        tomorrowPlan: { dueCount: 0, focusModule: null, focusQuestionCount: 0, estimatedMinutes: 5, taskText: "先完成备考组合配置，再开始首组日练。" },
+      },
+      wrongAudioQuestions: [],
+      dueEssayRewrites: [],
+      todayKey: chinaDateKey(),
+      ledger: [],
+      inviteStats: { total: 0, rewarded: 0, pending: 0 },
+      inviteConfig: { rewardDays: 7, inviteeRewardDays: 3, monthlyCap: 30 },
+    }, 200, identity.setCookie);
+  }
+  if (identity.signedIn && await reconcileInviteReward(identity.userId)) {
+    // Reward claiming can consume a dozen D1 statements. Return immediately;
+    // the idempotent relation state makes the next request read-only here.
+    return json({
+      retryBootstrap: true,
+      bootstrapStage: "invite_reconciled",
+      accountMerged: false,
+      maxBootstrapRequests: BOOTSTRAP_MAX_REQUESTS,
+    }, 200, identity.setCookie);
+  }
   const db = getD1();
-  // 若客户端在会话完成后、写打卡前断网，下一次启动仍可由服务端完成会话恢复；
-  // 只从达到题量目标的 daily 会话推导，绝不读取客户端 progress_json。
-  await db.prepare(`INSERT OR IGNORE INTO daily_checkins
-    (user_id, date_key, session_id, source, completed_at)
-    SELECT user_id, date_key, id, 'daily_practice', COALESCE(completed_at, updated_at, created_at, CURRENT_TIMESTAMP)
-    FROM practice_sessions WHERE user_id = ? AND status = 'completed' AND kind = 'daily'
-      AND mode = 'mixed' AND target_count > 0 AND answered_count >= target_count`).bind(identity.userId).run();
-  const [user, state, ledger, inviteStats, inviteDays, inviteeInviteDays, inviteCap, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins] = await Promise.all([
+  const todayKey = chinaDateKey();
+  // Practice completion and the full-day check-in are intentionally separate.
+  // A completed server session advances the learner to the next step, while a
+  // check-in is written only when the client finishes every enabled daily step.
+  const [user, state, ledger, inviteStats, inviteDays, inviteeInviteDays, inviteCap, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice] = await Promise.all([
     db.prepare("SELECT id, invite_code, invited_by, membership_type, membership_end FROM users WHERE id = ?").bind(identity.userId).first<UserRow>(),
     db.prepare("SELECT progress_json, version FROM user_states WHERE user_id = ?").bind(identity.userId)
       .first<{ progress_json: string; version: number }>(),
@@ -1904,6 +2545,10 @@ async function bootstrap(request: Request) {
     loadDueEssayRewrites(identity.userId),
     db.prepare("SELECT date_key FROM daily_checkins WHERE user_id = ? ORDER BY date_key")
       .bind(identity.userId).all<{ date_key: string }>(),
+    db.prepare(`SELECT 1 AS completed FROM practice_sessions
+      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
+        AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
+      LIMIT 1`).bind(identity.userId, todayKey).first<{ completed: number }>(),
   ]);
   if (!user) return json({ error: "用户初始化失败" }, 500, identity.setCookie);
   let progress: Record<string, unknown> = {};
@@ -1912,7 +2557,14 @@ async function bootstrap(request: Request) {
   // “真实完成”的证据；历史有效日练由 runtime/migration 按完成会话幂等回填。
   progress = { ...progress, checkins: dailyCheckins.results.map((row) => row.date_key) };
   const membershipActive = membershipIsActive(user);
-  const content = await loadContent(membershipActive, examProfile);
+  const rawPlanOverrides = progress.planOverrides && typeof progress.planOverrides === "object"
+    ? progress.planOverrides as Record<string, unknown>
+    : {};
+  const requestedPlanMinutes = rawPlanOverrides[todayKey];
+  const [content, dailyReadiness] = await Promise.all([
+    loadContent(membershipActive, examProfile),
+    loadDailyReadiness(identity.userId, membershipActive, requestedPlanMinutes),
+  ]);
   return json({
     user: {
       id: user.id,
@@ -1929,10 +2581,12 @@ async function bootstrap(request: Request) {
     progressVersion: Number(state?.version ?? 0),
     examProfile,
     questionBanks,
+    dailyReadiness,
+    dailyPracticeCompleted: Boolean(dailyPractice?.completed),
     studyInsights,
     wrongAudioQuestions,
     dueEssayRewrites,
-    todayKey: chinaDateKey(),
+    todayKey,
     ledger: ledger.results,
     inviteStats: inviteStats ?? { total: 0, rewarded: 0, pending: 0 },
     inviteConfig: { rewardDays: inviteDays, inviteeRewardDays: inviteeInviteDays, monthlyCap: inviteCap },
@@ -2013,8 +2667,8 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
       const year = Number(initialBank?.exam_year ?? 0);
       return typeMatches && (!year || (year <= target.examYear && year >= target.examYear - 4));
     });
-    if (!initialBank || !matchesTarget || !["行测", "综合"].includes(initialBank.subject) || Number(initialBank.question_count) < 1) {
-      return json({ error: "所选题库尚未审核上架，或与当前报考目标不匹配" }, 409);
+    if (!initialBank || !matchesTarget || !["行测", "综合"].includes(initialBank.subject) || Number(initialBank.question_count) < 5) {
+      return json({ error: "所选题库尚未审核上架、可练真题不足5道，或与当前报考目标不匹配" }, 409);
     }
     const [membership, currentBanks] = await Promise.all([userMembership(userId), selectedBankCodes(userId)]);
     if (!membershipIsActive(membership) && !currentBanks.includes(initialBankCode) && currentBanks.length >= 1) {
@@ -2031,6 +2685,11 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
     examYear: primary.examYear,
     examDate: primary.examDate,
   };
+  const targetSignature = (items: ExamTargetProfile[]) => JSON.stringify(items.map((target) => ({
+    code: target.code, examYear: target.examYear, examDate: target.examDate ?? null,
+  })));
+  const prescriptionChanged = dailyMinutes !== currentProfile.dailyMinutes
+    || targetSignature(targets) !== targetSignature(currentProfile.targets);
   await db.batch([
     db.prepare(`INSERT INTO user_exam_profiles (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -2042,6 +2701,9 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
       (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(userId, target.code, target.examType === "国考" ? "national" : "provincial", target.province, target.examYear, target.examDate)),
     ...(initialBank ? [db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, initialBank.bank_code)] : []),
+    ...(prescriptionChanged ? [db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed' AND status = 'active'`)
+      .bind(userId, chinaDateKey())] : []),
   ]);
   return json({ ok: true, profile: targetProfile, selectedBanks: await selectedBankCodes(userId) });
 }
@@ -2053,7 +2715,7 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
   if (bankCode === STARTER_BANK_CODE) return json({ error: "演示题库已停用，请添加已发布的真题库" }, 410);
   const db = getD1();
   let bank: { id: number; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number } | null = null;
-  if (bankCode !== STARTER_BANK_CODE) {
+  if (added) {
     bank = await db.prepare(`SELECT qb.id, qb.exam_type, qb.province, qb.exam_year, qb.subject,
       COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
         AND ((qb.subject = '申论' AND q.subject = '申论') OR (qb.subject <> '申论' AND q.subject = '行测')) THEN q.id END) AS question_count
@@ -2083,16 +2745,11 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
       const targetExists = profile.targets.some((target) => target.code === targetCode);
       if (!targetExists) {
         const examYear = bank.exam_year ?? new Date().getFullYear() + 1;
-        statements.push(...profile.targets.map((target) => db.prepare(`INSERT OR IGNORE INTO user_exam_targets
-          (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(
-            userId,
-            target.code,
-            target.examType === "国考" ? "national" : "provincial",
-            target.province,
-            target.examYear,
-            target.examDate,
-          )));
+        // Existing targets are already durable rows (or the legacy primary row
+        // in user_exam_profiles). Re-inserting the full collection makes this
+        // POST grow linearly and can exceed D1 Free's 50-query ceiling. Only the
+        // newly inferred target belongs in this mutation; the primary profile is
+        // deliberately left untouched.
         statements.push(db.prepare(`INSERT OR IGNORE INTO user_exam_targets
           (user_id, target_code, exam_type, province, exam_year, exam_date, updated_at)
           VALUES (?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)`).bind(userId, targetCode, bank.exam_type, province, examYear));
@@ -2105,9 +2762,31 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
     }
     await db.batch(statements);
   } else {
-    await db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode).run();
+    // D1 batch is transactional: no client can observe a removed bank while a
+    // session that depends on it remains active. UPDATE ... RETURNING also gives
+    // the client an authoritative list for clearing local resume/offline state.
+    const [abandonedResult] = await db.batch([
+      db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND status = 'active' AND json_valid(bank_codes_json)
+          AND EXISTS (SELECT 1 FROM json_each(practice_sessions.bank_codes_json)
+            WHERE CAST(value AS TEXT) = ?)
+        RETURNING id`).bind(userId, bankCode),
+      db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode),
+    ]);
+    const abandonedSessionIds = ((abandonedResult as { results?: Array<{ id?: unknown }> }).results ?? [])
+      .map((row) => String(row.id ?? "")).filter(Boolean);
+    const membership = await userMembership(userId);
+    return json({
+      ok: true,
+      banks: await loadQuestionBanks(userId),
+      profile: await loadExamProfile(userId),
+      dailyReadiness: await loadDailyReadiness(userId, membershipIsActive(membership), payload.planMinutes),
+      abandonedSessionIds,
+    });
   }
-  return json({ ok: true, banks: await loadQuestionBanks(userId), profile: await loadExamProfile(userId) });
+  const membership = await userMembership(userId);
+  return json({ ok: true, banks: await loadQuestionBanks(userId), profile: await loadExamProfile(userId),
+    dailyReadiness: await loadDailyReadiness(userId, membershipIsActive(membership), payload.planMinutes), abandonedSessionIds: [] });
 }
 
 async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
@@ -2200,14 +2879,30 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
 async function getPracticeBatch(userId: string, payload: Record<string, unknown>) {
   const db = getD1();
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
+  const requestedKind = trimmed(payload.sessionKind, 40).toLowerCase().replace(/[^a-z0-9:_-]/g, "");
+  const dailyRequest = requestedKind === "daily";
   const [selected, membership] = await Promise.all([selectedBankCodes(userId), userMembership(userId)]);
   const active = membershipIsActive(membership);
   // 试用期内可以体验多题库，但试用到期后服务端只放行最早加入且仍可练的一个主库。
   // 其余选库关系继续保留，续费后立即恢复，不能只靠前端“上锁”。
   const effectiveSelected = await effectivePracticeBankCodes(userId, selected, active);
-  const allowed = new Set(effectiveSelected);
+  const entitlementAllowed = new Set(effectiveSelected);
+  const lockedRequestedBankCodes = requested.filter((code) => selected.includes(code) && !entitlementAllowed.has(code));
+  if (!active && !dailyRequest && lockedRequestedBankCodes.length) {
+    return json({
+      error: "该题库已随试用结束转为保留状态，开通后可继续单本练和多库混练",
+      code: "FREE_BANK_LIMIT",
+      lockedRequestedBankCodes,
+    }, 403);
+  }
+  const dailyReadiness = dailyRequest ? await loadDailyReadiness(userId, active, payload.planMinutes) : null;
+  const practiceAllowedCodes = dailyReadiness?.effectiveBankCodes ?? effectiveSelected;
+  const allowed = new Set(practiceAllowedCodes);
   const primaryBankCode = allowed.has(String(payload.primaryBankCode ?? "")) ? String(payload.primaryBankCode) : "";
-  const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
+  const requestedOrder = dailyRequest
+    ? [...requested.filter((code) => allowed.has(code)), ...practiceAllowedCodes.filter((code) => !requested.includes(code))]
+    : (requested.length ? requested : selected).filter((code) => allowed.has(code));
+  const bankCodes = Array.from(new Set(requestedOrder)).slice(0, 32);
   if (primaryBankCode && bankCodes.includes(primaryBankCode)) {
     bankCodes.splice(bankCodes.indexOf(primaryBankCode), 1);
     bankCodes.unshift(primaryBankCode);
@@ -2224,7 +2919,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const rawScoreRateMax = Math.max(0, Math.min(100, Number(payload.scoreRateMax) || 100));
   const scoreRateMin = Math.min(rawScoreRateMin, rawScoreRateMax);
   const scoreRateMax = Math.max(rawScoreRateMin, rawScoreRateMax);
-  const rawKind = trimmed(payload.sessionKind, 40).toLowerCase().replace(/[^a-z0-9:_-]/g, "");
+  const rawKind = requestedKind;
   const sessionKind = rawKind || `practice:${mode}:${focusModule || "mixed"}`;
   const isDiagnostic = sessionKind === "diagnostic";
   const dateKey = chinaDateKey();
@@ -2276,16 +2971,26 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
       : [...remaining.filter((code) => pending.has(code)), ...remaining.filter((code) => !pending.has(code)).slice(0, freeRemaining ?? 0)];
     requestedLimit = serverResumeCodes.length;
   }
-  const clientResumeCodes = Array.isArray(payload.resumeQuestionCodes)
-    ? Array.from(new Set(payload.resumeQuestionCodes.map(String).filter((code) => /^[a-zA-Z0-9_-]{2,80}$/.test(code)))).slice(0, 20)
-    : [];
-  const resumeQuestionCodes = serverResumeCodes.length ? serverResumeCodes : clientResumeCodes;
-  if (requestedLimit < 1) {
+  // 断点题号只信任当前用户的服务端 active session。客户端本地题号仅用于
+  // 发起恢复意图，不能在服务端会话不存在时自行定义 daily 题量或打卡门槛。
+  const resumeQuestionCodes = existingSession ? serverResumeCodes : [];
+  const dailyRequirement = dailyReadiness?.requiredQuestionCount ?? DAILY_REQUIRED_QUESTION_COUNT;
+  const dailyCarry = sessionKind === "daily" && !existingSession && payload.resetSession !== true
+    ? await loadAbandonedDailyCarry(userId, dateKey, dailyRequirement)
+    : EMPTY_DAILY_CARRY;
+  const freeReplacementNeeded = Math.max(0, DAILY_REQUIRED_QUESTION_COUNT - dailyCarry.answered);
+  if (sessionKind === "daily" && !existingSession && dailyCarry.answered < dailyRequirement
+    && !dailyReadiness?.ready) {
     return json({
-      questions: [], mode, limit: 0, access: active ? "premium" : "preview",
-      sessionId: existingSession?.id ?? null,
-      freeRemaining: freeRemaining ?? null,
-      quotaExceeded: !active && (freeRemaining ?? 0) <= 0,
+      error: "当前备考组合没有至少5道与报考目标匹配的已审核真题，请调整目标或补充对应题库",
+      code: "DAILY_BANK_INSUFFICIENT",
+      availableQuestionCount: dailyReadiness?.distinctQuestionCount ?? 0,
+    }, 409);
+  }
+  if (sessionKind === "daily" && !existingSession && !active && (freeRemaining ?? 0) < freeReplacementNeeded) {
+    return json({
+      questions: [], mode, limit: 0, access: "preview", sessionId: null,
+      freeRemaining: freeRemaining ?? 0, quotaExceeded: true,
       composition: { due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] },
     });
   }
@@ -2302,12 +3007,24 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     : [];
   candidates.push(...await dbQuestionCandidates(userId, bankCodes.filter((code) => code !== STARTER_BANK_CODE)));
   const [profile, strategy] = await Promise.all([loadExamProfile(userId), loadStrategyConfig()]);
+  let dailyTargetCount = existingSession?.target_count ?? 0;
   if (sessionKind === "daily" && !existingSession && !resumeQuestionCodes.length) {
     const plan = strategy.timePlans && typeof strategy.timePlans === "object"
       ? (strategy.timePlans as Record<string, Record<string, unknown>>)[String(profile.dailyMinutes)]
       : null;
-    const prescribed = Math.max(5, Math.min(20, Math.floor(Number(plan?.questionCount)) || desiredLimit));
-    requestedLimit = active ? prescribed : Math.min(prescribed, freeRemaining ?? 0);
+    const prescribed = dailyReadiness?.requiredQuestionCount
+      ?? Math.max(5, Math.min(20, Math.floor(Number(plan?.questionCount)) || desiredLimit));
+    dailyTargetCount = active ? prescribed : DAILY_REQUIRED_QUESTION_COUNT;
+    requestedLimit = Math.max(0, dailyTargetCount - dailyCarry.answered);
+  }
+  if (requestedLimit < 1 && !(sessionKind === "daily" && !existingSession && dailyCarry.answered >= dailyTargetCount)) {
+    return json({
+      questions: [], mode, limit: 0, access: active ? "premium" : "preview",
+      sessionId: existingSession?.id ?? null,
+      freeRemaining: freeRemaining ?? null,
+      quotaExceeded: !active && (freeRemaining ?? 0) <= 0,
+      composition: { due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] },
+    });
   }
   const sweetSpot: [number, number] = [Number(strategy.scoreRateSweetSpot[0]), Number(strategy.scoreRateSweetSpot[1])];
   const valueWeights = {
@@ -2316,7 +3033,9 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     scoreRate: Math.max(0, Math.min(100, Number(strategy.scoreRateWeight ?? 20))),
   };
   const bankOrder = new Map(bankCodes.map((code, index) => [code, index]));
-  const allSorted = [...candidates].sort((a, b) => priorityFor(a.progress) - priorityFor(b.progress)
+  const carriedQuestionCodes = new Set(dailyCarry.questionCodes);
+  const allSorted = candidates.filter((item) => !carriedQuestionCodes.has(item.question.id))
+    .sort((a, b) => priorityFor(a.progress) - priorityFor(b.progress)
     || Number(bankOrder.get(a.question.bankCode) ?? 99) - Number(bankOrder.get(b.question.bankCode) ?? 99)
     || questionValueRank(a.question, sweetSpot, valueWeights) - questionValueRank(b.question, sweetSpot, valueWeights)
     || (a.progress?.last_answered_at ?? "").localeCompare(b.progress?.last_answered_at ?? ""));
@@ -2398,22 +3117,44 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     chosen = selectedItems;
   }
   let sessionItems = chosen.slice(0, requestedLimit);
+  const requiredNewDailyQuestions = sessionKind === "daily" && !existingSession
+    ? Math.max(0, dailyTargetCount - dailyCarry.answered)
+    : 0;
+  if (sessionKind === "daily" && !existingSession && sessionItems.length < requiredNewDailyQuestions) {
+    return json({
+      error: "当前备考组合不足以补齐今天的真实日练，请补充与报考目标匹配的已审核真题库",
+      code: "DAILY_BANK_INSUFFICIENT",
+      availableQuestionCount: dailyCarry.answered + sessionItems.length,
+    }, 409);
+  }
   let sessionId = existingSession?.id ?? null;
-  if (!sessionId && sessionItems.length) {
+  if (!sessionId && (sessionItems.length || (sessionKind === "daily" && dailyCarry.answered >= dailyTargetCount))) {
     sessionId = crypto.randomUUID();
+    const carriedAnswered = sessionKind === "daily" ? Math.min(dailyCarry.answered, dailyTargetCount) : 0;
+    const createdStatus = carriedAnswered >= dailyTargetCount ? "completed" : "active";
+    const targetCount = sessionKind === "daily" ? dailyTargetCount : sessionItems.length;
     const created = await db.prepare(`INSERT OR IGNORE INTO practice_sessions
-      (id, user_id, date_key, kind, mode, status, plan_minutes, target_count, bank_codes_json, question_codes_json)
-      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
+      (id, user_id, date_key, kind, mode, status, plan_minutes, target_count, bank_codes_json, question_codes_json,
+       answered_count, correct_count, review_added, elapsed_seconds, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE NULL END)`)
       .bind(
         sessionId,
         userId,
         dateKey,
         sessionKind,
         mode,
-        Math.max(10, Math.min(60, Math.floor(Number(payload.planMinutes)) || 30)),
-        sessionItems.length,
+        createdStatus,
+        sessionKind === "daily"
+          ? (dailyReadiness?.planMinutes ?? profile.dailyMinutes)
+          : Math.max(10, Math.min(60, Math.floor(Number(payload.planMinutes)) || 30)),
+        targetCount,
         JSON.stringify(bankCodes),
         JSON.stringify(sessionItems.map((item) => item.question.id)),
+        carriedAnswered,
+        sessionKind === "daily" ? dailyCarry.correct : 0,
+        sessionKind === "daily" ? dailyCarry.reviewAdded : 0,
+        sessionKind === "daily" ? dailyCarry.elapsedSeconds : 0,
+        createdStatus,
       ).run();
     if (!created.meta.changes) {
       const concurrent = await db.prepare(`SELECT id, question_codes_json FROM practice_sessions
@@ -2427,6 +3168,15 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
           .map((code) => candidateMap.get(code)).filter((item): item is QuestionCandidate => Boolean(item));
       }
     }
+  }
+  const sessionSnapshot = sessionId ? await db.prepare(`SELECT id, status, target_count, answered_count,
+      correct_count, review_added, elapsed_seconds FROM practice_sessions WHERE id = ? AND user_id = ?`)
+    .bind(sessionId, userId).first<{
+      id: string; status: string; target_count: number; answered_count: number; correct_count: number;
+      review_added: number; elapsed_seconds: number;
+    }>() : null;
+  if (sessionSnapshot?.status === "completed" && sessionKind === "daily" && mode === "mixed") {
+    await rewardInvite(userId);
   }
   const questions = sessionItems.map((item) => {
     const question = publicQuestion(item.question, item.progress);
@@ -2471,10 +3221,16 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     mode,
     limit: requestedLimit,
     sessionId,
+    session: sessionSnapshot ? {
+      targetCount: Number(sessionSnapshot.target_count), answeredCount: Number(sessionSnapshot.answered_count),
+      correctCount: Number(sessionSnapshot.correct_count), reviewAdded: Number(sessionSnapshot.review_added),
+      elapsedSeconds: Number(sessionSnapshot.elapsed_seconds), status: sessionSnapshot.status,
+    } : null,
+    dailyCompleted: sessionSnapshot?.status === "completed" && sessionKind === "daily",
     freeRemaining: freeRemaining ?? null,
     quotaExceeded: false,
-    resumed: Boolean(existingSession),
-      access: active ? "premium" : isDiagnostic ? "diagnostic" : "preview",
+    resumed: Boolean(existingSession || dailyCarry.answered),
+    access: active ? "premium" : isDiagnostic ? "diagnostic" : "preview",
     composition: {
       due: questions.filter((item) => item.due).length,
       weak: questions.filter((item) => item.state === "weak").length,
@@ -2712,7 +3468,7 @@ async function loadDueEssayRewrites(userId: string) {
   }));
 }
 
-async function resolveQuestion(questionCode: string, bankCode: string) {
+async function resolveQuestion(questionCode: string, bankCode: string, includeUnavailable = false) {
   const starter = starterQuestionList().find((question) => question.id === questionCode && bankCode === STARTER_BANK_CODE);
   if (starter) return starter;
   const row = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.options_json, q.answer,
@@ -2725,9 +3481,10 @@ async function resolveQuestion(questionCode: string, bankCode: string) {
     qb.exam_type AS bank_exam_type, qb.province AS bank_province
     FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
     JOIN question_banks qb ON qb.id = qbi.bank_id
-    WHERE q.question_code = ? AND qb.bank_code = ? AND q.status = 'active'
-      AND q.truth_verified = 1 AND q.review_status = 'approved' AND qb.status = 'published' LIMIT 1`)
-    .bind(questionCode, bankCode).first<Record<string, unknown>>();
+    WHERE q.question_code = ? AND qb.bank_code = ?
+      AND (? = 1 OR (q.status = 'active' AND q.truth_verified = 1
+        AND q.review_status = 'approved' AND qb.status = 'published')) LIMIT 1`)
+    .bind(questionCode, bankCode, includeUnavailable ? 1 : 0).first<Record<string, unknown>>();
   if (!row) return null;
   const metrics = metricFields(row);
   return {
@@ -2838,8 +3595,7 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   // attempt ids are deliberately ignored so changing them cannot farm quota,
   // progress, check-ins or invite rewards.
   const attemptKey = `${practiceSessionId}:${questionCode}`;
-  const question = await resolveQuestion(questionCode, bankCode);
-  if (!question || selectedAnswer < 0 || selectedAnswer >= question.options.length || question.answer < 0) return json({ error: "题目或答案无效" }, 400);
+  let question = await resolveQuestion(questionCode, bankCode);
   const db = getD1();
   const duplicate = await db.prepare(`SELECT id, question_code, selected_answer, is_correct, overtime, confidence, uncertain, apply_status
     FROM practice_attempts WHERE user_id = ? AND attempt_key = ?`).bind(userId, attemptKey)
@@ -2851,6 +3607,8 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
       await db.prepare("DELETE FROM practice_attempts WHERE id = ? AND user_id = ? AND apply_status <> 'applied'")
         .bind(duplicate.id, userId).run();
     } else {
+    if (!question) question = await resolveQuestion(questionCode, bankCode, true);
+    if (!question) return json({ error: "原答题记录对应的题目已不存在，请刷新练习", code: "PRACTICE_SESSION_INVALIDATED" }, 409);
     if (duplicate.question_code !== questionCode || Number(duplicate.selected_answer) !== selectedAnswer) {
       return json({ error: "答题请求标识冲突，请刷新后重试" }, 409);
     }
@@ -2880,14 +3638,50 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     }
   }
 
-  let session: { id: string; status: string; kind: string; question_codes_json: string } | null = null;
+  let session: { id: string; status: string; kind: string; date_key: string; question_codes_json: string } | null = null;
   if (practiceSessionId) {
-    session = await db.prepare(`SELECT id, status, kind, question_codes_json FROM practice_sessions
+    session = await db.prepare(`SELECT id, status, kind, date_key, question_codes_json FROM practice_sessions
       WHERE id = ? AND user_id = ? AND status = 'active'`).bind(practiceSessionId, userId)
-      .first<{ id: string; status: string; kind: string; question_codes_json: string }>() ?? null;
-    if (!session || !safeStringArray(session.question_codes_json, 20).includes(questionCode)) {
-      return json({ error: "练习会话无效或题目不在本次任务中" }, 409);
+      .first<{ id: string; status: string; kind: string; date_key: string; question_codes_json: string }>() ?? null;
+  }
+  const dateKey = chinaDateKey();
+  const membership = await userMembership(userId);
+  const active = membershipIsActive(membership);
+  const selectedCodes = await selectedBankCodes(userId);
+  const effectiveBankCodes = await effectivePracticeBankCodes(userId, selectedCodes, active);
+  const sessionPolicy = practiceSessionSubmissionPolicy({
+    session: session ? {
+      status: session.status,
+      dateKey: session.date_key,
+      questionCodes: session.question_codes_json,
+    } : null,
+    today: dateKey,
+    questionCode,
+    bankCode,
+    effectiveBankCodes,
+  });
+  if (!sessionPolicy.allowed) {
+    if (session) {
+      await db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND status = 'active'`).bind(session.id, userId).run();
     }
+    const entitlementChanged = sessionPolicy.code === "PRACTICE_SESSION_ENTITLEMENT_CHANGED";
+    return json({
+      error: entitlementChanged
+        ? "会员或试用权益、题库组合已变化，旧练习已结束；已完成记录保留，请重新开始"
+        : "练习已过期或题库内容已更新，请重新开始",
+      code: entitlementChanged ? "PRACTICE_SESSION_ENTITLEMENT_CHANGED" : "PRACTICE_SESSION_INVALIDATED",
+    }, entitlementChanged ? 403 : 409);
+  }
+  if (!question) {
+    if (session) {
+      await db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND status = 'active'`).bind(session.id, userId).run();
+    }
+    return json({ error: "题库内容已更新，这组练习需要重新生成", code: "PRACTICE_SESSION_INVALIDATED" }, 409);
+  }
+  if (selectedAnswer < 0 || selectedAnswer >= question.options.length || question.answer < 0) {
+    return json({ error: "题目或答案无效" }, 400);
   }
   const diagnosticSession = session?.kind === "diagnostic";
   if (!signedIn && !diagnosticSession) {
@@ -2898,8 +3692,6 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const targetSeconds = question.suggestedSeconds || targetSecondsFor(question);
   const overtime = durationMs > targetSeconds * 1000;
   const confidence = correct ? "pending" : "hesitant";
-  const dateKey = chinaDateKey();
-  const active = membershipIsActive(await userMembership(userId));
   await db.prepare(`INSERT OR IGNORE INTO user_daily_usage (user_id, date_key, practice_count)
     VALUES (?, ?, 0)`).bind(userId, dateKey).run();
 
@@ -2989,17 +3781,9 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
       .bind(userId, questionCode, initialState, correct ? 1 : 0, correct ? 0 : 1, uncertain ? 1 : 0,
         selectedAnswer, correct ? 1 : 0, durationMs, initialNextReviewAt, isDue ? 1 : 0, initialReviewStage,
         userId, attemptKey, finalStage, finalStage, ...intervalDates, finalStage),
-    db.prepare(`UPDATE questions SET
-      score_rate_correct = score_rate_correct + ?, score_rate_attempts = score_rate_attempts + 1,
-      score_rate_scope = ?, score_rate_source = 'platform', score_rate_updated_at = CURRENT_TIMESTAMP,
-      updated_at = CURRENT_TIMESTAMP
-      WHERE question_code = ? AND score_rate_source IN ('', 'platform')
-        AND EXISTS (SELECT 1 FROM practice_attempts
-          WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applying')
-        AND NOT EXISTS (SELECT 1 FROM practice_attempts
-          WHERE user_id = ? AND question_code = ? AND apply_status = 'applied')`)
-      .bind(correct ? 1 : 0, `同${scoreScopeLabel}目标用户·有效首答`, questionCode,
-        userId, attemptKey, userId, questionCode),
+    db.prepare(platformScoreRateIncrementSql(eligibleFirstAttemptSql("metric_attempt", "metric_user", "applying")))
+      .bind(correct ? 1 : 0, correct ? 1 : 0,
+        `同${scoreScopeLabel}目标用户·有效首答`, questionCode, userId, attemptKey),
   ];
   if (session && confidence !== "pending") {
     statements.push(db.prepare(`UPDATE practice_sessions SET
@@ -3134,10 +3918,24 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
     const finalized = await db.batch(finalizeStatements);
     const applied = Number(finalized[0]?.meta?.changes ?? 0) > 0;
     if (!applied) {
-      const current = await db.prepare(`SELECT state, next_review_at FROM user_question_progress
-        WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
-        .first<{ state: string; next_review_at: string | null }>();
-      return json({ ok: true, duplicate: true, state: current?.state ?? "learning", nextReviewAt: current?.next_review_at ?? null });
+      const [current, currentAttempt] = await Promise.all([
+        db.prepare(`SELECT state, next_review_at FROM user_question_progress
+          WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
+          .first<{ state: string; next_review_at: string | null }>(),
+        db.prepare(`SELECT confidence, is_correct, overtime, uncertain FROM practice_attempts
+          WHERE id = ? AND user_id = ? AND question_code = ?`).bind(attemptId, userId, questionCode)
+          .first<{ confidence: string; is_correct: number; overtime: number; uncertain: number }>(),
+      ]);
+      const serverConfidence = allowedConfidence.has(currentAttempt?.confidence ?? "") ? String(currentAttempt?.confidence) : confidence;
+      return json({
+        ok: true,
+        duplicate: true,
+        state: current?.state ?? "learning",
+        nextReviewAt: current?.next_review_at ?? null,
+        confidence: serverConfidence,
+        needsReview: !currentAttempt?.is_correct || Boolean(currentAttempt?.overtime) || Boolean(currentAttempt?.uncertain)
+          || serverConfidence !== "confident",
+      });
     }
     if (confidence !== "confident") state = "weak";
     if (attempt.practice_session_id) {
@@ -3148,9 +3946,23 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
         && completed.target_count >= 5 && completed.answered_count >= 5) await rewardInvite(userId);
     }
   }
-  const current = await db.prepare(`SELECT state, next_review_at FROM user_question_progress
-    WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode).first<{ state: string; next_review_at: string | null }>();
-  return json({ ok: true, state: state ?? current?.state ?? "learning", nextReviewAt: nextReviewAt ?? current?.next_review_at ?? null });
+  const [current, savedAttempt] = await Promise.all([
+    db.prepare(`SELECT state, next_review_at FROM user_question_progress
+      WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode).first<{ state: string; next_review_at: string | null }>(),
+    attemptId ? db.prepare(`SELECT confidence, is_correct, overtime, uncertain FROM practice_attempts
+      WHERE id = ? AND user_id = ? AND question_code = ?`).bind(attemptId, userId, questionCode)
+      .first<{ confidence: string; is_correct: number; overtime: number; uncertain: number }>() : Promise.resolve(null),
+  ]);
+  const serverConfidence = savedAttempt && allowedConfidence.has(savedAttempt.confidence) ? savedAttempt.confidence : null;
+  return json({
+    ok: true,
+    duplicate: false,
+    state: state ?? current?.state ?? "learning",
+    nextReviewAt: nextReviewAt ?? current?.next_review_at ?? null,
+    confidence: serverConfidence,
+    needsReview: savedAttempt ? !savedAttempt.is_correct || Boolean(savedAttempt.overtime) || Boolean(savedAttempt.uncertain)
+      || serverConfidence !== "confident" : undefined,
+  });
 }
 
 async function recordDailyCheckin(userId: string, payload: Record<string, unknown>) {
@@ -3160,7 +3972,7 @@ async function recordDailyCheckin(userId: string, payload: Record<string, unknow
   const db = getD1();
   const session = await db.prepare(`SELECT id FROM practice_sessions
     WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
-      AND status = 'completed' AND target_count > 0 AND answered_count >= target_count
+      AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
     ORDER BY completed_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
   if (!session) {
     return json({ error: "完成真实日练后才能打卡，空题库或未完成任务不会计入", code: "DAILY_PRACTICE_INCOMPLETE" }, 409);
@@ -3175,9 +3987,21 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
   const sessionId = trimmed(payload.practiceSessionId, 80);
   if (!sessionId) return json({ error: "练习会话不能为空" }, 400);
   const db = getD1();
-  const session = await db.prepare("SELECT id FROM practice_sessions WHERE id = ? AND user_id = ?")
-    .bind(sessionId, userId).first<{ id: string }>();
+  const session = await db.prepare("SELECT id, date_key, kind, mode FROM practice_sessions WHERE id = ? AND user_id = ?")
+    .bind(sessionId, userId).first<{ id: string; date_key: string; kind: string; mode: string }>();
   if (!session) return json({ error: "练习会话不存在" }, 404);
+  const wholeDaily = session.kind === "daily" && session.mode === "mixed";
+  const attemptScope = wholeDaily
+    ? `FROM (
+        SELECT pa.*, ROW_NUMBER() OVER (PARTITION BY pa.question_code ORDER BY pa.id DESC) AS metric_rank
+        FROM practice_attempts pa
+        JOIN practice_sessions ps ON ps.id = pa.practice_session_id AND ps.user_id = pa.user_id
+        WHERE pa.user_id = ? AND ps.date_key = ? AND ps.kind = 'daily' AND ps.mode = 'mixed'
+          AND pa.apply_status = 'applied'
+      ) scoped WHERE scoped.metric_rank = 1`
+    : `FROM practice_attempts scoped
+      WHERE scoped.user_id = ? AND scoped.practice_session_id = ? AND scoped.apply_status = 'applied'`;
+  const scopeBindings = wholeDaily ? [userId, session.date_key] : [userId, sessionId];
   const [stats, modules] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
@@ -3185,12 +4009,12 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
       COALESCE(SUM(CASE WHEN confidence = 'guessed' THEN 1 ELSE 0 END), 0) AS guessed,
       COALESCE(SUM(overtime), 0) AS overtime,
       COALESCE(SUM(CASE WHEN was_due = 1 AND is_correct = 1 AND confidence = 'confident' THEN 1 ELSE 0 END), 0) AS repaired_due
-      FROM practice_attempts WHERE user_id = ? AND practice_session_id = ? AND apply_status = 'applied'`)
-      .bind(userId, sessionId).first<Record<string, unknown>>(),
+      ${attemptScope}`)
+      .bind(...scopeBindings).first<Record<string, unknown>>(),
     db.prepare(`SELECT module, COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct
-      FROM practice_attempts WHERE user_id = ? AND practice_session_id = ? AND apply_status = 'applied'
+      ${attemptScope}
       GROUP BY module ORDER BY (1.0 * COALESCE(SUM(is_correct), 0) / COUNT(*)) ASC, total DESC LIMIT 5`)
-      .bind(userId, sessionId).all<{ module: string; total: number; correct: number }>(),
+      .bind(...scopeBindings).all<{ module: string; total: number; correct: number }>(),
   ]);
   return json({
     wrong: Number(stats?.wrong ?? 0),
@@ -3220,11 +4044,17 @@ async function bindInvite(userId: string, payload: Record<string, unknown>) {
   const existing = await db.prepare("SELECT inviter_id, status FROM invite_relations WHERE invitee_id = ?").bind(userId).first<{ inviter_id: string; status: string }>();
   if (existing) return json({ ok: true, status: existing.status, message: "已绑定邀请关系" });
   const [sameBrowserSwitch, inviterDailyBindings] = await Promise.all([
-    db.prepare(`SELECT 1 AS detected FROM analytics_events
-      WHERE event_name = 'account_switch_detected' AND (
+    db.prepare(`SELECT 1 AS detected WHERE EXISTS (
+      SELECT 1 FROM analytics_events WHERE event_name = 'account_switch_detected' AND (
         (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
         OR (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
-      ) LIMIT 1`).bind(userId, inviter.id, inviter.id, userId).first<{ detected: number }>(),
+      )
+    ) OR EXISTS (
+      SELECT 1 FROM device_account_links invitee_device
+      JOIN device_account_links inviter_device
+        ON inviter_device.device_hash = invitee_device.device_hash
+      WHERE invitee_device.user_id = ? AND inviter_device.user_id = ?
+    ) LIMIT 1`).bind(userId, inviter.id, inviter.id, userId, userId, inviter.id).first<{ detected: number }>(),
     db.prepare(`SELECT COUNT(*) AS count FROM invite_relations
       WHERE inviter_id = ? AND datetime(bound_at) >= datetime('now', '-1 day')`)
       .bind(inviter.id).first<{ count: number }>(),
@@ -3235,11 +4065,62 @@ async function bindInvite(userId: string, payload: Record<string, unknown>) {
   if (Number(inviterDailyBindings?.count ?? 0) >= 10) {
     return json({ error: "该邀请账号今日绑定过于集中，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
   }
-  await db.batch([
-    db.prepare(`INSERT INTO invite_relations (invitee_id, inviter_id, verified_at, risk_status)
-      VALUES (?, ?, CURRENT_TIMESTAMP, 'clear')`).bind(userId, inviter.id),
-    db.prepare("UPDATE users SET invited_by = ? WHERE id = ? AND invited_by IS NULL").bind(inviter.id, userId),
+  // Friendly checks above keep normal errors clear; this INSERT is the
+  // authoritative rolling-24-hour and same-browser gate. D1 serializes the
+  // write, so concurrent requests cannot all observe slot 10 as available.
+  const [bound] = await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO invite_relations
+      (invitee_id, inviter_id, verified_at, risk_status)
+      SELECT ?, ?, CURRENT_TIMESTAMP, 'clear'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM analytics_events ae
+        WHERE ae.event_name = 'account_switch_detected' AND (
+          (ae.user_id = ? AND json_extract(ae.event_data, '$.otherUserId') = ?)
+          OR (ae.user_id = ? AND json_extract(ae.event_data, '$.otherUserId') = ?)
+        )
+      ) AND NOT EXISTS (
+        SELECT 1 FROM device_account_links invitee_device
+        JOIN device_account_links inviter_device
+          ON inviter_device.device_hash = invitee_device.device_hash
+        WHERE invitee_device.user_id = ? AND inviter_device.user_id = ?
+      ) AND (
+        SELECT COUNT(*) FROM invite_relations ir
+        WHERE ir.inviter_id = ? AND datetime(ir.bound_at) >= datetime('now', '-1 day')
+      ) < 10`)
+      .bind(userId, inviter.id, userId, inviter.id, inviter.id, userId, userId, inviter.id, inviter.id),
+    db.prepare(`UPDATE users SET invited_by = ?
+      WHERE id = ? AND invited_by IS NULL AND EXISTS (
+        SELECT 1 FROM invite_relations WHERE invitee_id = ? AND inviter_id = ?
+      )`).bind(inviter.id, userId, userId, inviter.id),
   ]);
+  if (Number(bound.meta?.changes ?? 0) === 0) {
+    const [current, currentRisk, currentRate] = await Promise.all([
+      db.prepare("SELECT inviter_id, status FROM invite_relations WHERE invitee_id = ?").bind(userId)
+        .first<{ inviter_id: string; status: string }>(),
+      db.prepare(`SELECT 1 AS detected WHERE EXISTS (
+        SELECT 1 FROM analytics_events WHERE event_name = 'account_switch_detected' AND (
+          (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
+          OR (user_id = ? AND json_extract(event_data, '$.otherUserId') = ?)
+        )
+      ) OR EXISTS (
+        SELECT 1 FROM device_account_links invitee_device
+        JOIN device_account_links inviter_device
+          ON inviter_device.device_hash = invitee_device.device_hash
+        WHERE invitee_device.user_id = ? AND inviter_device.user_id = ?
+      ) LIMIT 1`).bind(userId, inviter.id, inviter.id, userId, userId, inviter.id).first<{ detected: number }>(),
+      db.prepare(`SELECT COUNT(*) AS count FROM invite_relations
+        WHERE inviter_id = ? AND datetime(bound_at) >= datetime('now', '-1 day')`)
+        .bind(inviter.id).first<{ count: number }>(),
+    ]);
+    if (current) return json({ ok: true, status: current.status, message: "已绑定邀请关系" });
+    if (currentRisk) {
+      return json({ error: "同一浏览器切换账号不能参与邀请时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
+    }
+    if (Number(currentRate?.count ?? 0) >= 10) {
+      return json({ error: "该邀请账号今日绑定过于集中，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
+    }
+    return json({ error: "邀请关系绑定冲突，请刷新后重试", code: "INVITE_BIND_CONFLICT" }, 409);
+  }
   return json({ ok: true, status: "pending", message: "已绑定；完成首次有效日练后，被邀请人得3天、邀请人得7天" });
 }
 
@@ -3263,12 +4144,20 @@ async function rewardInvite(inviteeId: string) {
   // 这样即使用户先绑定、再在同一浏览器切换账号，也不能绕过奖励前风控。
   await db.batch([
     db.prepare(`UPDATE invite_relations SET risk_status = 'blocked_same_browser'
-      WHERE invitee_id = ? AND status = 'pending' AND risk_status = 'clear' AND EXISTS (
-        SELECT 1 FROM analytics_events ae WHERE ae.event_name = 'account_switch_detected' AND (
-          (ae.user_id = invite_relations.invitee_id
-            AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.inviter_id)
-          OR (ae.user_id = invite_relations.inviter_id
-            AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.invitee_id)
+      WHERE invitee_id = ? AND status = 'pending' AND risk_status = 'clear' AND (
+        EXISTS (
+          SELECT 1 FROM analytics_events ae WHERE ae.event_name = 'account_switch_detected' AND (
+            (ae.user_id = invite_relations.invitee_id
+              AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.inviter_id)
+            OR (ae.user_id = invite_relations.inviter_id
+              AND json_extract(ae.event_data, '$.otherUserId') = invite_relations.invitee_id)
+          )
+        ) OR EXISTS (
+          SELECT 1 FROM device_account_links invitee_device
+          JOIN device_account_links inviter_device
+            ON inviter_device.device_hash = invitee_device.device_hash
+          WHERE invitee_device.user_id = invite_relations.invitee_id
+            AND inviter_device.user_id = invite_relations.inviter_id
         )
       )`).bind(inviteeId),
     db.prepare(`UPDATE invite_relations SET status = 'rewarded',
@@ -3335,7 +4224,9 @@ async function reconcileInviteReward(inviteeId: string) {
           AND ps.target_count >= 5 AND ps.answered_count >= 5
           AND ps.completed_at IS NOT NULL AND datetime(ps.completed_at) >= datetime(ir.bound_at)
       ) LIMIT 1`).bind(inviteeId).first<{ eligible: number }>();
-  if (eligible) await rewardInvite(inviteeId);
+  if (!eligible) return false;
+  await rewardInvite(inviteeId);
+  return true;
 }
 
 async function redeem(userId: string, payload: Record<string, unknown>) {
@@ -3345,52 +4236,94 @@ async function redeem(userId: string, payload: Record<string, unknown>) {
   const codeHash = await hashCode(code);
   const row = await db.prepare(`SELECT id, code_preview, grant_type, duration_days, max_uses, used_count, status, valid_from, valid_until
     FROM redemption_codes WHERE code_hash = ?`).bind(codeHash).first<CodeRow>();
-  const now = new Date();
   if (!row) return json({ error: "兑换码不存在" }, 404);
+  const grantType = row.grant_type === "lifetime" ? "lifetime" : "duration";
+  const existing = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
+    .bind(row.id, userId).first<{ id: number; status: string }>();
+  // A success response may have been lost after commit. Retrying that same
+  // redemption remains a success even if an operator later disables the batch
+  // or its validity window closes.
+  if (existing?.status === "completed") {
+    const membership = await userMembership(userId);
+    return json({
+      ok: true,
+      idempotent: true,
+      grantType,
+      days: grantType === "lifetime" ? null : Number(row.duration_days),
+      membershipType: membership?.membership_type ?? grantType,
+      membershipEnd: membership?.membership_end ?? null,
+    });
+  }
+
+  const now = new Date();
   if (row.status !== "active") return json({ error: "兑换码已停用" }, 400);
   if (row.valid_from && Date.parse(row.valid_from) > now.getTime()) return json({ error: "兑换码尚未生效" }, 400);
   if (row.valid_until && Date.parse(row.valid_until) < now.getTime()) return json({ error: "兑换码已过期" }, 400);
-  let redemption = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
-    .bind(row.id, userId).first<{ id: number; status: string }>();
-  if (!redemption) {
-    await db.prepare(`INSERT OR IGNORE INTO redemptions (code_id, user_id, status)
-      SELECT id, ?, 'pending' FROM redemption_codes c
-      WHERE c.id = ? AND c.status = 'active'
-        AND (SELECT COUNT(*) FROM redemptions r WHERE r.code_id = c.id) < c.max_uses`)
-      .bind(userId, row.id).run();
-    redemption = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
-      .bind(row.id, userId).first<{ id: number; status: string }>();
-  }
-  if (!redemption) return json({ error: "兑换码使用次数已达上限" }, 409);
-
   const sourceId = `redeem:${row.id}:${userId}`;
-  const grantType = row.grant_type === "lifetime" ? "lifetime" : "duration";
-  const safeDays = Math.max(1, Math.min(3650, row.duration_days));
-  if (redemption.status !== "completed") {
-    await db.batch([
-      db.prepare(`INSERT OR IGNORE INTO membership_ledger
-        (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'redeem', ?, ?)`)
-        .bind(userId, grantType === "lifetime" ? 0 : safeDays, sourceId,
-          grantType === "lifetime" ? "兑换终身会员" : `兑换 ${safeDays} 天会员`),
-      grantType === "lifetime"
-        ? db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1").bind(userId)
-        : db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
-            CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
-              THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
-            WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
-          .bind(`+${safeDays} days`, userId),
-      db.prepare(`UPDATE redemptions SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
-        WHERE id = ?`).bind(redemption.id),
-      db.prepare(`UPDATE redemption_codes SET used_count =
-        (SELECT COUNT(*) FROM redemptions WHERE code_id = ?) WHERE id = ?`).bind(row.id, row.id),
-    ]);
+  const configuredDays = Math.floor(Number(row.duration_days));
+  if (grantType === "duration" && !new Set([7, 30, 365]).has(configuredDays)) {
+    return json({ error: "兑换码权益配置无效，请联系管理员", code: "REDEMPTION_GRANT_INVALID" }, 409);
+  }
+  // Claim, idempotency ledger, membership mutation, completion and capacity
+  // accounting are one D1 transaction. Cleanup only targets legacy pending
+  // rows that never acquired a redeem ledger and have outlived a 15-minute
+  // deployment drain window; a still-running old request can never lose its
+  // fresh capacity claim to a new-version request.
+  const results = await db.batch([
+    db.prepare(`DELETE FROM redemptions
+      WHERE code_id = ? AND status = 'pending'
+        AND datetime(redeemed_at) <= datetime('now', '-15 minutes') AND NOT EXISTS (
+        SELECT 1 FROM membership_ledger ml
+        WHERE ml.user_id = redemptions.user_id AND ml.source_type = 'redeem'
+          AND ml.source_id = 'redeem:' || redemptions.code_id || ':' || redemptions.user_id
+      )`).bind(row.id),
+    db.prepare(`INSERT OR IGNORE INTO redemptions (code_id, user_id, status)
+      SELECT c.id, ?, 'pending' FROM redemption_codes c
+      WHERE c.id = ? AND c.status = 'active'
+        AND (c.valid_from IS NULL OR datetime(c.valid_from) <= CURRENT_TIMESTAMP)
+        AND (c.valid_until IS NULL OR datetime(c.valid_until) >= CURRENT_TIMESTAMP)
+        AND (SELECT COUNT(*) FROM redemptions r WHERE r.code_id = c.id) < c.max_uses`)
+      .bind(userId, row.id),
+    db.prepare(`INSERT OR IGNORE INTO membership_ledger
+      (user_id, delta_days, source_type, source_id, note)
+      SELECT ?, ?, 'redeem', ?, ? WHERE EXISTS (
+        SELECT 1 FROM redemptions WHERE code_id = ? AND user_id = ? AND status = 'pending'
+      )`).bind(userId, grantType === "lifetime" ? 0 : configuredDays, sourceId,
+        grantType === "lifetime" ? "兑换终身会员" : `兑换 ${configuredDays} 天会员`, row.id, userId),
+    grantType === "lifetime"
+      ? db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1")
+        .bind(userId)
+      : db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+          CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+            THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+          WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+        .bind(`+${configuredDays} days`, userId),
+    db.prepare(`UPDATE redemptions SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+      WHERE code_id = ? AND user_id = ? AND status = 'pending' AND EXISTS (
+        SELECT 1 FROM membership_ledger ml
+        WHERE ml.user_id = ? AND ml.source_type = 'redeem' AND ml.source_id = ?
+      )`).bind(row.id, userId, userId, sourceId),
+    db.prepare(`UPDATE redemption_codes SET used_count = (
+      SELECT COUNT(*) FROM redemptions WHERE code_id = ? AND status = 'completed'
+    ) WHERE id = ?`).bind(row.id, row.id),
+  ]);
+  const redemption = await db.prepare("SELECT id, status FROM redemptions WHERE code_id = ? AND user_id = ?")
+    .bind(row.id, userId).first<{ id: number; status: string }>();
+  if (!redemption || redemption.status !== "completed") {
+    const currentCode = await db.prepare(`SELECT status, valid_from, valid_until FROM redemption_codes WHERE id = ?`)
+      .bind(row.id).first<{ status: string; valid_from: string | null; valid_until: string | null }>();
+    const currentTime = Date.now();
+    if (!currentCode || currentCode.status !== "active") return json({ error: "兑换码已停用" }, 400);
+    if (currentCode.valid_from && Date.parse(currentCode.valid_from) > currentTime) return json({ error: "兑换码尚未生效" }, 400);
+    if (currentCode.valid_until && Date.parse(currentCode.valid_until) < currentTime) return json({ error: "兑换码已过期" }, 400);
+    return json({ error: "兑换码使用次数已达上限" }, 409);
   }
   const membership = await userMembership(userId);
   return json({
     ok: true,
-    idempotent: redemption.status === "completed",
+    idempotent: Number(results[2]?.meta?.changes ?? 0) === 0,
     grantType,
-    days: grantType === "lifetime" ? null : safeDays,
+    days: grantType === "lifetime" ? null : configuredDays,
     membershipType: membership?.membership_type ?? grantType,
     membershipEnd: membership?.membership_end ?? null,
   });
@@ -3536,6 +4469,12 @@ async function completeTestPayment(request: Request, userId: string, payload: Re
   if (!order) return json({ error: "测试订单不存在" }, 404);
   if (order.channel !== "test") return json({ error: "非测试订单不能使用此接口" }, 409);
   if (order.status === "paid") {
+    const paidTransaction = await db.prepare(`SELECT 1 AS owned FROM payment_transactions
+      WHERE order_id = ? AND provider = 'test' AND callback_id = ? AND status = 'processed'`)
+      .bind(order.id, callbackId).first<{ owned: number }>();
+    if (!paidTransaction) {
+      return json({ error: "该测试回调未归属于当前订单", code: "PAYMENT_CALLBACK_CONFLICT" }, 409);
+    }
     const membership = await userMembership(userId);
     return json({ order: publicOrder(order), membershipType: membership?.membership_type, membershipEnd: membership?.membership_end, idempotent: true, testMode: true });
   }
@@ -3546,7 +4485,9 @@ async function completeTestPayment(request: Request, userId: string, payload: Re
   }
   const existingCallback = await db.prepare(`SELECT order_id FROM payment_transactions
     WHERE provider = 'test' AND callback_id = ?`).bind(callbackId).first<{ order_id: string }>();
-  if (existingCallback && existingCallback.order_id !== order.id) return json({ error: "该测试回调幂等键已用于其他订单" }, 409);
+  if (existingCallback && existingCallback.order_id !== order.id) {
+    return json({ error: "该测试回调幂等键已用于其他订单", code: "PAYMENT_CALLBACK_CONFLICT" }, 409);
+  }
   const durationDays = order.grant_type === "duration" ? configuredDurationDays : 0;
   const grantId = `grant_${order.id}`;
   const transactionId = `ptx_${order.id}`;
@@ -3559,44 +4500,78 @@ async function completeTestPayment(request: Request, userId: string, payload: Re
       .bind(transactionId, order.id, providerTransactionId, callbackId, Number(order.amount_cents), order.currency, rawPayloadJson),
     db.prepare(`INSERT OR IGNORE INTO entitlement_grants
       (id, user_id, product_id, order_id, grant_type, duration_days, source_type, source_id, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'order', ?, 'active')`)
-      .bind(grantId, userId, order.product_id, order.id, order.grant_type, durationDays, order.id),
-    order.grant_type === "lifetime"
-      ? db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1").bind(userId)
-      : db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
-          CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
-            THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
-          WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
-        .bind(`+${durationDays} days`, userId),
-    db.prepare(`UPDATE orders SET status = 'paid', entitlement_grant_id = ?, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
-      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND EXISTS
-      (SELECT 1 FROM entitlement_grants WHERE id = ? AND user_id = ? AND status = 'active')`)
-      .bind(grantId, order.id, grantId, userId),
-    db.prepare("UPDATE payment_transactions SET status = 'processed', processed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(transactionId),
+      SELECT ?, ?, ?, ?, ?, ?, 'order', ?, 'active' WHERE EXISTS (
+        SELECT 1 FROM payment_transactions
+        WHERE id = ? AND order_id = ? AND provider = 'test' AND callback_id = ?
+      )`)
+      .bind(grantId, userId, order.product_id, order.id, order.grant_type, durationDays, order.id,
+        transactionId, order.id, callbackId),
   ];
   if (order.grant_type === "duration") {
     statements.push(db.prepare(`INSERT OR IGNORE INTO membership_ledger
-      (user_id, delta_days, source_type, source_id, note) VALUES (?, ?, 'order', ?, ?)`)
-      .bind(userId, durationDays, order.id, `${order.product_name}测试订单权益`));
+      (user_id, delta_days, source_type, source_id, note)
+      SELECT ?, ?, 'order', ?, ? WHERE EXISTS (
+        SELECT 1 FROM entitlement_grants eg
+        JOIN payment_transactions pt ON pt.order_id = eg.order_id
+        WHERE eg.id = ? AND eg.user_id = ? AND eg.status = 'active'
+          AND pt.id = ? AND pt.provider = 'test' AND pt.callback_id = ?
+      )`).bind(userId, durationDays, order.id, `${order.product_name}测试订单权益`,
+        grantId, userId, transactionId, callbackId));
+    statements.push(db.prepare(`UPDATE users SET membership_type = 'duration', membership_end = datetime(
+      CASE WHEN membership_end IS NOT NULL AND datetime(membership_end) > CURRENT_TIMESTAMP
+        THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
+      WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
+      .bind(`+${durationDays} days`, userId));
+  } else {
+    statements.push(db.prepare("UPDATE users SET membership_type = 'lifetime', membership_end = NULL WHERE id = ? AND changes() = 1")
+      .bind(userId));
   }
-  await db.batch(statements);
-  const [paidOrder, membership] = await Promise.all([
+  statements.push(
+    db.prepare(`UPDATE orders SET status = 'paid', entitlement_grant_id = ?, paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+      updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND user_id = ? AND status IN ('created', 'awaiting_test_payment')
+        AND EXISTS (
+          SELECT 1 FROM payment_transactions WHERE id = ? AND order_id = ?
+            AND provider = 'test' AND callback_id = ?
+        ) AND EXISTS (
+          SELECT 1 FROM entitlement_grants WHERE id = ? AND user_id = ?
+            AND order_id = ? AND status = 'active'
+        )`)
+      .bind(grantId, order.id, userId, transactionId, order.id, callbackId,
+        grantId, userId, order.id),
+    db.prepare(`UPDATE payment_transactions SET status = 'processed', processed_at = COALESCE(processed_at, CURRENT_TIMESTAMP)
+      WHERE id = ? AND order_id = ? AND provider = 'test' AND callback_id = ?`)
+      .bind(transactionId, order.id, callbackId),
+  );
+  const results = await db.batch(statements);
+  const [callbackOwner, paidOrder, membership] = await Promise.all([
+    db.prepare(`SELECT order_id FROM payment_transactions
+      WHERE provider = 'test' AND callback_id = ?`).bind(callbackId).first<{ order_id: string }>(),
     db.prepare(`SELECT id, order_no, user_id, product_id, product_name, amount_cents,
       currency, status, channel, idempotency_key, return_context_json, entitlement_grant_id, paid_at, created_at
       FROM orders WHERE id = ?`).bind(order.id).first<CommerceOrderRow>(),
     userMembership(userId),
   ]);
-  await Promise.all([
-    db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'test_payment_completed', ?)")
-      .bind(userId, JSON.stringify({ orderId: order.id, productId: order.product_id, amountCents: Number(order.amount_cents), testMode: true })).run(),
-    db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'entitlement_granted', ?)")
-      .bind(userId, JSON.stringify({ orderId: order.id, grantType: order.grant_type, durationDays, source: "test_order" })).run(),
-  ]).catch(() => undefined);
+  if (!callbackOwner || callbackOwner.order_id !== order.id) {
+    return json({ error: "该测试回调未归属于当前订单", code: "PAYMENT_CALLBACK_CONFLICT" }, 409);
+  }
+  if (!paidOrder || paidOrder.status !== "paid" || paidOrder.entitlement_grant_id !== grantId) {
+    return json({ error: "测试支付未能完成权益发放，请重试", code: "PAYMENT_ENTITLEMENT_NOT_GRANTED" }, 409);
+  }
+  const idempotent = Number(results[1]?.meta?.changes ?? 0) === 0;
+  if (!idempotent) {
+    await Promise.all([
+      db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'test_payment_completed', ?)")
+        .bind(userId, JSON.stringify({ orderId: order.id, productId: order.product_id, amountCents: Number(order.amount_cents), testMode: true })).run(),
+      db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'entitlement_granted', ?)")
+        .bind(userId, JSON.stringify({ orderId: order.id, grantType: order.grant_type, durationDays, source: "test_order" })).run(),
+    ]).catch(() => undefined);
+  }
   return json({
     order: paidOrder ? publicOrder(paidOrder) : null,
     membershipType: membership?.membership_type ?? order.grant_type,
     membershipEnd: membership?.membership_end ?? null,
-    idempotent: false,
+    idempotent,
     testMode: true,
     notice: "测试支付已完成且权益已发放；本次操作不会产生真实扣款。",
   });
@@ -3667,15 +4642,45 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
+function safeUploadedMediaType(declaredType: string, bytes: Uint8Array) {
+  const type = declaredType.toLowerCase().split(";")[0].trim();
+  const ascii = (start: number, length: number) => String.fromCharCode(...bytes.slice(start, start + length));
+  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const isPng = bytes.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((value, index) => bytes[index] === value);
+  const isGif = ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a";
+  const isWebp = ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP";
+  const isWav = ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE";
+  const isOgg = ascii(0, 4) === "OggS";
+  const isMp3 = ascii(0, 3) === "ID3" || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+  const isAac = bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0;
+  const isMp4Audio = bytes.length >= 12 && ascii(4, 4) === "ftyp";
+  const isPdf = ascii(0, 5) === "%PDF-";
+  if (type === "image/jpeg" && isJpeg) return "image/jpeg";
+  if (type === "image/png" && isPng) return "image/png";
+  if (type === "image/gif" && isGif) return "image/gif";
+  if (type === "image/webp" && isWebp) return "image/webp";
+  if (new Set(["audio/wav", "audio/x-wav"]).has(type) && isWav) return "audio/wav";
+  if (new Set(["audio/mpeg", "audio/mp3"]).has(type) && isMp3) return "audio/mpeg";
+  if (new Set(["audio/aac", "audio/x-aac"]).has(type) && isAac) return "audio/aac";
+  if (new Set(["audio/mp4", "audio/m4a", "audio/x-m4a"]).has(type) && isMp4Audio) return "audio/mp4";
+  if (new Set(["audio/ogg", "application/ogg"]).has(type) && isOgg) return "audio/ogg";
+  if (type === "application/pdf" && isPdf) return "application/pdf";
+  return "";
+}
+
 async function adminUploadMedia(request: Request, admin: AdminIdentity) {
   const form = await request.formData();
   if (!hasAdminPermission(admin, "media.upload")) return adminForbidden("media.upload");
   const value = form.get("file");
   if (!(value instanceof File)) return json({ error: "请选择要上传的文件" }, 400);
-  const allowed = /^(audio\/|image\/)|^application\/(pdf|octet-stream)$/i.test(value.type);
-  if (!allowed) return json({ error: "仅支持音频、图片或PDF文件" }, 400);
   if (value.size < 1 || value.size > 25 * 1024 * 1024) return json({ error: "文件大小需在1B—25MB之间" }, 400);
   const bytes = await value.arrayBuffer();
+  const contentType = safeUploadedMediaType(value.type, new Uint8Array(bytes));
+  // Uploading a file is not a publication decision. Every new object starts
+  // private/member-only. A free preview is opened only when a versioned free
+  // content item is approved by a reviewer below.
+  const accessLevel = "member" as const;
+  if (!contentType) return json({ error: "文件类型或内容不安全；仅支持真实的 JPG/PNG/GIF/WebP、MP3/M4A/WAV/AAC/Ogg 和 PDF", code: "UNSAFE_MEDIA_TYPE" }, 415);
   const id = crypto.randomUUID();
   const safeName = value.name.normalize("NFKC").replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(-120) || "asset";
   const objectKey = `${chinaDateKey().replaceAll("-", "/")}/${id}-${safeName}`;
@@ -3684,7 +4689,7 @@ async function adminUploadMedia(request: Request, admin: AdminIdentity) {
   let storage = "r2";
   let fallbackData: string | null = null;
   if (bucket) {
-    await bucket.put(objectKey, bytes, { httpMetadata: { contentType: value.type || "application/octet-stream" } });
+    await bucket.put(objectKey, bytes, { httpMetadata: { contentType } });
   } else {
     if (value.size > 2 * 1024 * 1024) {
       return json({ error: "本地预览未绑定媒体存储，仅允许2MB以内文件；发布环境会自动使用R2存储。" }, 503);
@@ -3693,14 +4698,53 @@ async function adminUploadMedia(request: Request, admin: AdminIdentity) {
     fallbackData = bytesToBase64(new Uint8Array(bytes));
   }
   await getD1().prepare(`INSERT INTO media_assets
-    (id, object_key, file_name, content_type, byte_size, checksum, storage, fallback_data, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
-    .bind(id, objectKey, value.name.slice(0, 180), value.type || "application/octet-stream", value.size,
-      checksum, storage, fallbackData).run();
+    (id, object_key, file_name, content_type, byte_size, checksum, storage, fallback_data, access_level, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
+    .bind(id, objectKey, value.name.slice(0, 180), contentType, value.size,
+      checksum, storage, fallbackData, accessLevel).run();
   return json({
     ok: true,
-    asset: { id, fileName: value.name, contentType: value.type, byteSize: value.size, storage, url: `/api/app?media=${id}` },
+    asset: { id, fileName: value.name, contentType, byteSize: value.size, storage, accessLevel, url: `/api/app?media=${id}` },
   }, 201);
+}
+
+async function adminSetMediaAccess(payload: Record<string, unknown>) {
+  const admin = adminFromPayload(payload);
+  if (!admin) return adminForbidden("media.upload");
+  const id = trimmed(payload.id, 64);
+  const accessLevel = payload.accessLevel === "free" ? "free" : payload.accessLevel === "member" ? "member" : "";
+  if (!/^[0-9a-f-]{36}$/i.test(id) || !accessLevel) return json({ error: "媒体或访问权益无效" }, 400);
+  const db = getD1();
+  const current = await db.prepare("SELECT id, access_level FROM media_assets WHERE id = ? AND status = 'active'")
+    .bind(id).first<{ id: string; access_level: "free" | "member" }>();
+  if (!current) return json({ error: "媒体不存在或已停用" }, 404);
+  if (current.access_level === accessLevel) return json({ ok: true, id, accessLevel, duplicate: true });
+
+  if (accessLevel === "free") {
+    // Never mutate a private asset while its content is merely pending. The
+    // only member→free transition is inside adminReviewContent's atomic batch,
+    // alongside the exact reviewed content version becoming published.
+    return json({
+      error: "会员媒体不能单独设为免费；请关联免费内容并完成审核发布",
+      code: "MEDIA_REVIEW_REQUIRED",
+    }, 409);
+  } else {
+    if (!hasAdminPermission(admin, "media.upload")) return adminForbidden("media.upload");
+    const mediaUrl = mediaUrlForAsset(id);
+    const publishedFreeReference = await db.prepare(`SELECT id FROM content_items
+      WHERE access_level = 'free' AND status IN ('published','scheduled')
+        AND instr(payload_json, json_quote(?)) > 0 LIMIT 1`).bind(mediaUrl).first<{ id: number }>();
+    if (publishedFreeReference) {
+      return json({
+        error: "该媒体仍被已发布的免费/试听内容引用，请先下架或替换引用内容",
+        code: "MEDIA_IN_USE_BY_FREE_CONTENT",
+      }, 409);
+    }
+  }
+  const updated = await db.prepare(`UPDATE media_assets SET access_level = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'active' AND access_level = ?`).bind(accessLevel, id, current.access_level).run();
+  if (!updated.meta.changes) return json({ error: "媒体不存在或已停用" }, 404);
+  return json({ ok: true, id, accessLevel });
 }
 
 function requestedByteRange(header: string | null, size: number) {
@@ -3723,7 +4767,7 @@ function requestedByteRange(header: string | null, size: number) {
   return { invalid: false as const, start, end, length: end - start + 1 };
 }
 
-async function serveMedia(assetId: string, request: Request) {
+async function serveMedia(assetId: string, request: Request, setCookie?: string | string[], publiclyCacheable = false) {
   if (!/^[0-9a-f-]{36}$/i.test(assetId)) return json({ error: "媒体不存在" }, 404);
   const row = await getD1().prepare(`SELECT object_key, file_name, content_type, byte_size, storage, fallback_data
     FROM media_assets WHERE id = ? AND status = 'active'`).bind(assetId).first<{
@@ -3732,10 +4776,15 @@ async function serveMedia(assetId: string, request: Request) {
   if (!row) return json({ error: "媒体不存在" }, 404);
   const headers = new Headers({
     "content-type": row.content_type,
-    "cache-control": "public, max-age=31536000, immutable",
-    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(row.file_name)}`,
+    // A member response is never a transferable credential. Only a reviewed,
+    // published free preview may enter a shared HTTP cache, and then only for a
+    // short window so an operator can still revoke it promptly.
+    "cache-control": publiclyCacheable ? "public, max-age=60, must-revalidate" : "private, no-store",
+    "content-disposition": `${row.content_type === "application/pdf" ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(row.file_name)}`,
     "accept-ranges": "bytes",
+    "x-content-type-options": "nosniff",
   });
+  appendCookies(headers, setCookie);
   const range = requestedByteRange(request.headers.get("range"), row.byte_size);
   if (range?.invalid) {
     headers.set("content-range", `bytes */${row.byte_size}`);
@@ -3758,6 +4807,59 @@ async function serveMedia(assetId: string, request: Request) {
   return new Response(body, { status, headers });
 }
 
+async function serveAuthorizedMedia(assetId: string, request: Request) {
+  const mediaUrl = mediaUrlForAsset(assetId);
+  const entitlement = await getD1().prepare(`SELECT ma.id, ma.access_level,
+      EXISTS (
+        SELECT 1 FROM content_items ci
+        WHERE ci.access_level = 'free' AND ci.status IN ('published','scheduled')
+          AND (ci.publish_at IS NULL OR datetime(ci.publish_at) <= CURRENT_TIMESTAMP)
+          AND instr(ci.payload_json, json_quote(?)) > 0
+      ) AS published_free_reference,
+      EXISTS (
+        SELECT 1 FROM content_items ci
+        WHERE ci.content_type = 'audio_track' AND ci.access_level = 'free'
+          AND ci.status IN ('published','scheduled')
+          AND (ci.publish_at IS NULL OR datetime(ci.publish_at) <= CURRENT_TIMESTAMP)
+          AND instr(ci.payload_json, json_quote(?)) > 0
+      ) AS published_free_audio_reference
+    FROM media_assets ma WHERE ma.id = ? AND ma.status = 'active'`)
+    .bind(mediaUrl, mediaUrl, assetId).first<{
+      id: string; access_level: "free" | "member";
+      published_free_reference: number; published_free_audio_reference: number;
+    }>();
+  if (!entitlement) return json({ error: "媒体不存在" }, 404);
+  const publiclyFree = entitlement.access_level === "free" && Boolean(entitlement.published_free_reference);
+  const quotaControlledAudio = publiclyFree && Boolean(entitlement.published_free_audio_reference);
+  if (publiclyFree && !quotaControlledAudio) return serveMedia(assetId, request, undefined, true);
+
+  const identity = await ensureUser(request, { persist: false });
+  if (identity.bootstrapDeferred) {
+    const response = json({ error: "账号状态正在安全迁移，请重试播放", code: "IDENTITY_PREPARATION_REQUIRED" }, 409, identity.setCookie);
+    response.headers.set("retry-after", "1");
+    return response;
+  }
+  const membership = await userMembership(identity.userId);
+  let allowed = membershipIsActive(membership);
+  if (!allowed) {
+    const admin = await getAdminIdentity(getD1(), request, false);
+    allowed = Boolean(admin);
+  }
+  if (!allowed && quotaControlledAudio) {
+    if (!identity.signedIn) {
+      return json({ error: "登录后每天可试听1条电台音频", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403, identity.setCookie);
+    }
+    allowed = await grantDailyFreeAudio(identity.userId, assetId);
+    if (!allowed) {
+      return json({ error: "今日1条免费试听已使用，完整电台需开通会员", code: "PAYWALL_AUDIO_DAILY" }, 403, identity.setCookie);
+    }
+  }
+  if (!allowed) {
+    return json({ error: "该媒体属于完整会员内容", code: "PAYWALL_MEDIA" }, 403, identity.setCookie);
+  }
+  return serveMedia(assetId, request, identity.setCookie, false);
+}
+
 async function adminList(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const db = getD1();
@@ -3766,11 +4868,11 @@ async function adminList(payload: Record<string, unknown>) {
       FROM redemption_codes ORDER BY id DESC LIMIT 100`).all(),
     db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 100`).all(),
-    db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json, ci.status,
+    db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json, ci.access_level, ci.status,
       ci.publish_at, ci.version, ci.updated_at,
       (SELECT COUNT(*) FROM content_item_versions civ WHERE civ.content_id = ci.id) AS version_count
       FROM content_items ci ORDER BY ci.id DESC LIMIT 500`).all(),
-    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, status, created_at,
+    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, access_level, status, created_at,
       '/api/app?media=' || id AS url FROM media_assets ORDER BY created_at DESC LIMIT 200`).all(),
     db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
       b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
@@ -3827,16 +4929,39 @@ async function adminCreateCodes(payload: Record<string, unknown>) {
   }
   if (!Number.isFinite(count) || count < 1 || count > 200) return json({ error: "每批生成数量需在 1—200 个之间" }, 400);
   const db = getD1();
-  const plainCodes: string[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const code = randomCode();
-    plainCodes.push(code);
-    await db.prepare(`INSERT INTO redemption_codes
-      (code_hash, code_preview, batch_name, grant_type, duration_days, channel, max_uses, valid_until)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(await hashCode(code), maskCode(code), batchName, grantType, durationDays, channel, maxUses, validUntil).run();
+  // One JSON-backed statement inserts the whole export atomically, keeping a
+  // 200-code request well below D1's per-invocation query budget. A hash
+  // collision aborts the entire statement, so no unexported partial batch can
+  // be left behind; the bounded retry regenerates every plaintext code.
+  const maxInsertAttempts = 3;
+  for (let attempt = 0; attempt < maxInsertAttempts; attempt += 1) {
+    const plainCodes: string[] = [];
+    const uniqueCodes = new Set<string>();
+    while (plainCodes.length < count) {
+      const code = randomCode();
+      if (uniqueCodes.has(code)) continue;
+      uniqueCodes.add(code);
+      plainCodes.push(code);
+    }
+    const generatedJson = JSON.stringify(await Promise.all(plainCodes.map(async (code) => ({
+      codeHash: await hashCode(code),
+      codePreview: maskCode(code),
+    }))));
+    try {
+      await db.prepare(`INSERT INTO redemption_codes
+        (code_hash, code_preview, batch_name, grant_type, duration_days, channel, max_uses, valid_until)
+        SELECT json_extract(generated.value, '$.codeHash'),
+          json_extract(generated.value, '$.codePreview'), ?, ?, ?, ?, ?, ?
+        FROM json_each(?) AS generated`)
+        .bind(batchName, grantType, durationDays, channel, maxUses, validUntil, generatedJson).run();
+      return json({ ok: true, grantType, durationDays: grantType === "lifetime" ? null : durationDays, codes: plainCodes });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const hashCollision = /UNIQUE constraint failed:\s*redemption_codes\.code_hash/i.test(message);
+      if (!hashCollision) throw error;
+    }
   }
-  return json({ ok: true, grantType, durationDays: grantType === "lifetime" ? null : durationDays, codes: plainCodes });
+  return json({ error: "兑换码生成发生冲突，请重试", code: "REDEMPTION_CODE_COLLISION" }, 409);
 }
 
 async function adminDisableCode(payload: Record<string, unknown>) {
@@ -3862,9 +4987,134 @@ async function adminUpdateConfig(payload: Record<string, unknown>) {
   return json({ ok: true });
 }
 
+function publishabilityError(contentType: string, contentKey: string, payload: Record<string, unknown>) {
+  const issues = validatePublishableContent(contentType, payload);
+  return issues.length ? json({
+    error: `${contentKey} 缺少可核验的发布信息：${issues.join("；")}`,
+    code: "CONTENT_SOURCE_INCOMPLETE",
+    issues,
+  }, 409) : null;
+}
+
+type ContentMediaValidation = {
+  invalid: Response | null;
+  promotableAssetIds: string[];
+  referencedAssetIds: string[];
+};
+
+function collectManagedMediaAssetIds(value: unknown, found = new Set<string>(), depth = 0) {
+  if (depth > 8 || value === null || value === undefined) return found;
+  if (typeof value === "string") {
+    const assetId = managedMediaAssetId(value);
+    if (assetId) found.add(assetId);
+    return found;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectManagedMediaAssetIds(item, found, depth + 1);
+    return found;
+  }
+  if (typeof value === "object") {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      collectManagedMediaAssetIds(child, found, depth + 1);
+    }
+  }
+  return found;
+}
+
+async function validateContentMediaAssets(
+  contentType: string,
+  contentKey: string,
+  accessLevel: "free" | "member",
+  content: Record<string, unknown>,
+  allowReviewedFreePromotion = false,
+): Promise<ContentMediaValidation> {
+  const rawAudioUrl = trimmed(content.audioUrl, 800);
+  const audioAssetId = managedMediaAssetId(rawAudioUrl);
+  const referencedAssetIds = Array.from(collectManagedMediaAssetIds(content));
+  if (referencedAssetIds.length > 40) {
+    return {
+      invalid: json({ error: `${contentKey} 单条内容最多引用40个媒体文件`, code: "MEDIA_REFERENCE_LIMIT" }, 409),
+      promotableAssetIds: [],
+      referencedAssetIds: [],
+    };
+  }
+  if (audioAssetId && !referencedAssetIds.includes(audioAssetId)) referencedAssetIds.push(audioAssetId);
+  const rows = referencedAssetIds.length ? await getD1().prepare(`SELECT id, status, content_type, access_level
+    FROM media_assets WHERE id IN (${referencedAssetIds.map(() => "?").join(",")})`)
+    .bind(...referencedAssetIds).all<{
+      id: string; status: string; content_type: string; access_level: "free" | "member";
+    }>() : { results: [] as Array<{ id: string; status: string; content_type: string; access_level: "free" | "member" }> };
+  const assetById = new Map(rows.results.map((row) => [row.id, row]));
+  const audioAsset = audioAssetId ? assetById.get(audioAssetId) ?? null : null;
+  const policy = audioReferencePolicy(contentType, accessLevel, content, audioAsset ? {
+    id: audioAsset.id,
+    status: audioAsset.status,
+    contentType: audioAsset.content_type,
+    accessLevel: audioAsset.access_level,
+  } : null);
+  if (!policy.ok) {
+    const messages: Record<typeof policy.code, string> = {
+      AUDIO_ASSET_REQUIRED: "音频节目必须上传受管媒体文件",
+      MANAGED_MEDIA_REQUIRED: "音频只能引用站内受鉴权媒体，不能使用公开目录或第三方直链",
+      MEDIA_ASSET_MISSING: "引用的媒体不存在或已停用",
+      AUDIO_ASSET_TYPE_INVALID: "音频字段引用的文件不是受支持的音频类型",
+      MEDIA_ACCESS_MISMATCH: "内容权益与媒体权益不一致，请上传同权益媒体或重新走免费审核",
+    };
+    return {
+      invalid: json({
+        error: `${contentKey} 无法发布：${messages[policy.code]}`,
+        code: policy.code,
+      }, 409),
+      promotableAssetIds: [],
+      referencedAssetIds: [],
+    };
+  }
+  const promotableAssetIds: string[] = [];
+  for (const assetId of referencedAssetIds) {
+    const referenced = assetById.get(assetId);
+    if (!referenced || referenced.status !== "active") {
+      return {
+        invalid: json({ error: `${contentKey} 引用的媒体不存在或已停用`, code: "MEDIA_ASSET_MISSING" }, 409),
+        promotableAssetIds: [],
+        referencedAssetIds: [],
+      };
+    }
+    if (referenced.access_level === accessLevel) continue;
+    if (accessLevel === "free" && referenced.access_level === "member") {
+      promotableAssetIds.push(assetId);
+      continue;
+    }
+    return {
+      invalid: json({ error: `${contentKey} 的内容权益与引用媒体权益不一致`, code: "MEDIA_ACCESS_MISMATCH" }, 409),
+      promotableAssetIds: [],
+      referencedAssetIds: [],
+    };
+  }
+  if (promotableAssetIds.length && !allowReviewedFreePromotion) {
+    return {
+      invalid: json({
+        error: `${contentKey} 引用的会员媒体尚未通过免费/试听审核`,
+        code: "MEDIA_ACCESS_REVIEW_REQUIRED",
+      }, 409),
+      promotableAssetIds: [],
+      referencedAssetIds: [],
+    };
+  }
+  return {
+    invalid: null,
+    promotableAssetIds: Array.from(new Set(promotableAssetIds)),
+    referencedAssetIds,
+  };
+}
+
 async function adminUpsertContentBatch(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  if (!Array.isArray(payload.items) || payload.items.length < 1 || payload.items.length > 100) return json({ error: "每次需导入 1—100 条内容" }, 400);
+  // This action is the single-record editor. Multi-row work must use the
+  // durable content-import workflow so an HTTP error can never leave a silent
+  // partially-saved batch or exceed D1's per-invocation query budget.
+  if (!Array.isArray(payload.items) || payload.items.length !== 1) {
+    return json({ error: "手工编辑每次只能保存1条；批量内容请使用可续传的文件导入任务", code: "DURABLE_IMPORT_REQUIRED" }, 400);
+  }
   const db = getD1();
   const admin = adminFromPayload(payload)!;
   const saved: Array<{ id: number; contentKey: string; version: number }> = [];
@@ -3873,6 +5123,7 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     const contentType = String(item.contentType ?? "");
     const contentKey = String(item.contentKey ?? "").trim();
     const title = String(item.title ?? "").trim().slice(0, 120);
+    const accessLevel = item.accessLevel === "free" ? "free" : "member";
     let status = CONTENT_STATUSES.has(String(item.status)) ? String(item.status) : "draft";
     if (!CONTENT_TYPES.has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
     const radarContent = new Set(["exam_event", "exam_notice", "job_position"]).has(contentType);
@@ -3894,53 +5145,99 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     }
     if (status === "scheduled" && (!publishAt || Date.parse(publishAt) <= Date.now())) return json({ error: `${contentKey} 定时发布时间必须晚于当前时间` }, 400);
     if (status === "published" && publishAt && Date.parse(publishAt) > Date.now()) status = "scheduled";
-    const existing = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
+    if (new Set(["pending_review", "published", "scheduled"]).has(status)) {
+      const invalid = publishabilityError(contentType, contentKey, item.payload as Record<string, unknown>);
+      if (invalid) return invalid;
+    }
+    const mediaValidation = await validateContentMediaAssets(
+      contentType,
+      contentKey,
+      accessLevel,
+      item.payload as Record<string, unknown>,
+      !new Set(["published", "scheduled"]).has(status),
+    );
+    if (mediaValidation.invalid) return mediaValidation.invalid;
+    const existing = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, access_level, status,
       publish_at, version FROM content_items WHERE content_key = ?`).bind(contentKey).first<Record<string, unknown>>();
     if (existing) {
+      const existingType = String(existing.content_type);
+      if (existingType !== contentType) {
+        return json({
+          error: `${contentKey} 已属于另一业务类型，内容标识和业务类型创建后不可修改；请复制为新内容`,
+          code: "CONTENT_IDENTITY_CONFLICT",
+        }, 409);
+      }
+      // Authorize against persisted truth as well as the request. Otherwise a
+      // content editor could claim a radar draft (or the reverse) by supplying
+      // a different contentType for an existing globally-unique key.
+      const existingRadarContent = new Set(["exam_event", "exam_notice", "job_position"]).has(existingType);
+      const existingWritePermission: AdminPermission = existingRadarContent ? "radar.write" : "content.write";
+      if (!hasAdminPermission(admin, existingWritePermission) && admin.role !== "super_admin") {
+        return adminForbidden(existingWritePermission);
+      }
       if (new Set(["published", "scheduled"]).has(String(existing.status))
         && admin.role !== "reviewer" && admin.role !== "super_admin") {
         return json({ error: `${contentKey} 已发布；请复制为新草稿并提交审核，避免绕过审核直接改动线上内容` }, 409);
       }
       const currentVersion = Math.max(1, Number(existing.version ?? 1));
+      const expectedVersion = Math.floor(Number(item.expectedVersion));
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 1 || expectedVersion !== currentVersion) {
+        return json({
+          error: `${contentKey} 已被其他管理员更新，请刷新后重试`,
+          code: "CONTENT_VERSION_CONFLICT",
+          currentVersion,
+        }, 409);
+      }
       const nextVersion = currentVersion + 1;
-      await db.batch([
+      const batchResults = await db.batch([
         db.prepare(`INSERT OR IGNORE INTO content_item_versions
-          (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
-          .bind(Number(existing.id), currentVersion, String(existing.content_type), String(existing.content_key),
-            String(existing.title), String(existing.payload_json), String(existing.status), existing.publish_at ?? null),
-        db.prepare(`UPDATE content_items SET content_type = ?, title = ?, payload_json = ?, status = ?,
-          publish_at = ?, review_note = CASE WHEN ? = 'pending_review' THEN '' ELSE review_note END,
-          submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
-          submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
-          reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
-          reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
-          version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-          .bind(contentType, title, payloadJson, status, publishAt, status, status, admin.id, status,
-            status, admin.id, status, nextVersion, Number(existing.id)),
+          (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+          .bind(Number(existing.id), currentVersion, existingType, String(existing.content_key),
+            String(existing.title), String(existing.payload_json), String(existing.access_level ?? "member"), String(existing.status), existing.publish_at ?? null),
+        db.prepare(`UPDATE content_items SET title = ?, payload_json = ?, access_level = ?, status = ?,
+            publish_at = ?, review_note = CASE WHEN ? = 'pending_review' THEN '' ELSE review_note END,
+            submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
+            submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
+            reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
+            reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
+            version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?`)
+          .bind(title, payloadJson, accessLevel, status, publishAt, status, status, admin.id, status,
+            status, admin.id, status, nextVersion, Number(existing.id), expectedVersion),
         db.prepare(`INSERT OR REPLACE INTO content_item_versions
-          (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'update')`)
-          .bind(Number(existing.id), nextVersion, contentType, contentKey, title, payloadJson, status, publishAt),
+          (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+          SELECT id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, 'update'
+          FROM content_items WHERE id = ? AND version = ?`)
+          .bind(Number(existing.id), nextVersion),
       ]);
+      const updated = batchResults[1];
+      if (!updated.meta.changes) {
+        return json({ error: `${contentKey} 已被其他管理员更新，请刷新后重试`, code: "CONTENT_VERSION_CONFLICT" }, 409);
+      }
       saved.push({ id: Number(existing.id), contentKey, version: nextVersion });
     } else {
-      const inserted = await db.prepare(`INSERT INTO content_items
-        (content_type, content_key, title, payload_json, status, publish_at, version,
-          submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1,
-          CASE WHEN ? = 'pending_review' THEN ? ELSE NULL END,
-          CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE NULL END,
-          CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE NULL END,
-          CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END,
-          CURRENT_TIMESTAMP)`)
-        .bind(contentType, contentKey, title, payloadJson, status, publishAt,
-          status, admin.id, status, status, admin.id, status).run();
-      const id = Number(inserted.meta.last_row_id);
-      await db.prepare(`INSERT INTO content_item_versions
-        (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-        VALUES (?, 1, ?, ?, ?, ?, ?, ?, 'create')`)
-        .bind(id, contentType, contentKey, title, payloadJson, status, publishAt).run();
+      await db.batch([
+        db.prepare(`INSERT INTO content_items
+          (content_type, content_key, title, payload_json, access_level, status, publish_at, version,
+            submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1,
+            CASE WHEN ? = 'pending_review' THEN ? ELSE NULL END,
+            CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE NULL END,
+            CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE NULL END,
+            CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END,
+            CURRENT_TIMESTAMP)`)
+          .bind(contentType, contentKey, title, payloadJson, accessLevel, status, publishAt,
+            status, admin.id, status, status, admin.id, status),
+        db.prepare(`INSERT INTO content_item_versions
+          (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+          SELECT id, 1, content_type, content_key, title, payload_json, access_level, status, publish_at, 'create'
+          FROM content_items WHERE content_key = ? AND version = 1`)
+          .bind(contentKey),
+      ]);
+      const created = await db.prepare("SELECT id FROM content_items WHERE content_key = ?")
+        .bind(contentKey).first<{ id: number }>();
+      if (!created) throw new Error("CONTENT_CREATE_COMMIT_MISSING");
+      const id = Number(created.id);
       saved.push({ id, contentKey, version: 1 });
     }
   }
@@ -3959,9 +5256,14 @@ async function adminSetContentStatus(payload: Record<string, unknown>) {
   const status = String(payload.status ?? "draft");
   if (!Number.isFinite(id) || id < 1 || !CONTENT_STATUSES.has(status)) return json({ error: "内容或状态无效" }, 400);
   const db = getD1();
-  const current = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
+  const current = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, access_level, status,
     publish_at, version FROM content_items WHERE id = ?`).bind(id).first<Record<string, unknown>>();
   if (!current) return json({ error: "内容不存在" }, 404);
+  const currentVersion = Math.max(1, Number(current.version ?? 1));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  if (!Number.isInteger(expectedVersion) || expectedVersion !== currentVersion) {
+    return json({ error: "内容已被其他管理员更新，请刷新后重试", code: "CONTENT_VERSION_CONFLICT", currentVersion }, 409);
+  }
   const admin = adminFromPayload(payload)!;
   const radarContent = new Set(["exam_event", "exam_notice", "job_position"]).has(String(current.content_type));
   if (new Set(["published", "scheduled"]).has(String(current.status))
@@ -3972,14 +5274,15 @@ async function adminSetContentStatus(payload: Record<string, unknown>) {
   if (new Set(["published", "scheduled", "archived", "rejected"]).has(status)) {
     if (admin.role !== "reviewer" && admin.role !== "super_admin") return json({ error: "只有审核员可以发布、驳回或下线内容" }, 403);
     if (admin.role === "reviewer" && new Set(["published", "scheduled", "rejected"]).has(status)
-      && String(current.status) !== "pending_review") {
+      && String(current.status) !== "pending_review"
+      && !(status === "published" && String(current.status) === "archived")) {
       return json({ error: "内容尚未提交审核，不能直接发布或驳回" }, 409);
     }
   } else {
     const writePermission: AdminPermission = radarContent ? "radar.write" : "content.write";
     if (!hasAdminPermission(admin, writePermission)) return adminForbidden(writePermission);
   }
-  const nextVersion = Math.max(1, Number(current.version ?? 1)) + 1;
+  const nextVersion = currentVersion + 1;
   let publishAt = current.publish_at ? String(current.publish_at) : null;
   if (payload.publishAt) {
     const requestedPublishAt = Date.parse(String(payload.publishAt));
@@ -3988,26 +5291,42 @@ async function adminSetContentStatus(payload: Record<string, unknown>) {
   }
   if (status === "published") publishAt = null;
   if (status === "scheduled" && (!publishAt || Date.parse(publishAt) <= Date.now())) return json({ error: "请先设置未来的发布时间" }, 400);
-  await db.batch([
+  if (new Set(["pending_review", "published", "scheduled"]).has(status)) {
+    let contentPayload: Record<string, unknown> = {};
+    try { contentPayload = JSON.parse(String(current.payload_json)) as Record<string, unknown>; } catch { contentPayload = {}; }
+    const invalid = publishabilityError(String(current.content_type), String(current.content_key), contentPayload);
+    if (invalid) return invalid;
+    const mediaValidation = await validateContentMediaAssets(
+      String(current.content_type),
+      String(current.content_key),
+      current.access_level === "free" ? "free" : "member",
+      contentPayload,
+      status === "pending_review",
+    );
+    if (mediaValidation.invalid) return mediaValidation.invalid;
+  }
+  const batchResults = await db.batch([
     db.prepare(`INSERT OR IGNORE INTO content_item_versions
-      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
-      .bind(id, Number(current.version ?? 1), String(current.content_type), String(current.content_key),
-        String(current.title), String(current.payload_json), String(current.status), current.publish_at ?? null),
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+      .bind(id, currentVersion, String(current.content_type), String(current.content_key),
+        String(current.title), String(current.payload_json), String(current.access_level ?? "member"), String(current.status), current.publish_at ?? null),
     db.prepare(`UPDATE content_items SET status = ?, publish_at = ?, review_note = ?,
-      submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
-      submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
-      reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
-      reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
-      version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-      .bind(status, publishAt, trimmed(payload.reviewNote, 1000), status, admin.id, status,
-        status, admin.id, status, nextVersion, id),
+        submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
+        submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
+        reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
+        reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
+        version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?`)
+        .bind(status, publishAt, trimmed(payload.reviewNote, 1000), status, admin.id, status,
+          status, admin.id, status, nextVersion, id, expectedVersion),
     db.prepare(`INSERT OR REPLACE INTO content_item_versions
-      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'status')`)
-      .bind(id, nextVersion, String(current.content_type), String(current.content_key), String(current.title),
-        String(current.payload_json), status, publishAt),
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, 'status'
+      FROM content_items WHERE id = ? AND version = ?`)
+      .bind(id, nextVersion),
   ]);
+  const updated = batchResults[1];
+  if (!updated.meta.changes) return json({ error: "内容已被其他管理员更新，请刷新后重试", code: "CONTENT_VERSION_CONFLICT" }, 409);
   return json({ ok: true, id, status, version: nextVersion });
 }
 
@@ -4020,7 +5339,7 @@ async function adminListContentVersions(payload: Record<string, unknown>) {
   const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(content.content_type) ? "radar.read" : "content.read";
   if (!canAdmin(payload, permission)) return adminForbidden(permission);
   const rows = await getD1().prepare(`SELECT id, content_id, version, content_type, content_key, title,
-    payload_json, status, publish_at, change_type, created_at
+    payload_json, access_level, status, publish_at, change_type, created_at
     FROM content_item_versions WHERE content_id = ? ORDER BY version DESC LIMIT 100`).bind(id).all();
   return json({ ok: true, versions: rows.results });
 }
@@ -4036,23 +5355,49 @@ async function adminRollbackContent(payload: Record<string, unknown>) {
       .bind(contentId, version).first<Record<string, unknown>>(),
   ]);
   if (!current || !snapshot) return json({ error: "内容或历史版本不存在" }, 404);
-  const nextVersion = Math.max(1, Number(current.version ?? 1)) + 1;
-  await db.batch([
+  const currentVersion = Math.max(1, Number(current.version ?? 1));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  if (!Number.isInteger(expectedVersion) || expectedVersion !== currentVersion) {
+    return json({ error: "内容已被其他管理员更新，请刷新后重试", code: "CONTENT_VERSION_CONFLICT", currentVersion }, 409);
+  }
+  if (String(snapshot.content_type) !== String(current.content_type)
+    || String(snapshot.content_key) !== String(current.content_key)) {
+    return json({ error: "历史版本的内容身份与当前记录不一致，禁止跨类型回滚", code: "CONTENT_IDENTITY_CONFLICT" }, 409);
+  }
+  let restoredPayload: Record<string, unknown> = {};
+  try { restoredPayload = JSON.parse(String(snapshot.payload_json)) as Record<string, unknown>; } catch { restoredPayload = {}; }
+  if (new Set(["pending_review", "published", "scheduled"]).has(String(snapshot.status))) {
+    const invalid = publishabilityError(String(current.content_type), String(current.content_key), restoredPayload);
+    if (invalid) return invalid;
+  }
+  const restoredStatus = String(snapshot.status);
+  const mediaValidation = await validateContentMediaAssets(
+    String(current.content_type),
+    String(current.content_key),
+    snapshot.access_level === "free" ? "free" : "member",
+    restoredPayload,
+    !new Set(["published", "scheduled"]).has(restoredStatus),
+  );
+  if (mediaValidation.invalid) return mediaValidation.invalid;
+  const nextVersion = currentVersion + 1;
+  const batchResults = await db.batch([
     db.prepare(`INSERT OR IGNORE INTO content_item_versions
-      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
-      .bind(contentId, Number(current.version ?? 1), String(current.content_type), String(current.content_key),
-        String(current.title), String(current.payload_json), String(current.status), current.publish_at ?? null),
-    db.prepare(`UPDATE content_items SET content_type = ?, title = ?, payload_json = ?, status = ?,
-      publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-      .bind(String(snapshot.content_type), String(snapshot.title), String(snapshot.payload_json), String(snapshot.status),
-        snapshot.publish_at ?? null, nextVersion, contentId),
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
+      .bind(contentId, currentVersion, String(current.content_type), String(current.content_key),
+        String(current.title), String(current.payload_json), String(current.access_level ?? "member"), String(current.status), current.publish_at ?? null),
+    db.prepare(`UPDATE content_items SET title = ?, payload_json = ?, access_level = ?, status = ?,
+      publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ?`)
+      .bind(String(snapshot.title), String(snapshot.payload_json), String(snapshot.access_level ?? "member"), String(snapshot.status),
+        snapshot.publish_at ?? null, nextVersion, contentId, expectedVersion),
     db.prepare(`INSERT OR REPLACE INTO content_item_versions
-      (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'rollback')`)
-      .bind(contentId, nextVersion, String(snapshot.content_type), String(current.content_key), String(snapshot.title),
-        String(snapshot.payload_json), String(snapshot.status), snapshot.publish_at ?? null),
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, 'rollback'
+      FROM content_items WHERE id = ? AND version = ?`)
+      .bind(contentId, nextVersion),
   ]);
+  const updated = batchResults[1];
+  if (!updated.meta.changes) return json({ error: "内容已被其他管理员更新，请刷新后重试", code: "CONTENT_VERSION_CONFLICT" }, 409);
   return json({ ok: true, id: contentId, restoredFrom: version, version: nextVersion });
 }
 
@@ -4067,15 +5412,22 @@ async function adminDuplicateContent(payload: Record<string, unknown>) {
   if (!source) return json({ error: "源内容不存在" }, 404);
   const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(source.content_type)) ? "radar.write" : "content.write";
   if (!canAdmin(payload, permission)) return adminForbidden(permission);
-  const result = await db.prepare(`INSERT INTO content_items
-    (content_type, content_key, title, payload_json, status, publish_at, version, updated_at)
-    VALUES (?, ?, ?, ?, 'draft', NULL, 1, CURRENT_TIMESTAMP)`)
-    .bind(String(source.content_type), newKey, title || `${String(source.title)}（副本）`, String(source.payload_json)).run();
-  const newId = Number(result.meta.last_row_id);
-  await db.prepare(`INSERT INTO content_item_versions
-    (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
-    VALUES (?, 1, ?, ?, ?, ?, 'draft', NULL, 'duplicate')`)
-    .bind(newId, String(source.content_type), newKey, title || `${String(source.title)}（副本）`, String(source.payload_json)).run();
+  const duplicateTitle = title || `${String(source.title)}（副本）`;
+  await db.batch([
+    db.prepare(`INSERT INTO content_items
+      (content_type, content_key, title, payload_json, access_level, status, publish_at, version, updated_at)
+      VALUES (?, ?, ?, ?, 'member', 'draft', NULL, 1, CURRENT_TIMESTAMP)`)
+      .bind(String(source.content_type), newKey, duplicateTitle, String(source.payload_json)),
+    db.prepare(`INSERT INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT id, 1, content_type, content_key, title, payload_json, access_level, status, publish_at, 'duplicate'
+      FROM content_items WHERE content_key = ? AND version = 1`)
+      .bind(newKey),
+  ]);
+  const created = await db.prepare("SELECT id FROM content_items WHERE content_key = ?")
+    .bind(newKey).first<{ id: number }>();
+  if (!created) throw new Error("CONTENT_DUPLICATE_COMMIT_MISSING");
+  const newId = Number(created.id);
   return json({ ok: true, id: newId, contentKey: newKey, version: 1 });
 }
 
@@ -4083,12 +5435,73 @@ function trimmed(value: unknown, maxLength: number) {
   return String(value ?? "").trim().slice(0, maxLength);
 }
 
+function abandonActiveSessionsByBankCode(db: ReturnType<typeof getD1>, bankCode: string) {
+  return db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active' AND json_valid(bank_codes_json)
+      AND EXISTS (SELECT 1 FROM json_each(practice_sessions.bank_codes_json)
+        WHERE json_each.value = ?)`)
+    .bind(bankCode);
+}
+
+type QuestionPostStateGuard = { questionId: number; version: number; reviewStatus?: string; status?: string };
+
+function questionPostStateGuard(guard: QuestionPostStateGuard) {
+  const clauses = ["changed.id = ?", "changed.version = ?"];
+  const binds: unknown[] = [guard.questionId, guard.version];
+  if (guard.reviewStatus) { clauses.push("changed.review_status = ?"); binds.push(guard.reviewStatus); }
+  if (guard.status) { clauses.push("changed.status = ?"); binds.push(guard.status); }
+  return { sql: `EXISTS (SELECT 1 FROM questions changed WHERE ${clauses.join(" AND ")})`, binds };
+}
+
+function abandonActiveSessionsByQuestionCode(
+  db: ReturnType<typeof getD1>,
+  questionCode: string,
+  postState: QuestionPostStateGuard,
+) {
+  const guard = questionPostStateGuard(postState);
+  return db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active' AND json_valid(question_codes_json)
+      AND EXISTS (SELECT 1 FROM json_each(practice_sessions.question_codes_json)
+        WHERE json_each.value = ?)
+      AND ${guard.sql}`)
+    .bind(questionCode, ...guard.binds);
+}
+
+function draftInvalidPublishedBanksForQuestion(db: ReturnType<typeof getD1>, postState: QuestionPostStateGuard) {
+  const guard = questionPostStateGuard(postState);
+  return db.prepare(`UPDATE question_banks AS qb SET status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE qb.status = 'published'
+      AND ${guard.sql}
+      AND EXISTS (SELECT 1 FROM question_bank_items affected
+        WHERE affected.bank_id = qb.id AND affected.question_id = ?)
+      AND (
+        NOT EXISTS (SELECT 1 FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
+          WHERE qbi.bank_id = qb.id AND q.status = 'active')
+        OR EXISTS (SELECT 1 FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
+          WHERE qbi.bank_id = qb.id AND q.status = 'active'
+            AND NOT ${QUESTION_BANK_PUBLISHABLE_ITEM_SQL})
+      )`).bind(...guard.binds, postState.questionId);
+}
+
+function abandonActiveSessionsForDraftedQuestionBanks(db: ReturnType<typeof getD1>, postState: QuestionPostStateGuard) {
+  const guard = questionPostStateGuard(postState);
+  return db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active' AND json_valid(bank_codes_json)
+      AND ${guard.sql}
+      AND EXISTS (
+        SELECT 1 FROM json_each(practice_sessions.bank_codes_json) selected
+        JOIN question_banks qb ON qb.bank_code = selected.value AND qb.status = 'draft'
+        JOIN question_bank_items qbi ON qbi.bank_id = qb.id AND qbi.question_id = ?
+      )`).bind(...guard.binds, postState.questionId);
+}
+
 async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
-  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  const bankCode = trimmed(payload.bankCode, 60).toUpperCase();
+  if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
+  const requestedBankCode = trimmed(payload.bankCode, 60).toUpperCase();
+  let bankCode = requestedBankCode;
   const name = trimmed(payload.name, 80);
   const examType = trimmed(payload.examType, 20);
-  const province = trimmed(payload.province, 20) || null;
+  const province = normalizeProvince(payload.province) || null;
   const subject = trimmed(payload.subject, 10);
   const description = trimmed(payload.description, 500);
   const coverColor = new Set(["blue", "orange", "green", "purple"]).has(String(payload.coverColor)) ? String(payload.coverColor) : "blue";
@@ -4097,32 +5510,88 @@ async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
   const bankId = Number.isFinite(bankIdValue) && bankIdValue > 0 ? bankIdValue : null;
   const yearValue = Number(payload.examYear);
   const examYear = Number.isInteger(yearValue) && yearValue >= 2020 && yearValue <= 2100 ? yearValue : null;
-  if (!/^[A-Z0-9][A-Z0-9_-]{2,59}$/.test(bankCode)) return json({ error: "题库编码需使用3—60位大写字母、数字、横线或下划线" }, 400);
+  const db = getD1();
+  const existingBank = bankId ? await db.prepare(`SELECT b.id, b.bank_code, b.status, b.exam_type, b.province,
+      b.exam_year, b.subject,
+      (SELECT COUNT(*) FROM question_bank_items qbi WHERE qbi.bank_id = b.id) AS question_count,
+      (SELECT COUNT(*) FROM question_imports qi WHERE qi.bank_id = b.id) AS import_count,
+      (SELECT COUNT(*) FROM user_question_banks uqb WHERE uqb.bank_code = b.bank_code) AS selection_count,
+      (SELECT COUNT(*) FROM practice_sessions ps WHERE ps.status = 'active' AND EXISTS (
+        SELECT 1 FROM json_each(ps.bank_codes_json) selected WHERE selected.value = b.bank_code
+      )) AS active_session_count
+      FROM question_banks b WHERE b.id = ?`)
+    .bind(bankId).first<{
+      id: number; bank_code: string; status: string; exam_type: string; province: string | null;
+      exam_year: number | null; subject: string; question_count: number; import_count: number;
+      selection_count: number; active_session_count: number;
+    }>() : null;
+  if (bankId && !existingBank) return json({ error: "要编辑的题库不存在" }, 404);
+  if (existingBank) {
+    // Legacy seed codes are lowercase. Once a bank exists its code is an
+    // immutable identity, so an edit keeps the exact stored code instead of
+    // uppercasing the form value and falsely reporting an identity change.
+    bankCode = existingBank.bank_code;
+    const identityPolicy = inspectQuestionBankIdentityChange({
+      bankCode: existingBank.bank_code,
+      examType: existingBank.exam_type,
+      province: existingBank.province,
+      examYear: existingBank.exam_year,
+      subject: existingBank.subject,
+      status: existingBank.status,
+      questionCount: existingBank.question_count,
+      importCount: existingBank.import_count,
+      selectionCount: existingBank.selection_count,
+      activeSessionCount: existingBank.active_session_count,
+    }, { bankCode, examType, province, examYear, subject });
+    if (identityPolicy.locked) {
+      return json({
+        error: identityPolicy.codeChanged
+          ? "题库编码创建后永久不可修改；请复制为新题库后再调整范围"
+          : `题库${identityPolicy.lockedFields.join("、")}已锁定（${identityPolicy.lockReasons.join("、")}）；请复制为新题库后再调整范围`,
+        code: "QUESTION_BANK_IDENTITY_LOCKED",
+        lockedFields: identityPolicy.lockedFields,
+        lockReasons: identityPolicy.lockReasons,
+      }, 409);
+    }
+  }
+  if (!existingBank && !/^[A-Z0-9][A-Z0-9_-]{2,59}$/.test(bankCode)) return json({ error: "题库编码需使用3—60位大写字母、数字、横线或下划线" }, 400);
   if (!name) return json({ error: "请输入题库名称" }, 400);
   if (!new Set(["national", "provincial", "special"]).has(examType)) return json({ error: "考试类型无效" }, 400);
   if (examType === "provincial" && !province) return json({ error: "省考题库必须填写省份" }, 400);
   if (!new Set(["行测", "申论", "综合"]).has(subject)) return json({ error: "题库科目无效" }, 400);
-  const db = getD1();
   if (status === "published") {
     if (!bankId) return json({ error: "请先保存题库并导入已审核真题，再发布" }, 409);
-    const quality = await db.prepare(`SELECT COUNT(DISTINCT q.id) AS total,
-      COUNT(DISTINCT CASE WHEN q.truth_verified <> 1 OR q.review_status <> 'approved'
-        OR q.source = '' OR q.source_region = '' OR q.source_year IS NULL OR q.source_batch = '' OR q.explanation = ''
-        OR (q.subject = '行测' AND (json_array_length(q.options_json) < 2 OR instr('ABCDEFGH', q.answer) < 1
-          OR instr('ABCDEFGH', q.answer) > json_array_length(q.options_json))) THEN q.id END) AS invalid
-      FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id WHERE qbi.bank_id = ? AND q.status = 'active'`)
-      .bind(bankId).first<{ total: number; invalid: number }>();
+    const quality = await db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN q.status = 'active' THEN q.id END) AS total,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND NOT ${QUESTION_BANK_PUBLISHABLE_ITEM_SQL} THEN q.id END) AS invalid,
+      (SELECT COUNT(*) FROM question_imports active_import WHERE active_import.bank_id = qb.id
+        AND active_import.status IN ('uploading','queued','processing','cancelling')) AS active_imports
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      WHERE qb.id = ?`)
+      .bind(bankId).first<{ total: number; invalid: number; active_imports: number }>();
     if (Number(quality?.total ?? 0) < 1) return json({ error: "题库至少包含1道可练真题后才能发布" }, 409);
     if (Number(quality?.invalid ?? 0) > 0) return json({ error: `有${quality?.invalid}道题缺少真题来源、地区年份、解析或审核，不能发布` }, 409);
+    if (Number(quality?.active_imports ?? 0) > 0) return json({ error: "题库仍有上传或处理中的导入任务，完成审核后才能发布" }, 409);
   }
-  const duplicate = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?").bind(bankCode).first<{ id: number }>();
-  if (duplicate && duplicate.id !== bankId) return json({ error: "题库编码已被其他题库使用" }, 409);
   if (bankId) {
-    const updated = await db.prepare(`UPDATE question_banks SET bank_code = ?, name = ?, exam_type = ?, province = ?,
+    const updateStatement = db.prepare(`UPDATE question_banks AS qb SET name = ?, exam_type = ?, province = ?,
       exam_year = ?, subject = ?, description = ?, cover_color = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`).bind(bankCode, name, examType, province, examYear, subject, description, coverColor, status, bankId).run();
-    if (!updated.meta.changes) return json({ error: "要编辑的题库不存在" }, 404);
+      WHERE qb.id = ? AND (? <> 'published' OR ${QUESTION_BANK_CAN_PUBLISH_SQL})`)
+      .bind(name, examType, province, examYear, subject, description, coverColor, status, bankId, status);
+    const statements = [updateStatement];
+    if (existingBank?.status === "published" && status === "draft") {
+      statements.push(abandonActiveSessionsByBankCode(db, existingBank.bank_code));
+    }
+    const [updated] = await db.batch(statements);
+    if (!updated.meta.changes) {
+      if (status === "published") return json({ error: "发布条件刚刚发生变化，请刷新题库质量与导入状态后重试" }, 409);
+      return json({ error: "要编辑的题库不存在" }, 404);
+    }
   } else {
+    const duplicate = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?").bind(bankCode).first<{ id: number }>();
+    if (duplicate) return json({ error: "题库编码已被其他题库使用" }, 409);
     await db.prepare(`INSERT INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`)
@@ -4133,24 +5602,1319 @@ async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
 }
 
 async function adminSetQuestionBankStatus(payload: Record<string, unknown>) {
-  if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
+  if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
   const id = Math.floor(Number(payload.id));
   const status = payload.status === "published" ? "published" : "draft";
   if (!Number.isFinite(id) || id < 1) return json({ error: "题库不存在" }, 400);
   const db = getD1();
+  const bank = await db.prepare("SELECT bank_code, status FROM question_banks WHERE id = ?")
+    .bind(id).first<{ bank_code: string; status: string }>();
+  if (!bank) return json({ error: "题库不存在" }, 404);
+  if (bank.status === status && status !== "published") return json({ ok: true, status, unchanged: true });
   if (status === "published") {
-    const quality = await db.prepare(`SELECT COUNT(DISTINCT q.id) AS total,
-      COUNT(DISTINCT CASE WHEN q.truth_verified <> 1 OR q.review_status <> 'approved'
-        OR q.source = '' OR q.source_region = '' OR q.source_year IS NULL OR q.source_batch = '' OR q.explanation = ''
-        OR (q.subject = '行测' AND (json_array_length(q.options_json) < 2 OR instr('ABCDEFGH', q.answer) < 1
-          OR instr('ABCDEFGH', q.answer) > json_array_length(q.options_json))) THEN q.id END) AS invalid
-      FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id WHERE qbi.bank_id = ? AND q.status = 'active'`)
-      .bind(id).first<{ total: number; invalid: number }>();
+    const quality = await db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN q.status = 'active' THEN q.id END) AS total,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND NOT ${QUESTION_BANK_PUBLISHABLE_ITEM_SQL} THEN q.id END) AS invalid,
+      (SELECT COUNT(*) FROM question_imports active_import WHERE active_import.bank_id = qb.id
+        AND active_import.status IN ('uploading','queued','processing','cancelling')) AS active_imports
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      WHERE qb.id = ?`)
+      .bind(id).first<{ total: number; invalid: number; active_imports: number }>();
     if (Number(quality?.total ?? 0) < 1) return json({ error: "题库至少包含1道可练真题后才能发布" }, 409);
     if (Number(quality?.invalid ?? 0) > 0) return json({ error: `有${quality?.invalid}道题未通过真题质量校验` }, 409);
+    if (Number(quality?.active_imports ?? 0) > 0) return json({ error: "题库仍有上传或处理中的导入任务，完成审核后才能发布" }, 409);
   }
-  await db.prepare("UPDATE question_banks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id).run();
-  return json({ ok: true });
+  const statements = [
+    status === "published"
+      ? db.prepare(`UPDATE question_banks AS qb SET status = 'published', updated_at = CURRENT_TIMESTAMP
+          WHERE qb.id = ? AND ${QUESTION_BANK_CAN_PUBLISH_SQL}`).bind(id)
+      : db.prepare("UPDATE question_banks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id),
+  ];
+  if (status === "draft") statements.push(abandonActiveSessionsByBankCode(db, bank.bank_code));
+  const [updated, abandoned] = await db.batch(statements);
+  if (!updated.meta.changes) return json({ error: status === "published"
+    ? "发布条件刚刚发生变化，请刷新题库质量与导入状态后重试"
+    : "题库状态未更新" }, 409);
+  return json({ ok: true, status, abandonedSessions: Number(abandoned?.meta.changes ?? 0) });
+}
+
+function adminQuestionSnapshot(row: Record<string, unknown>) {
+  return {
+    questionCode: String(row.question_code ?? ""),
+    subject: String(row.subject ?? ""),
+    module: String(row.module ?? ""),
+    subType: String(row.sub_type ?? ""),
+    stem: String(row.stem ?? ""),
+    options: parseOptions(String(row.options_json ?? "[]")),
+    answer: row.answer == null ? null : String(row.answer),
+    explanation: String(row.explanation ?? ""),
+    technique: String(row.technique ?? ""),
+    material: String(row.material ?? ""),
+    prompt: String(row.prompt ?? ""),
+    wordLimit: Number.isInteger(Number(row.word_limit)) && Number(row.word_limit) > 0 ? Number(row.word_limit) : null,
+    scoringPoints: safeStringArray(row.scoring_points_json, 30),
+    difficulty: String(row.difficulty ?? "中等"),
+    source: String(row.source ?? ""),
+    sourceExamType: String(row.source_exam_type ?? ""),
+    sourceBatch: String(row.source_batch ?? ""),
+    region: String(row.source_region ?? ""),
+    examYear: Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null,
+    truthVerified: Number(row.truth_verified ?? 0) === 1,
+    reviewStatus: String(row.review_status ?? "pending_review"),
+    frequency: String(row.frequency ?? ""),
+    frequencyOccurrences: Math.max(0, Math.floor(Number(row.frequency_occurrences ?? 0))),
+    frequencyPapers: Math.max(0, Math.floor(Number(row.frequency_papers ?? 0))),
+    frequencyYears: parseYearList(row.frequency_years_json),
+    frequencyUpdatedAt: row.frequency_updated_at ? String(row.frequency_updated_at) : null,
+    importanceStars: Math.max(0, Math.floor(Number(row.importance_stars ?? 0))),
+    importanceRuleVersion: String(row.importance_rule_version ?? ""),
+    importanceReason: String(row.importance_reason ?? ""),
+    importanceOverrideReason: String(row.importance_override_reason ?? ""),
+    scoreRate: Math.max(0, Math.min(100, Math.round(Number(row.score_rate ?? 0)))),
+    scoreRateCorrect: Math.max(0, Math.floor(Number(row.score_rate_correct ?? 0))),
+    scoreRateAttempts: Math.max(0, Math.floor(Number(row.score_rate_attempts ?? 0))),
+    scoreRateScope: String(row.score_rate_scope ?? ""),
+    scoreRateSource: String(row.score_rate_source ?? "platform") || "platform",
+    scoreRateUpdatedAt: row.score_rate_updated_at ? String(row.score_rate_updated_at) : null,
+    suggestedSeconds: Math.max(10, Math.floor(Number(row.suggested_seconds ?? 60))),
+    imageUrl: String(row.image_url ?? ""),
+    resourceUrl: String(row.resource_url ?? ""),
+    status: String(row.status ?? "active"),
+  };
+}
+
+const ADMIN_QUESTION_SELECT = `q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem, q.options_json,
+  q.answer, q.explanation, q.technique, q.material, q.prompt, q.word_limit, q.scoring_points_json,
+  q.difficulty, q.source, q.source_exam_type, q.source_region, q.source_year, q.source_batch,
+  q.truth_verified, q.review_status, q.review_note, q.reviewed_by, q.reviewed_at,
+  q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
+  q.importance_stars, q.importance_rule_version, q.importance_reason, q.importance_override_reason,
+  q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope,
+  q.score_rate_source, q.score_rate_updated_at, q.suggested_seconds, q.image_url, q.resource_url,
+  q.status, q.version, q.updated_at`;
+
+function adminQuestionSearchShape(row: Record<string, unknown>) {
+  return {
+    id: Number(row.id),
+    version: Number(row.version ?? 1),
+    ...adminQuestionSnapshot(row),
+    reviewNote: String(row.review_note ?? ""),
+    reviewedBy: row.reviewed_by == null ? null : Number(row.reviewed_by),
+    reviewedAt: row.reviewed_at ? String(row.reviewed_at) : null,
+    updatedAt: String(row.updated_at ?? ""),
+    bankNames: String(row.bank_names ?? ""),
+    bankId: row.bank_id == null ? null : Number(row.bank_id),
+  };
+}
+
+async function adminSearchQuestions(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.read")) return adminForbidden("question.read");
+  const db = getD1();
+  const query = trimmed(payload.query ?? payload.keyword, 100);
+  const bankId = Math.floor(Number(payload.bankId));
+  const limit = Math.max(1, Math.min(100, Math.floor(Number(payload.limit)) || 50));
+  const conditions = ["1=1"];
+  const binds: unknown[] = [];
+  if (query) {
+    conditions.push("(q.question_code LIKE ? OR q.stem LIKE ? OR q.source LIKE ? OR q.module LIKE ? OR q.sub_type LIKE ?)");
+    const like = `%${query}%`;
+    binds.push(like, like, like, like, like);
+  }
+  if (Number.isInteger(bankId) && bankId > 0) {
+    conditions.push("EXISTS (SELECT 1 FROM question_bank_items scoped WHERE scoped.question_id = q.id AND scoped.bank_id = ?)");
+    binds.push(bankId);
+  }
+  const rows = await db.prepare(`SELECT ${ADMIN_QUESTION_SELECT},
+    (SELECT GROUP_CONCAT(DISTINCT qb.name) FROM question_bank_items qbi
+      JOIN question_banks qb ON qb.id = qbi.bank_id WHERE qbi.question_id = q.id) AS bank_names,
+    (SELECT MIN(qbi.bank_id) FROM question_bank_items qbi WHERE qbi.question_id = q.id) AS bank_id
+    FROM questions q WHERE ${conditions.join(" AND ")}
+    ORDER BY CASE q.status WHEN 'active' THEN 0 ELSE 1 END, q.id DESC LIMIT ?`)
+    .bind(...binds, limit).all<Record<string, unknown>>();
+  return json({ ok: true, questions: rows.results.map(adminQuestionSearchShape) });
+}
+
+function sameNumberList(left: unknown, right: number[]) {
+  const normalized = Array.isArray(left) ? left.map(Number).filter(Number.isInteger) : [];
+  return JSON.stringify(normalized) === JSON.stringify(right);
+}
+
+function safeAdminAssetUrl(value: unknown) {
+  const url = trimmed(value, 500);
+  return !url || /^(https?:\/\/|\/api\/app\?media=)/i.test(url) ? url : null;
+}
+
+async function adminUpsertQuestion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
+  const admin = adminFromPayload(payload);
+  const id = Math.floor(Number(payload.id));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  if (!Number.isInteger(id) || id < 1) return json({ error: "要编辑的题目不存在" }, 400);
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    return json({ error: "缺少题目版本，请刷新后再编辑" }, 409);
+  }
+  const input = payload.question && typeof payload.question === "object" && !Array.isArray(payload.question)
+    ? payload.question as Record<string, unknown> : payload;
+  const db = getD1();
+  const current = await db.prepare(`SELECT ${ADMIN_QUESTION_SELECT} FROM questions q WHERE q.id = ?`)
+    .bind(id).first<Record<string, unknown>>();
+  if (!current) return json({ error: "要编辑的题目不存在" }, 404);
+  if (Number(current.version ?? 1) !== expectedVersion) {
+    return json({ error: `题目已被其他管理员更新（当前v${String(current.version)}），请刷新后重试`,
+      code: "QUESTION_VERSION_CONFLICT", currentVersion: Number(current.version ?? 1) }, 409);
+  }
+  const currentSnapshot = adminQuestionSnapshot(current);
+  const incomingQuestionCode = trimmed(input.questionCode ?? currentSnapshot.questionCode, 80).toUpperCase();
+  if (incomingQuestionCode !== currentSnapshot.questionCode) {
+    return json({ error: "题目编号创建后不可修改；如来源确需更换题号，请新建题目" }, 409);
+  }
+
+  const subject = trimmed(input.subject ?? currentSnapshot.subject, 10);
+  const moduleName = trimmed(input.module ?? currentSnapshot.module, 40);
+  const subType = trimmed(input.subType ?? currentSnapshot.subType, 40);
+  const stem = trimmed(input.stem ?? currentSnapshot.stem, 12_000);
+  const explanation = trimmed(input.explanation ?? currentSnapshot.explanation, 8_000);
+  const technique = trimmed(input.technique ?? currentSnapshot.technique, 4_000);
+  const material = trimmed(input.material ?? currentSnapshot.material, 12_000);
+  const prompt = trimmed(input.prompt ?? currentSnapshot.prompt, 2_000);
+  const source = trimmed(input.source ?? currentSnapshot.source, 120);
+  const sourceExamType = trimmed(input.sourceExamType ?? currentSnapshot.sourceExamType, 40);
+  const sourceBatch = trimmed(input.sourceBatch ?? currentSnapshot.sourceBatch, 80);
+  const region = trimmed(input.region ?? currentSnapshot.region, 24).replace(/[·•]/g, "-");
+  const examYear = Math.floor(Number(input.examYear ?? currentSnapshot.examYear));
+  const options = Array.isArray(input.options)
+    ? input.options.map((value) => trimmed(value, 2_000)).filter(Boolean).slice(0, 8)
+    : currentSnapshot.options;
+  const answer = trimmed(input.answer ?? currentSnapshot.answer, 8).toUpperCase() || null;
+  const scoringPoints = Array.isArray(input.scoringPoints)
+    ? input.scoringPoints.map((value) => trimmed(value, 500)).filter(Boolean).slice(0, 30)
+    : currentSnapshot.scoringPoints;
+  const wordInput = input.wordLimit ?? currentSnapshot.wordLimit;
+  const wordLimit = wordInput == null || wordInput === "" ? null : Math.floor(Number(wordInput));
+  const difficulty = trimmed(input.difficulty ?? currentSnapshot.difficulty, 10);
+  const suggestedSeconds = Math.floor(Number(input.suggestedSeconds ?? currentSnapshot.suggestedSeconds));
+  const imageUrl = safeAdminAssetUrl(input.imageUrl ?? currentSnapshot.imageUrl);
+  const resourceUrl = safeAdminAssetUrl(input.resourceUrl ?? currentSnapshot.resourceUrl);
+  if (!new Set(["行测", "申论"]).has(subject)) return json({ error: "科目只能是行测或申论" }, 400);
+  if (!new Set(["national", "provincial", "special"]).has(sourceExamType)) return json({ error: "来源考试类型只能是national、provincial或special" }, 400);
+  if (!moduleName || !stem || !source || !sourceBatch || !region) return json({ error: "模块、题干、来源、来源批次和地区均不能为空" }, 400);
+  if (!Number.isInteger(examYear) || examYear < 1990 || examYear > new Date().getFullYear()) return json({ error: "真题年份无效" }, 400);
+  if (!explanation) return json({ error: "解析/参考答案不能为空" }, 400);
+  if (subject === "行测" && (options.length < 2 || !answer || !/^[A-H]$/.test(answer)
+    || answer.charCodeAt(0) - 65 >= options.length)) return json({ error: "行测题的选项或正确答案不完整" }, 400);
+  if (subject === "申论" && !prompt) return json({ error: "申论题必须填写作答任务" }, 400);
+  if (wordLimit !== null && (!Number.isInteger(wordLimit) || wordLimit < 1 || wordLimit > 5_000)) return json({ error: "字数限制需为1—5000的整数" }, 400);
+  if (!new Set(["简单", "中等", "较难"]).has(difficulty)) return json({ error: "难度取值无效" }, 400);
+  if (!Number.isInteger(suggestedSeconds) || suggestedSeconds < 10 || suggestedSeconds > 3_600) return json({ error: "建议用时需为10—3600秒" }, 400);
+  if (imageUrl === null || resourceUrl === null) return json({ error: "图片或资源地址仅支持HTTPS、HTTP或站内媒体地址" }, 400);
+
+  const frequencyFieldsPresent = ["frequency", "frequencyOccurrences", "frequencyPapers", "frequencyYears", "frequencyUpdatedAt"]
+    .some((key) => Object.prototype.hasOwnProperty.call(input, key));
+  if (frequencyFieldsPresent) {
+    const sameFrequency = String(input.frequency ?? currentSnapshot.frequency) === currentSnapshot.frequency
+      && Number(input.frequencyOccurrences ?? currentSnapshot.frequencyOccurrences) === currentSnapshot.frequencyOccurrences
+      && Number(input.frequencyPapers ?? currentSnapshot.frequencyPapers) === currentSnapshot.frequencyPapers
+      && (!Object.prototype.hasOwnProperty.call(input, "frequencyYears") || sameNumberList(input.frequencyYears, currentSnapshot.frequencyYears))
+      && String(input.frequencyUpdatedAt ?? currentSnapshot.frequencyUpdatedAt ?? "") === String(currentSnapshot.frequencyUpdatedAt ?? "");
+    if (!sameFrequency) return json({ error: "考频由已审核真题试卷样本自动计算，不能在单题编辑中手工修改" }, 409);
+  }
+
+  let importanceStars = currentSnapshot.importanceStars;
+  let importanceRuleVersion = currentSnapshot.importanceRuleVersion;
+  let importanceReason = currentSnapshot.importanceReason;
+  let importanceOverrideReason = currentSnapshot.importanceOverrideReason;
+  if (Object.prototype.hasOwnProperty.call(input, "importanceStars")) {
+    const proposedStars = Math.floor(Number(input.importanceStars));
+    if (proposedStars !== currentSnapshot.importanceStars) {
+      const overrideReason = trimmed(input.importanceOverrideReason, 500);
+      if (!Number.isInteger(proposedStars) || proposedStars < 1 || proposedStars > 5) return json({ error: "人工调整的重要星级必须为1—5星" }, 400);
+      if (overrideReason.length < 5) return json({ error: "人工调整重要星级时，必须填写至少5个字的覆盖理由" }, 400);
+      importanceStars = proposedStars;
+      importanceRuleVersion = "manual-v1";
+      importanceReason = currentSnapshot.importanceReason || "管理员基于真题价值人工复核";
+      importanceOverrideReason = overrideReason;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "importanceOverrideReason")
+    && trimmed(input.importanceOverrideReason, 500) !== currentSnapshot.importanceOverrideReason
+    && importanceStars === currentSnapshot.importanceStars) {
+    const proposedOverride = trimmed(input.importanceOverrideReason, 500);
+    if (!proposedOverride && currentSnapshot.importanceOverrideReason) {
+      return json({ error: "已有人工星级的覆盖理由不能直接清空；如需恢复系统计算，请重新运行题库指标计算" }, 409);
+    }
+    if (proposedOverride && (importanceStars < 1 || importanceStars > 5)) {
+      return json({ error: "填写人工覆盖理由前，请先选择1—5星的重要星级" }, 400);
+    }
+    if (proposedOverride && proposedOverride.length < 5) return json({ error: "重要星级人工覆盖理由至少填写5个字" }, 400);
+    if (proposedOverride) {
+      importanceRuleVersion = "manual-v1";
+      importanceReason = currentSnapshot.importanceReason || "管理员基于真题价值人工复核";
+      importanceOverrideReason = proposedOverride;
+    }
+  }
+
+  let scoreRate = currentSnapshot.scoreRate;
+  let scoreRateCorrect = currentSnapshot.scoreRateCorrect;
+  let scoreRateAttempts = currentSnapshot.scoreRateAttempts;
+  let scoreRateScope = currentSnapshot.scoreRateScope;
+  let scoreRateSource = currentSnapshot.scoreRateSource;
+  let scoreRateUpdatedAt = currentSnapshot.scoreRateUpdatedAt;
+  const scoreKeys = ["scoreRate", "scoreRateCorrect", "scoreRateAttempts", "scoreRateScope", "scoreRateSource", "scoreRateUpdatedAt"];
+  const scoreFieldsPresent = scoreKeys.some((key) => Object.prototype.hasOwnProperty.call(input, key));
+  if (scoreFieldsPresent) {
+    const proposedSource = trimmed(input.scoreRateSource ?? currentSnapshot.scoreRateSource, 500) || "platform";
+    const proposedCorrect = Math.max(0, Math.floor(Number(input.scoreRateCorrect ?? currentSnapshot.scoreRateCorrect)));
+    const proposedAttempts = Math.max(0, Math.floor(Number(input.scoreRateAttempts ?? currentSnapshot.scoreRateAttempts)));
+    const proposedRate = Math.round(Number(input.scoreRate ?? currentSnapshot.scoreRate));
+    const proposedScope = trimmed(input.scoreRateScope ?? currentSnapshot.scoreRateScope, 120);
+    const proposedUpdatedAt = trimmed(input.scoreRateUpdatedAt ?? currentSnapshot.scoreRateUpdatedAt, 40);
+    const unchanged = proposedSource === currentSnapshot.scoreRateSource && proposedCorrect === currentSnapshot.scoreRateCorrect
+      && proposedAttempts === currentSnapshot.scoreRateAttempts && proposedRate === currentSnapshot.scoreRate
+      && proposedScope === currentSnapshot.scoreRateScope
+      && proposedUpdatedAt === String(currentSnapshot.scoreRateUpdatedAt ?? "");
+    if (!unchanged && proposedSource === "platform") {
+      return json({ error: "平台拿分率只能由真实首答记录自动生成，不能在后台手工修改" }, 409);
+    }
+    if (!unchanged) {
+      let sourceIsValid = false;
+      try { sourceIsValid = new URL(proposedSource).protocol === "https:"; } catch { sourceIsValid = false; }
+      const observedAt = Date.parse(proposedUpdatedAt);
+      const calculatedRate = proposedAttempts > 0 ? Math.round(proposedCorrect * 100 / proposedAttempts) : 0;
+      if (!sourceIsValid || proposedAttempts < 1 || proposedCorrect > proposedAttempts || !proposedScope
+        || !Number.isFinite(observedAt) || observedAt > Date.now() || proposedRate !== calculatedRate) {
+        return json({ error: "外部拿分率必须同时提供有效样本、统计范围、HTTPS来源和不晚于今天的统计日期，百分比由样本自动计算" }, 400);
+      }
+      scoreRate = calculatedRate;
+      scoreRateCorrect = proposedCorrect;
+      scoreRateAttempts = proposedAttempts;
+      scoreRateScope = proposedScope;
+      scoreRateSource = proposedSource;
+      scoreRateUpdatedAt = new Date(observedAt).toISOString();
+    }
+  }
+
+  const nextSnapshot = {
+    questionCode: currentSnapshot.questionCode, subject, module: moduleName, subType, stem, options, answer,
+    explanation, technique, material, prompt, wordLimit, scoringPoints, difficulty, source, sourceExamType,
+    sourceBatch, region, examYear, truthVerified: false, reviewStatus: "pending_review",
+    frequency: currentSnapshot.frequency, frequencyOccurrences: currentSnapshot.frequencyOccurrences,
+    frequencyPapers: currentSnapshot.frequencyPapers, frequencyYears: currentSnapshot.frequencyYears,
+    frequencyUpdatedAt: currentSnapshot.frequencyUpdatedAt, importanceStars, importanceRuleVersion,
+    importanceReason, importanceOverrideReason, scoreRate, scoreRateCorrect, scoreRateAttempts, scoreRateScope,
+    scoreRateSource, scoreRateUpdatedAt, suggestedSeconds, imageUrl, resourceUrl, status: currentSnapshot.status,
+  };
+  const comparable = (snapshot: Record<string, unknown>) => Object.fromEntries(Object.entries(snapshot)
+    .filter(([key]) => !new Set(["truthVerified", "reviewStatus", "status"]).has(key)));
+  if (JSON.stringify(comparable(currentSnapshot)) === JSON.stringify(comparable(nextSnapshot))) {
+    return json({ ok: true, id, version: expectedVersion, unchanged: true, reviewStatus: currentSnapshot.reviewStatus });
+  }
+
+  await db.prepare(`INSERT OR IGNORE INTO question_versions
+    (question_id, version, question_code, snapshot_json, change_type, admin_user_id, review_status)
+    VALUES (?, ?, ?, ?, 'baseline', ?, ?)`)
+    .bind(id, expectedVersion, currentSnapshot.questionCode, JSON.stringify(currentSnapshot), admin?.id ?? null, currentSnapshot.reviewStatus).run();
+  const updateStatement = db.prepare(`UPDATE questions SET subject = ?, module = ?, sub_type = ?, stem = ?, options_json = ?,
+    answer = ?, explanation = ?, technique = ?, material = ?, prompt = ?, word_limit = ?, scoring_points_json = ?,
+    difficulty = ?, source = ?, source_exam_type = ?, source_region = ?, source_year = ?, source_batch = ?,
+    truth_verified = 0, truth_verified_at = NULL, review_status = 'pending_review', reviewed_by = NULL,
+    reviewed_at = NULL, review_note = '', importance_stars = ?, importance_rule_version = ?, importance_reason = ?,
+    importance_override_reason = ?, score_rate = ?, score_rate_correct = ?, score_rate_attempts = ?, score_rate_scope = ?,
+    score_rate_source = ?, score_rate_updated_at = ?, suggested_seconds = ?, image_url = ?, resource_url = ?,
+    version = version + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND version = ? AND ${QUESTION_NOT_LOCKED_BY_IMPORT_SQL}`)
+    .bind(subject, moduleName, subType, stem, JSON.stringify(options), answer, explanation, technique, material, prompt,
+      wordLimit, JSON.stringify(scoringPoints), difficulty, source, sourceExamType, region, examYear, sourceBatch,
+      importanceStars, importanceRuleVersion, importanceReason, importanceOverrideReason, scoreRate, scoreRateCorrect,
+      scoreRateAttempts, scoreRateScope, scoreRateSource, scoreRateUpdatedAt, suggestedSeconds, imageUrl, resourceUrl,
+      id, expectedVersion);
+  const nextVersion = expectedVersion + 1;
+  const [updated] = await db.batch([
+    updateStatement,
+    abandonActiveSessionsByQuestionCode(db, currentSnapshot.questionCode,
+      { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
+    draftInvalidPublishedBanksForQuestion(db,
+      { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
+    abandonActiveSessionsForDraftedQuestionBanks(db,
+      { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
+    db.prepare(`INSERT OR IGNORE INTO question_versions
+      (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
+      SELECT id, version, question_code, ?, 'edit', ?, ?, 'pending_review'
+      FROM questions WHERE id = ? AND version = ?`)
+      .bind(JSON.stringify(nextSnapshot), expectedVersion, admin?.id ?? null, id, nextVersion),
+  ]);
+  if (!updated.meta.changes) {
+    const latest = await db.prepare("SELECT version FROM questions WHERE id = ?").bind(id).first<{ version: number }>();
+    return json({ error: `题目已被其他管理员更新（当前v${String(latest?.version ?? "?")}），请刷新后重试`,
+      code: "QUESTION_VERSION_CONFLICT", currentVersion: latest?.version ?? null }, 409);
+  }
+  return json({ ok: true, id, questionCode: currentSnapshot.questionCode, version: nextVersion,
+    reviewStatus: "pending_review", truthVerified: false });
+}
+
+async function adminSetQuestionStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
+  const admin = adminFromPayload(payload);
+  const id = Math.floor(Number(payload.id));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  const status = payload.status === "active" ? "active" : payload.status === "disabled" ? "disabled" : "";
+  if (!Number.isInteger(id) || id < 1 || !status) return json({ error: "题目或目标状态无效" }, 400);
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) return json({ error: "缺少题目版本，请刷新后重试" }, 409);
+  const db = getD1();
+  const current = await db.prepare(`SELECT ${ADMIN_QUESTION_SELECT} FROM questions q WHERE q.id = ?`)
+    .bind(id).first<Record<string, unknown>>();
+  if (!current) return json({ error: "题目不存在" }, 404);
+  if (Number(current.version ?? 1) !== expectedVersion) {
+    return json({ error: `题目已被其他管理员更新（当前v${String(current.version)}），请刷新后重试`,
+      code: "QUESTION_VERSION_CONFLICT", currentVersion: Number(current.version ?? 1) }, 409);
+  }
+  const currentSnapshot = adminQuestionSnapshot(current);
+  if (currentSnapshot.status === status) return json({ ok: true, id, status, version: expectedVersion, unchanged: true });
+  await db.prepare(`INSERT OR IGNORE INTO question_versions
+    (question_id, version, question_code, snapshot_json, change_type, admin_user_id, review_status)
+    VALUES (?, ?, ?, ?, 'baseline', ?, ?)`)
+    .bind(id, expectedVersion, currentSnapshot.questionCode, JSON.stringify(currentSnapshot), admin?.id ?? null, currentSnapshot.reviewStatus).run();
+  const nextVersion = expectedVersion + 1;
+  const nextSnapshot = { ...currentSnapshot, status };
+  const statements = [
+    db.prepare(`UPDATE questions SET status = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND version = ? AND ${QUESTION_NOT_LOCKED_BY_IMPORT_SQL}`).bind(status, id, expectedVersion),
+  ];
+  const statusPostState = { questionId: id, version: nextVersion, status };
+  if (status === "disabled") statements.push(abandonActiveSessionsByQuestionCode(db, currentSnapshot.questionCode, statusPostState));
+  statements.push(draftInvalidPublishedBanksForQuestion(db, statusPostState));
+  statements.push(abandonActiveSessionsForDraftedQuestionBanks(db, statusPostState));
+  statements.push(db.prepare(`INSERT OR IGNORE INTO question_versions
+    (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
+    SELECT id, version, question_code, ?, 'status', ?, ?, ? FROM questions WHERE id = ? AND version = ?`)
+    .bind(JSON.stringify(nextSnapshot), expectedVersion, admin?.id ?? null, currentSnapshot.reviewStatus, id, nextVersion));
+  const [updated] = await db.batch(statements);
+  if (!updated.meta.changes) return json({ error: "题目版本已变化，请刷新后重试", code: "QUESTION_VERSION_CONFLICT" }, 409);
+  return json({ ok: true, id, questionCode: currentSnapshot.questionCode, status, version: nextVersion });
+}
+
+type ContentImportRow = {
+  rowIndex: number;
+  contentKey: string;
+  title: string;
+  accessLevel: "free" | "member";
+  payload: Record<string, unknown>;
+};
+
+type ContentImportError = {
+  rowIndex: number;
+  contentKey: string;
+  kind: "validation" | "duplicate" | "conflict";
+  message: string;
+  rawJson: string;
+};
+
+function validHttpsUrl(value: unknown) {
+  const candidate = trimmed(value, 500);
+  if (!candidate) return false;
+  try { return new URL(candidate).protocol === "https:"; } catch { return false; }
+}
+
+function validateContentImportRow(raw: unknown, contentType: string): { row?: ContentImportRow; error?: ContentImportError } {
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const rowIndex = Math.floor(Number(input.rowIndex));
+  const contentKey = trimmed(input.contentKey, 80).toLowerCase();
+  const title = trimmed(input.title, 120);
+  const accessLevel = input.accessLevel === "free" ? "free" : "member";
+  const payloadValue = input.payload;
+  const fail = (message: string): { error: ContentImportError } => ({ error: {
+    rowIndex: Number.isInteger(rowIndex) && rowIndex > 0 ? rowIndex : 0,
+    contentKey,
+    kind: "validation",
+    message,
+    rawJson: JSON.stringify(input).slice(0, 1_500),
+  } });
+  if (!Number.isInteger(rowIndex) || rowIndex < 1) return fail("源文件行号无效");
+  if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(contentKey)) return fail("内容标识格式错误");
+  if (!title) return fail("内容标题不能为空");
+  if (!payloadValue || typeof payloadValue !== "object" || Array.isArray(payloadValue)) return fail("内容必须是结构化对象");
+  // The canonical payload always carries the display title. Manual editing
+  // already does this; importing now follows the same release-gate contract.
+  const rowPayload = { ...(payloadValue as Record<string, unknown>), title };
+  const payloadJson = JSON.stringify(rowPayload);
+  if (payloadJson.length > 120_000) return fail("单条内容超过120KB限制");
+  if (contentType === "job_position") {
+    const required = [
+      ["targetCode", "考试目标编码"], ["examName", "考试名称"], ["department", "招录机关/部门"],
+      ["title", "职位名称"], ["code", "职位代码"], ["region", "工作地区"],
+    ] as const;
+    for (const [field, label] of required) if (!trimmed(rowPayload[field], 500)) return fail(`${label}不能为空`);
+    const recruitCount = Number(rowPayload.recruitCount);
+    if (!Number.isInteger(recruitCount) || recruitCount < 1 || recruitCount > 9_999) return fail("招录人数必须是1—9999的整数");
+    const sourceUrl = trimmed(rowPayload.sourceUrl, 500);
+    if (!validHttpsUrl(sourceUrl)) return fail("职位来源链接必须是可追溯的HTTPS地址");
+    const dataVersion = Number(rowPayload.dataVersion);
+    if (!Number.isInteger(dataVersion) || dataVersion < 1) return fail("职位数据版本必须是正整数");
+    const updatedAt = trimmed(rowPayload.updatedAt, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(updatedAt) || updatedAt > chinaDateKey()) return fail("职位数据更新时间无效或晚于今天");
+  }
+  const publishIssues = validatePublishableContent(contentType, rowPayload);
+  if (publishIssues.length) return fail(`未通过发布门禁：${publishIssues.join("；")}`);
+  return { row: { rowIndex, contentKey, title, accessLevel, payload: rowPayload } };
+}
+
+async function persistContentImportErrors(importId: number, chunkIndex: number, errors: ContentImportError[]) {
+  if (!errors.length) return;
+  const encoded = JSON.stringify(errors);
+  const db = getD1();
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO content_import_errors
+      (import_id, chunk_index, row_index, content_key, kind, message, raw_json)
+      SELECT ?, ?, CAST(json_extract(value, '$.rowIndex') AS INTEGER),
+        COALESCE(json_extract(value, '$.contentKey'), ''), COALESCE(json_extract(value, '$.kind'), 'validation'),
+        COALESCE(json_extract(value, '$.message'), '未知错误'), COALESCE(json_extract(value, '$.rawJson'), '{}')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+    db.prepare(`INSERT OR IGNORE INTO content_import_row_results
+      (import_id, row_index, chunk_index, status, content_key, message)
+      SELECT ?, CAST(json_extract(value, '$.rowIndex') AS INTEGER), ?, 'failed',
+        COALESCE(json_extract(value, '$.contentKey'), ''), COALESCE(json_extract(value, '$.message'), '未知错误')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+  ]);
+}
+
+async function persistContentImportSkipped(importId: number, chunkIndex: number, rows: ContentImportError[]) {
+  if (!rows.length) return;
+  const encoded = JSON.stringify(rows);
+  const db = getD1();
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO content_import_errors
+      (import_id, chunk_index, row_index, content_key, kind, message, raw_json)
+      SELECT ?, ?, CAST(json_extract(value, '$.rowIndex') AS INTEGER),
+        COALESCE(json_extract(value, '$.contentKey'), ''), 'duplicate',
+        COALESCE(json_extract(value, '$.message'), '按重复策略跳过'), COALESCE(json_extract(value, '$.rawJson'), '{}')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+    db.prepare(`INSERT OR IGNORE INTO content_import_row_results
+      (import_id, row_index, chunk_index, status, content_key, message)
+      SELECT ?, CAST(json_extract(value, '$.rowIndex') AS INTEGER), ?, 'skipped',
+        COALESCE(json_extract(value, '$.contentKey'), ''), COALESCE(json_extract(value, '$.message'), '按重复策略跳过')
+      FROM json_each(?)`).bind(importId, chunkIndex, encoded),
+  ]);
+}
+
+async function refreshContentImportProgress(importId: number) {
+  const db = getD1();
+  const summary = await db.prepare(`SELECT COUNT(*) AS processed_rows,
+    COALESCE(SUM(CASE WHEN status = 'imported' THEN 1 ELSE 0 END), 0) AS imported_rows,
+    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_rows
+    FROM content_import_row_results WHERE import_id = ?`).bind(importId)
+    .first<{ processed_rows: number; imported_rows: number; failed_rows: number }>();
+  const chunks = await db.prepare(`SELECT COUNT(*) AS processed_chunks,
+    COALESCE(SUM(duplicate_rows), 0) AS duplicate_rows,
+    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS system_failed_chunks,
+    COALESCE(SUM(CASE WHEN status IN ('queued','processing') THEN 1 ELSE 0 END), 0) AS pending_chunks,
+    COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_chunks
+    FROM content_import_chunks WHERE import_id = ? AND status IN ('completed','failed','cancelled','queued','processing')`)
+    .bind(importId).first<Record<string, unknown>>();
+  const job = await db.prepare("SELECT total_rows, total_chunks, cancel_requested FROM content_imports WHERE id = ?")
+    .bind(importId).first<{ total_rows: number; total_chunks: number; cancel_requested: number }>();
+  if (!job) return null;
+  const processedRows = Number(summary?.processed_rows ?? 0);
+  const importedRows = Number(summary?.imported_rows ?? 0);
+  const failedRows = Number(summary?.failed_rows ?? 0);
+  const pendingChunks = Number(chunks?.pending_chunks ?? 0);
+  const systemFailedChunks = Number(chunks?.system_failed_chunks ?? 0);
+  const cancelledChunks = Number(chunks?.cancelled_chunks ?? 0);
+  const terminal = pendingChunks === 0;
+  const status = Number(job.cancel_requested) === 1 && terminal
+    ? "cancelled"
+    : systemFailedChunks > 0 ? "failed"
+      : terminal && processedRows >= Number(job.total_rows)
+        ? failedRows > 0 ? "completed_with_errors" : "completed"
+        : "processing";
+  await db.prepare(`UPDATE content_imports SET processed_rows = ?, imported_rows = ?, failed_rows = ?,
+    duplicate_rows = ?, processed_chunks = ?, status = ?, last_heartbeat_at = CURRENT_TIMESTAMP,
+    completed_at = CASE WHEN ? IN ('completed','completed_with_errors','cancelled') THEN CURRENT_TIMESTAMP ELSE completed_at END,
+    next_retry_at = CASE WHEN ? IN ('completed','completed_with_errors','cancelled','failed') THEN NULL ELSE next_retry_at END,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(processedRows, importedRows, failedRows, Number(chunks?.duplicate_rows ?? 0),
+      Math.max(0, Number(job.total_chunks) - pendingChunks), status, status, status, importId).run();
+  return { status, processedRows, importedRows, failedRows, pendingChunks, systemFailedChunks, cancelledChunks };
+}
+
+async function adminStartContentImport(payload: Record<string, unknown>) {
+  const contentType = trimmed(payload.contentType, 40);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(contentType) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (!CONTENT_TYPES.has(contentType)) return json({ error: "不支持的内容导入类型" }, 400);
+  const fileName = trimmed(payload.fileName, 160);
+  const fileSize = Math.max(0, Math.floor(Number(payload.fileSize ?? 0)));
+  const fileHash = trimmed(payload.fileHash, 64).toLowerCase();
+  const totalRows = Math.max(0, Math.floor(Number(payload.totalRows ?? 0)));
+  const totalChunks = Math.max(0, Math.floor(Number(payload.totalChunks ?? 0)));
+  const sourceName = trimmed(payload.sourceName, 160);
+  const sourceUrl = trimmed(payload.sourceUrl, 500);
+  const sourcePublishedAt = trimmed(payload.sourcePublishedAt, 10) || null;
+  const dataVersion = trimmed(payload.dataVersion, 80);
+  const duplicateStrategy = trimmed(payload.duplicateStrategy, 30) || "reject";
+  const metadata = payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+    ? payload.metadata as Record<string, unknown> : {};
+  if (!/\.(xlsx|xls|csv)$/i.test(fileName)) return json({ error: "仅支持XLSX、XLS或CSV文件" }, 400);
+  if (fileSize < 1 || fileSize > 30 * 1024 * 1024) return json({ error: "单个内容文件需在30MB以内" }, 400);
+  if (!/^[a-f0-9]{64}$/.test(fileHash)) return json({ error: "文件指纹无效，请重新选择文件" }, 400);
+  if (totalRows < 1 || totalRows > CONTENT_IMPORT_MAX_FILE_ROWS) return json({ error: "单个文件最多50000行" }, 400);
+  if (totalChunks < 1 || totalChunks > CONTENT_IMPORT_MAX_CHUNKS || totalChunks > totalRows) {
+    return json({ error: `文件最多拆成${CONTENT_IMPORT_MAX_CHUNKS}个持久化分块；内容过长时请按地区或部门拆分` }, 400);
+  }
+  if (!sourceName || !dataVersion || !validHttpsUrl(sourceUrl)) {
+    return json({ error: "请填写数据来源名称、数据版本和可追溯的HTTPS官方来源" }, 400);
+  }
+  if (!CONTENT_IMPORT_DUPLICATE_STRATEGIES.has(duplicateStrategy)) {
+    return json({ error: "请选择明确的重复处理策略：拒绝、跳过或仅更新草稿" }, 400);
+  }
+  if (sourcePublishedAt && (!/^\d{4}-\d{2}-\d{2}$/.test(sourcePublishedAt)
+    || sourcePublishedAt > chinaDateKey())) {
+    return json({ error: "来源发布日期需为不晚于今天的YYYY-MM-DD" }, 400);
+  }
+  const admin = adminFromPayload(payload);
+  const db = getD1();
+  const resumable = await db.prepare(`SELECT id, uploaded_rows, uploaded_chunks FROM content_imports
+    WHERE content_type = ? AND file_hash = ? AND total_rows = ? AND total_chunks = ?
+      AND source_name = ? AND source_url = ? AND data_version = ? AND status = 'uploading'
+      AND duplicate_strategy = ?
+      AND (created_by = ? OR (created_by IS NULL AND ? IS NULL))
+    ORDER BY id DESC LIMIT 1`).bind(contentType, fileHash, totalRows, totalChunks, sourceName, sourceUrl,
+      dataVersion, duplicateStrategy, admin?.id ?? null, admin?.id ?? null).first<Record<string, unknown>>();
+  if (resumable) {
+    return json({ ok: true, importId: Number(resumable.id), chunkSize: CONTENT_IMPORT_CHUNK_ROWS,
+      totalChunks, status: "uploading", resumed: true, uploadedRows: Number(resumable.uploaded_rows ?? 0),
+      uploadedChunks: Number(resumable.uploaded_chunks ?? 0) });
+  }
+  const inserted = await db.prepare(`INSERT INTO content_imports
+    (content_type, file_name, file_size, file_hash, source_name, source_url, source_published_at,
+      data_version, duplicate_strategy, metadata_json, total_rows, total_chunks, status, review_status,
+      created_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', 'draft', ?, CURRENT_TIMESTAMP)`)
+    .bind(contentType, fileName, fileSize, fileHash, sourceName, sourceUrl, sourcePublishedAt,
+      dataVersion, duplicateStrategy, JSON.stringify(metadata).slice(0, 10_000), totalRows, totalChunks,
+      admin?.id ?? null).run();
+  return json({ ok: true, importId: Number(inserted.meta.last_row_id), chunkSize: CONTENT_IMPORT_CHUNK_ROWS,
+    totalChunks, status: "uploading" });
+}
+
+async function adminUploadContentImportChunk(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const chunkIndex = Math.floor(Number(payload.chunkIndex));
+  const rowOffset = Math.max(0, Math.floor(Number(payload.rowOffset ?? 0)));
+  const fileHash = trimmed(payload.fileHash, 64).toLowerCase();
+  const payloadHash = trimmed(payload.payloadHash, 64).toLowerCase();
+  if (!Number.isInteger(importId) || importId < 1 || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    return json({ error: "内容导入分块无效" }, 400);
+  }
+  if (!Array.isArray(payload.rows) || payload.rows.length < 1 || payload.rows.length > CONTENT_IMPORT_CHUNK_ROWS) {
+    return json({ error: `每个分块需包含1—${CONTENT_IMPORT_CHUNK_ROWS}行` }, 400);
+  }
+  if (!payload.rows.every((row, index) => row && typeof row === "object" && !Array.isArray(row)
+    && Number((row as Record<string, unknown>).rowIndex) === rowOffset + index + 2)) {
+    return json({ error: "分块行号必须与源文件顺序连续，首个数据行从第2行开始" }, 400);
+  }
+  const rowsJson = JSON.stringify(payload.rows);
+  if (new TextEncoder().encode(rowsJson).byteLength > CONTENT_IMPORT_UPLOAD_BYTES) return json({ error: "分块超过700KB，请减小客户端分块" }, 413);
+  if (!/^[a-f0-9]{64}$/.test(payloadHash) || await sha256Text(rowsJson) !== payloadHash) return json({ error: "分块指纹校验失败" }, 409);
+  const db = getD1();
+  const job = await db.prepare(`SELECT id, content_type, file_hash, total_rows, total_chunks, status
+    FROM content_imports WHERE id = ?`).bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type)) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (String(job.file_hash) !== fileHash) return json({ error: "文件与任务指纹不一致" }, 409);
+  if (String(job.status) !== "uploading") return json({ error: "任务已封存，不能继续上传分块" }, 409);
+  if (chunkIndex >= Number(job.total_chunks) || rowOffset + payload.rows.length > Number(job.total_rows)) return json({ error: "分块范围超出任务声明" }, 400);
+  const existing = await db.prepare(`SELECT payload_hash, row_offset, row_count FROM content_import_chunks
+    WHERE import_id = ? AND chunk_index = ?`).bind(importId, chunkIndex)
+    .first<{ payload_hash: string; row_offset: number; row_count: number }>();
+  if (existing && (existing.payload_hash !== payloadHash || Number(existing.row_offset) !== rowOffset
+    || Number(existing.row_count) !== payload.rows.length)) {
+    return json({ error: "同一分块序号已上传不同内容；请取消后重新导入" }, 409);
+  }
+  if (!existing) {
+    await db.batch([
+      db.prepare(`INSERT INTO content_import_chunks
+        (import_id, chunk_index, row_offset, row_count, payload_hash, rows_json, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', CURRENT_TIMESTAMP)`)
+        .bind(importId, chunkIndex, rowOffset, payload.rows.length, payloadHash, rowsJson),
+      db.prepare(`INSERT OR IGNORE INTO content_import_keys (import_id, row_index, content_key)
+        SELECT ?, CAST(json_extract(value, '$.rowIndex') AS INTEGER), lower(trim(json_extract(value, '$.contentKey')))
+        FROM json_each(?) WHERE CAST(json_extract(value, '$.rowIndex') AS INTEGER) > 0
+          AND trim(COALESCE(json_extract(value, '$.contentKey'), '')) <> ''`)
+        .bind(importId, rowsJson),
+    ]);
+  }
+  const totals = await db.prepare(`SELECT COUNT(*) AS chunks, COALESCE(SUM(row_count), 0) AS rows
+    FROM content_import_chunks WHERE import_id = ?`).bind(importId).first<{ chunks: number; rows: number }>();
+  await db.prepare(`UPDATE content_imports SET uploaded_chunks = ?, uploaded_rows = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(Number(totals?.chunks ?? 0), Number(totals?.rows ?? 0), importId).run();
+  return json({ ok: true, importId, chunkIndex, uploadedChunks: Number(totals?.chunks ?? 0), uploadedRows: Number(totals?.rows ?? 0) });
+}
+
+async function processContentImportChunk(importId: number, chunkIndex: number) {
+  const db = getD1();
+  const chunk = await db.prepare(`SELECT cic.id, cic.import_id, cic.chunk_index, cic.row_offset, cic.row_count,
+      cic.rows_json, cic.status, cic.lease_until, ci.content_type, ci.cancel_requested, ci.created_by,
+      ci.source_name, ci.source_url, ci.source_published_at, ci.data_version, ci.duplicate_strategy, ci.metadata_json
+    FROM content_import_chunks cic JOIN content_imports ci ON ci.id = cic.import_id
+    WHERE cic.import_id = ? AND cic.chunk_index = ?`).bind(importId, chunkIndex).first<Record<string, unknown>>();
+  if (!chunk || new Set(["completed", "cancelled"]).has(String(chunk.status))) return;
+  if (Number(chunk.cancel_requested) === 1) {
+    await db.prepare(`UPDATE content_import_chunks SET status = 'cancelled', lease_token = NULL, lease_until = NULL,
+      rows_json = '[]', updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'completed'`)
+      .bind(Number(chunk.id)).run();
+    await refreshContentImportProgress(importId);
+    return;
+  }
+  const leaseToken = crypto.randomUUID();
+  const claimed = await db.prepare(`UPDATE content_import_chunks SET status = 'processing', attempts = attempts + 1,
+    lease_token = ?, lease_until = datetime('now','+2 minutes'), updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND (status = 'queued' OR (status = 'processing' AND datetime(lease_until) <= CURRENT_TIMESTAMP))`)
+    .bind(leaseToken, Number(chunk.id)).run();
+  if (!claimed.meta.changes) return;
+  try {
+    const contentType = String(chunk.content_type);
+    const rawRows = JSON.parse(String(chunk.rows_json)) as unknown[];
+    if (!Array.isArray(rawRows) || rawRows.length !== Number(chunk.row_count)) throw new Error("持久化分块行数与声明不一致");
+    // A Worker can be evicted after the atomic content/version/result batch
+    // commits but before the chunk status is marked completed. Excluding rows
+    // that already have a durable result makes lease recovery idempotent: an
+    // update is never applied twice and no duplicate content version is made.
+    const completed = await db.prepare(`SELECT row_index FROM content_import_row_results
+      WHERE import_id = ? AND chunk_index = ?`).bind(importId, chunkIndex).all<{ row_index: number }>();
+    const completedRows = new Set(completed.results.map((item) => Number(item.row_index)));
+    const reservations = await db.prepare(`SELECT cik.row_index, cik.content_key FROM content_import_keys cik
+      JOIN json_each(?) incoming ON cik.row_index = CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER)
+      WHERE cik.import_id = ?`).bind(String(chunk.rows_json), importId).all<{ row_index: number; content_key: string }>();
+    const reservationMap = new Map(reservations.results.map((item) => [Number(item.row_index), String(item.content_key)]));
+    const valid: ContentImportRow[] = [];
+    const errors: ContentImportError[] = [];
+    const skipped: ContentImportError[] = [];
+    const duplicateStrategy = String(chunk.duplicate_strategy ?? "reject");
+    for (const raw of rawRows) {
+      const durableRowIndex = Number(raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>).rowIndex : 0);
+      if (completedRows.has(durableRowIndex)) continue;
+      const validated = validateContentImportRow(raw, contentType);
+      if (validated.error) { errors.push(validated.error); continue; }
+      const row = validated.row!;
+      if (reservationMap.get(row.rowIndex) !== row.contentKey) {
+        const duplicate = { rowIndex: row.rowIndex, contentKey: row.contentKey, kind: "duplicate" as const,
+          message: "同一文件内内容标识重复，仅保留首次出现的行", rawJson: JSON.stringify(raw).slice(0, 1_500) };
+        if (duplicateStrategy === "skip") skipped.push(duplicate); else errors.push(duplicate);
+        continue;
+      }
+      valid.push(row);
+    }
+    await persistContentImportErrors(importId, chunkIndex, errors);
+    await persistContentImportSkipped(importId, chunkIndex, skipped);
+    const accepted: Array<Record<string, unknown>> = [];
+    if (valid.length) {
+      const validJson = JSON.stringify(valid);
+      const existing = await db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, ci.version
+        FROM content_items ci JOIN json_each(?) incoming
+          ON ci.content_key = json_extract(incoming.value, '$.contentKey')`)
+        .bind(validJson).all<Record<string, unknown>>();
+      const existingMap = new Map(existing.results.map((item) => [String(item.content_key), item]));
+      for (const row of valid) {
+        const current = existingMap.get(row.contentKey);
+        if (current && String(current.content_type) !== contentType) {
+          errors.push({ rowIndex: row.rowIndex, contentKey: row.contentKey, kind: "conflict",
+            message: "内容标识已属于其他业务类型；内容身份创建后不可修改", rawJson: JSON.stringify(row).slice(0, 1_500) });
+          continue;
+        }
+        if (current && duplicateStrategy === "reject") {
+          errors.push({ rowIndex: row.rowIndex, contentKey: row.contentKey, kind: "duplicate",
+            message: "内容标识已存在；本任务选择了“拒绝重复”策略", rawJson: JSON.stringify(row).slice(0, 1_500) });
+          continue;
+        }
+        if (current && duplicateStrategy === "skip") {
+          skipped.push({ rowIndex: row.rowIndex, contentKey: row.contentKey, kind: "duplicate",
+            message: "内容标识已存在；已按“跳过重复”策略保留现有内容", rawJson: JSON.stringify(row).slice(0, 1_500) });
+          continue;
+        }
+        if (current && !new Set(["draft", "rejected"]).has(String(current.status))) {
+          errors.push({ rowIndex: row.rowIndex, contentKey: row.contentKey, kind: "conflict",
+            message: `现有内容处于${String(current.status)}状态，批量导入不得绕过版本审核覆盖；请复制为新内容或先完成当前流程`,
+            rawJson: JSON.stringify(row).slice(0, 1_500) });
+          continue;
+        }
+        const expectedVersion = current ? Math.max(1, Number(current.version ?? 1)) : 0;
+        const payloadWithProvenance = {
+          ...row.payload,
+          importSource: {
+            importId,
+            dataVersion: String(chunk.data_version ?? ""),
+          },
+        };
+        accepted.push({ importId, rowIndex: row.rowIndex, contentKey: row.contentKey, title: row.title,
+          accessLevel: row.accessLevel, payloadJson: JSON.stringify(payloadWithProvenance), mode: current ? "update" : "create",
+          expectedVersion, nextVersion: current ? expectedVersion + 1 : 1 });
+      }
+      // The first persistence pass already stored validation/duplicate rows;
+      // persist only conflict rows added during existing-content checks.
+      await persistContentImportErrors(importId, chunkIndex,
+        errors.filter((item) => item.kind === "conflict" || item.kind === "duplicate"));
+      await persistContentImportSkipped(importId, chunkIndex, skipped);
+    }
+    if (accepted.length) {
+      const acceptedJson = JSON.stringify(accepted);
+      if (new TextEncoder().encode(acceptedJson).byteLength > CONTENT_IMPORT_UPLOAD_BYTES + 64 * 1024) {
+        throw new Error("规范化内容分块超过绑定上限，请减小客户端分块");
+      }
+      await db.batch([
+        db.prepare(`INSERT OR IGNORE INTO content_item_versions
+          (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+          SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+            ci.access_level, ci.status, ci.publish_at, 'snapshot'
+          FROM json_each(?) incoming JOIN content_items ci
+            ON ci.content_key = json_extract(incoming.value, '$.contentKey')
+          WHERE json_extract(incoming.value, '$.mode') = 'update'
+            AND ci.version = CAST(json_extract(incoming.value, '$.expectedVersion') AS INTEGER)
+            AND NOT EXISTS (SELECT 1 FROM content_import_row_results cir
+              WHERE cir.import_id = CAST(json_extract(incoming.value, '$.importId') AS INTEGER)
+                AND cir.row_index = CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER))
+            AND ${CONTENT_IMPORT_WRITE_GUARD_SQL}`)
+          .bind(acceptedJson, Number(chunk.id), leaseToken, importId),
+        db.prepare(`INSERT OR IGNORE INTO content_items
+          (content_type, content_key, title, payload_json, access_level, status, publish_at, version,
+            review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at)
+          SELECT ?, json_extract(incoming.value, '$.contentKey'), json_extract(incoming.value, '$.title'),
+            json_extract(incoming.value, '$.payloadJson'), json_extract(incoming.value, '$.accessLevel'),
+            'draft', NULL, 1, '', NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP
+          FROM json_each(?) incoming WHERE json_extract(incoming.value, '$.mode') = 'create'
+            AND NOT EXISTS (SELECT 1 FROM content_import_row_results cir
+              WHERE cir.import_id = CAST(json_extract(incoming.value, '$.importId') AS INTEGER)
+                AND cir.row_index = CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER))
+            AND ${CONTENT_IMPORT_WRITE_GUARD_SQL}`)
+          .bind(contentType, acceptedJson, Number(chunk.id), leaseToken, importId),
+        db.prepare(`UPDATE content_items AS target SET
+            title = json_extract(incoming.value, '$.title'),
+            payload_json = json_extract(incoming.value, '$.payloadJson'),
+            access_level = json_extract(incoming.value, '$.accessLevel'), status = 'draft', publish_at = NULL,
+            review_note = '', submitted_by = NULL, submitted_at = NULL, reviewed_by = NULL, reviewed_at = NULL,
+            version = target.version + 1, updated_at = CURRENT_TIMESTAMP
+          FROM json_each(?) incoming
+          WHERE json_extract(incoming.value, '$.mode') = 'update'
+            AND target.content_key = json_extract(incoming.value, '$.contentKey')
+            AND target.content_type = ? AND target.status IN ('draft','rejected')
+            AND target.version = CAST(json_extract(incoming.value, '$.expectedVersion') AS INTEGER)
+            AND NOT EXISTS (SELECT 1 FROM content_import_row_results cir
+              WHERE cir.import_id = CAST(json_extract(incoming.value, '$.importId') AS INTEGER)
+                AND cir.row_index = CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER))
+            AND ${CONTENT_IMPORT_WRITE_GUARD_SQL}`)
+          .bind(acceptedJson, contentType, Number(chunk.id), leaseToken, importId),
+        db.prepare(`INSERT OR IGNORE INTO content_item_versions
+          (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+          SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+            ci.access_level, ci.status, ci.publish_at,
+            CASE json_extract(incoming.value, '$.mode') WHEN 'create' THEN 'import_create' ELSE 'import' END
+          FROM json_each(?) incoming JOIN content_items ci
+            ON ci.content_key = json_extract(incoming.value, '$.contentKey')
+          WHERE ci.content_type = ? AND ci.status = 'draft'
+            AND ci.version = CAST(json_extract(incoming.value, '$.nextVersion') AS INTEGER)
+            AND ci.title = json_extract(incoming.value, '$.title')
+            AND ci.payload_json = json_extract(incoming.value, '$.payloadJson')
+            AND NOT EXISTS (SELECT 1 FROM content_import_row_results cir
+              WHERE cir.import_id = CAST(json_extract(incoming.value, '$.importId') AS INTEGER)
+                AND cir.row_index = CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER))
+            AND ${CONTENT_IMPORT_WRITE_GUARD_SQL}`)
+          .bind(acceptedJson, contentType, Number(chunk.id), leaseToken, importId),
+        db.prepare(`INSERT OR IGNORE INTO content_import_row_results
+          (import_id, row_index, chunk_index, status, content_key, content_version)
+          SELECT ?, CAST(json_extract(incoming.value, '$.rowIndex') AS INTEGER), ?, 'imported',
+            ci.content_key, ci.version
+          FROM json_each(?) incoming JOIN content_items ci
+            ON ci.content_key = json_extract(incoming.value, '$.contentKey')
+          WHERE ci.content_type = ? AND ci.status = 'draft'
+            AND ci.version = CAST(json_extract(incoming.value, '$.nextVersion') AS INTEGER)
+            AND ci.title = json_extract(incoming.value, '$.title')
+            AND ci.payload_json = json_extract(incoming.value, '$.payloadJson')
+            AND ${CONTENT_IMPORT_WRITE_GUARD_SQL}`)
+          .bind(importId, chunkIndex, acceptedJson, contentType, Number(chunk.id), leaseToken, importId),
+      ]);
+      const persisted = await db.prepare(`SELECT row_index FROM content_import_row_results
+        WHERE import_id = ? AND chunk_index = ?`).bind(importId, chunkIndex).all<{ row_index: number }>();
+      const persistedRows = new Set(persisted.results.map((item) => Number(item.row_index)));
+      const versionConflicts = accepted.filter((item) => !persistedRows.has(Number(item.rowIndex))).map((item) => ({
+        rowIndex: Number(item.rowIndex), contentKey: String(item.contentKey), kind: "conflict" as const,
+        message: "处理期间内容版本发生变化，本行未覆盖新版本；请刷新后重新导入",
+        rawJson: JSON.stringify(item).slice(0, 1_500),
+      }));
+      await persistContentImportErrors(importId, chunkIndex, versionConflicts);
+    }
+    const counts = await db.prepare(`SELECT COUNT(*) AS processed,
+      COALESCE(SUM(CASE WHEN status = 'imported' THEN 1 ELSE 0 END), 0) AS imported,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+      (SELECT COUNT(*) FROM content_import_errors cie WHERE cie.import_id = ? AND cie.chunk_index = ? AND cie.kind = 'duplicate') AS duplicates
+      FROM content_import_row_results WHERE import_id = ? AND chunk_index = ?`)
+      .bind(importId, chunkIndex, importId, chunkIndex).first<Record<string, unknown>>();
+    if (Number(counts?.processed ?? 0) !== Number(chunk.row_count)) throw new Error("分块行级结果不完整，可安全重试");
+    await db.prepare(`UPDATE content_import_chunks SET status = 'completed', imported_rows = ?, failed_rows = ?,
+      duplicate_rows = ?, error_summary = '', lease_token = NULL, lease_until = NULL,
+      rows_json = '[]', updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND lease_token = ?`)
+      .bind(Number(counts?.imported ?? 0), Number(counts?.failed ?? 0), Number(counts?.duplicates ?? 0),
+        Number(chunk.id), leaseToken).run();
+    await refreshContentImportProgress(importId);
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : "后台内容分块处理失败").slice(0, 1_000);
+    await db.batch([
+      // Cancellation and failure share this catch path. Seal cancellation first,
+      // while the exact chunk lease still proves that this Worker owns the
+      // transition. Keeping the token for one statement gives the following
+      // job update a durable, transaction-local ownership marker.
+      db.prepare(`UPDATE content_import_chunks SET status = 'cancelled', error_summary = '',
+        lease_until = NULL, rows_json = '[]', updated_at = CURRENT_TIMESTAMP,
+        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+        WHERE id = ? AND import_id = ? AND status = 'processing' AND lease_token = ?
+          AND EXISTS (SELECT 1 FROM content_imports cancelling_job WHERE cancelling_job.id = ?
+            AND (cancelling_job.cancel_requested = 1 OR cancelling_job.status = 'cancelling'))`)
+        .bind(Number(chunk.id), importId, leaseToken, importId),
+      db.prepare(`UPDATE content_imports SET status = 'cancelled', error_summary = '', next_retry_at = NULL,
+        last_heartbeat_at = CURRENT_TIMESTAMP, completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?
+          AND (cancel_requested = 1 OR status = 'cancelling')
+          AND EXISTS (SELECT 1 FROM content_import_chunks owned_chunk
+            WHERE owned_chunk.id = ? AND owned_chunk.import_id = ?
+              AND owned_chunk.status = 'cancelled' AND owned_chunk.lease_token = ?)`)
+        .bind(importId, Number(chunk.id), importId, leaseToken),
+      db.prepare(`UPDATE content_import_chunks SET status = 'cancelled', error_summary = '',
+        lease_token = NULL, lease_until = NULL, rows_json = '[]',
+        updated_at = CURRENT_TIMESTAMP, completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+        WHERE import_id = ? AND status IN ('queued','processing','cancelled')
+          AND EXISTS (SELECT 1 FROM content_imports cancelled_job
+            WHERE cancelled_job.id = ? AND cancelled_job.status = 'cancelled')`)
+        .bind(importId, importId),
+      // If cancellation did not claim the lease, fail only an active job whose
+      // exact processing lease is still ours. A stale Worker can therefore
+      // change neither the replacement chunk nor the parent job.
+      db.prepare(`UPDATE content_import_chunks SET status = 'failed', error_summary = ?,
+        lease_until = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND import_id = ? AND status = 'processing' AND lease_token = ?
+          AND EXISTS (SELECT 1 FROM content_imports active_job WHERE active_job.id = ?
+            AND active_job.cancel_requested = 0 AND active_job.status IN ('queued','processing'))`)
+        .bind(message, Number(chunk.id), importId, leaseToken, importId),
+      db.prepare(`UPDATE content_imports SET status = 'failed', error_summary = ?, next_retry_at = NULL,
+        last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+          AND cancel_requested = 0 AND status IN ('queued','processing')
+          AND EXISTS (SELECT 1 FROM content_import_chunks owned_chunk
+            WHERE owned_chunk.id = ? AND owned_chunk.import_id = ?
+              AND owned_chunk.status = 'failed' AND owned_chunk.lease_token = ?)`)
+        .bind(`分块${chunkIndex + 1}：${message}`, importId, Number(chunk.id), importId, leaseToken),
+      db.prepare(`UPDATE content_import_chunks SET lease_token = NULL, lease_until = NULL,
+        updated_at = CURRENT_TIMESTAMP WHERE id = ? AND import_id = ?
+          AND status = 'failed' AND lease_token = ?
+          AND EXISTS (SELECT 1 FROM content_imports failed_job
+            WHERE failed_job.id = ? AND failed_job.cancel_requested = 0 AND failed_job.status = 'failed')`)
+        .bind(Number(chunk.id), importId, leaseToken, importId),
+    ]);
+  }
+}
+
+async function adminFinishContentImport(request: Request, payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare(`SELECT id, content_type, total_rows, total_chunks, uploaded_rows, uploaded_chunks, status
+    FROM content_imports WHERE id = ?`).bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type)) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (String(job.status) !== "uploading") return json({ error: "任务已经封存或处理" }, 409);
+  const integrity = await db.prepare(`WITH ordered AS (
+      SELECT chunk_index, row_offset, row_count,
+        ROW_NUMBER() OVER (ORDER BY chunk_index) - 1 AS expected_index,
+        COALESCE(SUM(row_count) OVER (
+          ORDER BY chunk_index ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ), 0) AS expected_offset
+      FROM content_import_chunks WHERE import_id = ?
+    )
+    SELECT COUNT(*) AS chunks, COALESCE(SUM(row_count), 0) AS rows,
+      COALESCE(SUM(CASE WHEN chunk_index <> expected_index THEN 1 ELSE 0 END), 0) AS bad_indexes,
+      COALESCE(SUM(CASE WHEN row_offset <> expected_offset OR row_count < 1 THEN 1 ELSE 0 END), 0) AS bad_ranges,
+      COALESCE(MAX(row_offset + row_count), 0) AS final_offset
+    FROM ordered`)
+    .bind(importId).first<Record<string, unknown>>();
+  if (Number(integrity?.chunks ?? 0) !== Number(job.total_chunks)
+    || Number(integrity?.rows ?? 0) !== Number(job.total_rows)
+    || Number(integrity?.bad_indexes ?? 0) !== 0 || Number(integrity?.bad_ranges ?? 0) !== 0
+    || Number(integrity?.final_offset ?? -1) !== Number(job.total_rows)) {
+    return json({ error: "文件分块序号或行区间不连续（存在缺口/重叠），不能封存" }, 409);
+  }
+  await db.prepare(`UPDATE content_imports SET status = 'queued', sealed_at = CURRENT_TIMESTAMP,
+    started_at = COALESCE(started_at, CURRENT_TIMESTAMP), last_heartbeat_at = CURRENT_TIMESTAMP,
+    dispatch_attempts = 0, next_retry_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'uploading'`).bind(importId).run();
+  const origin = new URL(request.url).origin;
+  const schedule = () => requestContentImportFanout(importId, Number(job.total_chunks), origin);
+  const backgroundScheduled = scheduleRequestTask(request, schedule) || await schedule();
+  await db.prepare(`UPDATE content_imports SET dispatch_attempts = dispatch_attempts + 1,
+    next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued','processing')`)
+    .bind(backgroundScheduled ? "+1 minute" : "+15 seconds", importId).run();
+  return json({ ok: true, importId, status: "queued", backgroundScheduled });
+}
+
+async function adminGetContentImport(request: Request, payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  let job = await db.prepare("SELECT * FROM content_imports WHERE id = ?").bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type)) ? "radar.read" : "content.read";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  await db.prepare(`UPDATE content_import_chunks SET status = 'queued', lease_token = NULL, lease_until = NULL,
+    updated_at = CURRENT_TIMESTAMP WHERE import_id = ? AND status = 'processing'
+      AND datetime(lease_until) <= CURRENT_TIMESTAMP`).bind(importId).run();
+  const progress = await refreshContentImportProgress(importId);
+  job = await db.prepare("SELECT * FROM content_imports WHERE id = ?").bind(importId).first<Record<string, unknown>>();
+  if (job && new Set(["queued", "processing"]).has(String(job.status)) && Number(progress?.pendingChunks ?? 0) > 0) {
+    scheduleRequestTask(request, () => requestContentImportFanout(importId, Number(job?.total_chunks ?? 0), new URL(request.url).origin));
+  }
+  const chunks = await db.prepare(`SELECT chunk_index, row_offset, row_count, status, attempts, imported_rows,
+    failed_rows, duplicate_rows, error_summary, updated_at, completed_at
+    FROM content_import_chunks WHERE import_id = ? ORDER BY chunk_index`).bind(importId).all();
+  return json({ ok: true, import: job, chunks: chunks.results });
+}
+
+async function adminCancelContentImport(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare("SELECT content_type, status FROM content_imports WHERE id = ?").bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type)) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (new Set(["completed", "completed_with_errors", "cancelled"]).has(String(job.status))) return json({ error: "任务已经结束" }, 409);
+  await db.batch([
+    db.prepare(`UPDATE content_imports SET cancel_requested = 1, status = 'cancelling', updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(importId),
+    db.prepare(`UPDATE content_import_chunks SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP,
+      rows_json = '[]', updated_at = CURRENT_TIMESTAMP WHERE import_id = ? AND status = 'queued'`).bind(importId),
+  ]);
+  await refreshContentImportProgress(importId);
+  return json({ ok: true, importId, status: "cancelling" });
+}
+
+async function adminRetryContentImport(request: Request, payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const db = getD1();
+  const job = await db.prepare("SELECT content_type, total_chunks, status FROM content_imports WHERE id = ?")
+    .bind(importId).first<Record<string, unknown>>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type)) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (String(job.status) !== "failed") return json({ error: "只有系统处理失败的任务可以安全重试；数据校验错误请修正文件后新建任务" }, 409);
+  const reset = await db.prepare(`UPDATE content_import_chunks SET status = 'queued', error_summary = '',
+    lease_token = NULL, lease_until = NULL, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE import_id = ? AND (status = 'failed' OR (status = 'processing' AND datetime(lease_until) <= CURRENT_TIMESTAMP))`)
+    .bind(importId).run();
+  if (!reset.meta.changes) return json({ error: "没有可安全重试的失败分块" }, 409);
+  await db.prepare(`UPDATE content_imports SET status = 'queued', cancel_requested = 0, error_summary = '',
+    completed_at = NULL, next_retry_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(importId).run();
+  const origin = new URL(request.url).origin;
+  const schedule = () => requestContentImportFanout(importId, Number(job.total_chunks), origin);
+  const backgroundScheduled = scheduleRequestTask(request, schedule) || await schedule();
+  await db.prepare(`UPDATE content_imports SET dispatch_attempts = dispatch_attempts + 1,
+    next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued','processing')`)
+    .bind(backgroundScheduled ? "+1 minute" : "+15 seconds", importId).run();
+  return json({ ok: true, importId, status: "queued", backgroundScheduled });
+}
+
+async function adminDownloadContentImportErrors(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const offset = Math.max(0, Math.floor(Number(payload.offset ?? 0)));
+  const db = getD1();
+  const job = await db.prepare("SELECT content_type, file_name FROM content_imports WHERE id = ?")
+    .bind(importId).first<{ content_type: string; file_name: string }>();
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(job.content_type) ? "radar.read" : "content.read";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  const limit = 1_000;
+  const [rows, total] = await Promise.all([
+    db.prepare(`SELECT row_index, content_key, kind, message FROM content_import_errors
+      WHERE import_id = ? ORDER BY row_index LIMIT ? OFFSET ?`).bind(importId, limit, offset).all<Record<string, unknown>>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_import_errors WHERE import_id = ?").bind(importId).first<{ count: number }>(),
+  ]);
+  const header = offset === 0 ? ["行号,内容标识,错误类型,错误原因"] : [];
+  const content = [...header, ...rows.results.map((item) => [item.row_index, item.content_key, item.kind, item.message]
+    .map(csvCell).join(","))].join("\r\n");
+  const nextOffset = offset + rows.results.length < Number(total?.count ?? 0) ? offset + rows.results.length : null;
+  return json({ ok: true, fileName: `${job.file_name.replace(/\.[^.]+$/, "").slice(0, 120)}-内容导入错误.csv`,
+    contentType: "text/csv;charset=utf-8", content: `${offset === 0 ? "\uFEFF" : "\r\n"}${content}`,
+    nextOffset, total: Number(total?.count ?? 0) });
+}
+
+async function loadContentImportWorkflow(importId: number) {
+  return getD1().prepare(`SELECT id, content_type, data_version, status, review_status, imported_rows,
+    submitted_by, duplicate_strategy FROM content_imports WHERE id = ?`).bind(importId)
+    .first<Record<string, unknown>>();
+}
+
+async function contentImportCurrentRowCount(importId: number, statuses: string[]) {
+  const placeholders = statuses.map(() => "?").join(",");
+  return getD1().prepare(`SELECT COUNT(*) AS total,
+    COALESCE(SUM(CASE WHEN ci.id IS NOT NULL AND ci.version = cir.content_version
+      AND ci.status IN (${placeholders})
+      AND CAST(json_extract(ci.payload_json, '$.importSource.importId') AS INTEGER) = cir.import_id
+      THEN 1 ELSE 0 END), 0) AS eligible
+    FROM content_import_row_results cir LEFT JOIN content_items ci
+      ON ci.content_key = cir.content_key
+    WHERE cir.import_id = ? AND cir.status = 'imported'`)
+    .bind(...statuses, importId).first<{ total: number; eligible: number }>();
+}
+
+async function adminSubmitContentImportReview(payload: Record<string, unknown>) {
+  const importId = Math.floor(Number(payload.importId));
+  const job = await loadContentImportWorkflow(importId);
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(job.content_type))
+    ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  if (!new Set(["completed", "completed_with_errors"]).has(String(job.status))) {
+    return json({ error: "导入尚未完成，不能提交批次审核" }, 409);
+  }
+  if (!new Set(["draft", "rejected"]).has(String(job.review_status))) {
+    return json({ error: "该批次当前状态不能重复提交审核" }, 409);
+  }
+  const counts = await contentImportCurrentRowCount(importId, ["draft", "rejected"]);
+  const total = Number(counts?.total ?? 0);
+  if (total < 1 || Number(counts?.eligible ?? 0) !== total) {
+    return json({ error: "批次中的部分内容已被单独修改，不能整批提交；请刷新并处理版本冲突", code: "CONTENT_IMPORT_VERSION_CONFLICT" }, 409);
+  }
+  const admin = adminFromPayload(payload)!;
+  const db = getD1();
+  const results = await db.batch([
+    db.prepare(`UPDATE content_imports SET review_status = 'submitting', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('completed','completed_with_errors') AND review_status IN ('draft','rejected')
+        AND imported_rows > 0
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported')
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          JOIN content_items ci ON ci.content_key = cir.content_key
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported'
+            AND ci.version = cir.content_version AND ci.status IN ('draft','rejected')
+            AND CAST(json_extract(ci.payload_json, '$.importSource.importId') AS INTEGER) = cir.import_id)`)
+      .bind(importId),
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'snapshot'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'submitting')`)
+      .bind(importId),
+    db.prepare(`UPDATE content_items AS ci SET status = 'pending_review', publish_at = NULL,
+      review_note = '', submitted_by = ?, submitted_at = CURRENT_TIMESTAMP,
+      reviewed_by = NULL, reviewed_at = NULL, version = ci.version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE EXISTS (SELECT 1 FROM content_import_row_results cir WHERE cir.import_id = ?
+        AND cir.status = 'imported' AND cir.content_key = ci.content_key AND cir.content_version = ci.version
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'submitting'))`)
+      .bind(admin.id, importId),
+    db.prepare(`INSERT OR REPLACE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'import_submit_review'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version + 1
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'submitting')`)
+      .bind(importId),
+    db.prepare(`UPDATE content_import_row_results SET content_version = content_version + 1
+      WHERE import_id = ? AND status = 'imported'
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = import_id AND job.review_status = 'submitting')`).bind(importId),
+    db.prepare(`UPDATE content_imports SET review_status = 'pending_review', submitted_by = ?,
+      submitted_at = CURRENT_TIMESTAMP, reviewed_by = NULL, reviewed_at = NULL, review_note = '',
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND review_status = 'submitting'`).bind(admin.id, importId),
+  ]);
+  if (!results[0]?.meta.changes) {
+    return json({ error: "批次在提交前发生版本变化，未执行任何内容更新", code: "CONTENT_IMPORT_VERSION_CONFLICT" }, 409);
+  }
+  return json({ ok: true, importId, reviewStatus: "pending_review", affected: total });
+}
+
+async function adminReviewContentImport(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.review")) return adminForbidden("content.review");
+  const admin = adminFromPayload(payload)!;
+  if (admin.role !== "reviewer" && admin.role !== "super_admin") return adminForbidden("content.review");
+  const importId = Math.floor(Number(payload.importId));
+  const decision = payload.decision === "approve" ? "approve" : payload.decision === "reject" ? "reject" : "";
+  const reviewNote = trimmed(payload.reviewNote, 1_000);
+  if (!decision) return json({ error: "审核决定无效" }, 400);
+  if (decision === "reject" && reviewNote.length < 2) return json({ error: "驳回批次时请填写原因" }, 400);
+  const job = await loadContentImportWorkflow(importId);
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  if (String(job.review_status) !== "pending_review") return json({ error: "该批次不在待审核状态" }, 409);
+  if (Number(job.submitted_by) === admin.id && admin.role !== "super_admin") {
+    return json({ error: "提交人与审核人需分离；请由另一名审核员处理" }, 409);
+  }
+  const counts = await contentImportCurrentRowCount(importId, ["pending_review"]);
+  const total = Number(counts?.total ?? 0);
+  if (total < 1 || Number(counts?.eligible ?? 0) !== total) {
+    return json({ error: "批次中的部分内容已发生版本变化，整批审核已中止", code: "CONTENT_IMPORT_VERSION_CONFLICT" }, 409);
+  }
+  const nextStatus = decision === "approve" ? "published" : "rejected";
+  const reviewingStatus = decision === "approve" ? "reviewing_approve" : "reviewing_reject";
+  const db = getD1();
+  const results = await db.batch([
+    db.prepare(`UPDATE content_imports SET review_status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND review_status = 'pending_review' AND imported_rows > 0
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported')
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          JOIN content_items ci ON ci.content_key = cir.content_key
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported'
+            AND ci.version = cir.content_version AND ci.status = 'pending_review'
+            AND CAST(json_extract(ci.payload_json, '$.importSource.importId') AS INTEGER) = cir.import_id)
+        AND (? = 'rejected' OR (
+          NOT EXISTS (
+            SELECT 1 FROM content_import_row_results cir
+            JOIN content_items ci ON ci.content_key = cir.content_key, json_tree(ci.payload_json) media_ref
+            LEFT JOIN media_assets ma ON media_ref.type = 'text'
+              AND media_ref.value = '/api/app?media=' || ma.id
+            WHERE cir.import_id = content_imports.id AND cir.status = 'imported'
+              AND ci.version = cir.content_version AND media_ref.type = 'text'
+              AND media_ref.value LIKE '/api/app?media=%'
+              AND (ma.id IS NULL OR ma.status <> 'active'
+                OR (ci.access_level = 'member' AND ma.access_level <> 'member'))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM content_import_row_results cir
+            JOIN content_items ci ON ci.content_key = cir.content_key
+            LEFT JOIN media_assets ma
+              ON json_extract(ci.payload_json, '$.audioUrl') = '/api/app?media=' || ma.id
+            WHERE cir.import_id = content_imports.id AND cir.status = 'imported'
+              AND ci.version = cir.content_version AND ci.content_type = 'audio_track'
+              AND (COALESCE(json_extract(ci.payload_json, '$.audioUrl'), '') NOT LIKE '/api/app?media=%'
+                OR ma.id IS NULL OR ma.status <> 'active' OR ma.content_type NOT LIKE 'audio/%'
+                OR (ci.access_level = 'member' AND ma.access_level <> 'member'))
+          )
+        ))`).bind(reviewingStatus, importId, nextStatus),
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'snapshot'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = ?)`)
+      .bind(importId, reviewingStatus),
+    db.prepare(`UPDATE content_items AS ci SET status = ?, publish_at = NULL, review_note = ?,
+      reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, version = ci.version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE EXISTS (SELECT 1 FROM content_import_row_results cir WHERE cir.import_id = ?
+        AND cir.status = 'imported' AND cir.content_key = ci.content_key AND cir.content_version = ci.version
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = ?))`)
+      .bind(nextStatus, reviewNote, admin.id, importId, reviewingStatus),
+    db.prepare(`UPDATE media_assets AS ma SET access_level = 'free', updated_at = CURRENT_TIMESTAMP
+      WHERE ma.status = 'active' AND ma.access_level = 'member'
+        AND EXISTS (
+          SELECT 1 FROM content_import_row_results cir
+          JOIN content_items ci ON ci.content_key = cir.content_key, json_tree(ci.payload_json) media_ref
+          WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version + 1
+            AND ci.status = 'published' AND ci.access_level = 'free'
+            AND media_ref.type = 'text' AND media_ref.value = '/api/app?media=' || ma.id
+            AND EXISTS (SELECT 1 FROM content_imports job
+              WHERE job.id = cir.import_id AND job.review_status = 'reviewing_approve')
+        )`).bind(importId),
+    db.prepare(`INSERT OR REPLACE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'import_review'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version + 1
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = ?)`)
+      .bind(importId, reviewingStatus),
+    db.prepare(`UPDATE content_import_row_results SET content_version = content_version + 1
+      WHERE import_id = ? AND status = 'imported'
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = import_id AND job.review_status = ?)`).bind(importId, reviewingStatus),
+    db.prepare(`UPDATE content_imports SET review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
+      review_note = ?, published_at = CASE WHEN ? = 'published' THEN CURRENT_TIMESTAMP ELSE published_at END,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND review_status = ?`)
+      .bind(nextStatus, admin.id, reviewNote, nextStatus, importId, reviewingStatus),
+  ]);
+  if (!results[0]?.meta.changes) {
+    return json({ error: decision === "approve"
+      ? "批次版本或媒体权益校验未通过，未发布任何内容"
+      : "批次版本已变化，未驳回任何内容", code: "CONTENT_IMPORT_REVIEW_CONFLICT" }, 409);
+  }
+  return json({ ok: true, importId, reviewStatus: nextStatus, affected: total });
+}
+
+async function adminRollbackContentImport(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.publish")) return adminForbidden("content.publish");
+  const importId = Math.floor(Number(payload.importId));
+  const dataVersion = trimmed(payload.dataVersion, 80);
+  const job = await loadContentImportWorkflow(importId);
+  if (!job) return json({ error: "内容导入任务不存在" }, 404);
+  if (dataVersion && dataVersion !== String(job.data_version)) return json({ error: "批次数据版本不匹配" }, 409);
+  if (String(job.review_status) === "rolled_back") return json({ ok: true, importId, reviewStatus: "rolled_back", duplicate: true });
+  if (!new Set(["completed", "completed_with_errors"]).has(String(job.status))) {
+    return json({ error: "导入尚未结束，不能执行批次回滚" }, 409);
+  }
+  const counts = await contentImportCurrentRowCount(importId,
+    ["draft", "pending_review", "published", "rejected", "scheduled", "archived"]);
+  const total = Number(counts?.total ?? 0);
+  if (total < 1 || Number(counts?.eligible ?? 0) !== total) {
+    return json({ error: "批次内容已被后续编辑，不能自动整批回滚；请按版本记录逐条处理", code: "CONTENT_IMPORT_VERSION_CONFLICT" }, 409);
+  }
+  const admin = adminFromPayload(payload)!;
+  const db = getD1();
+  const results = await db.batch([
+    db.prepare(`UPDATE content_imports SET review_status = 'rolling_back', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('completed','completed_with_errors') AND review_status <> 'rolled_back'
+        AND imported_rows > 0
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported')
+        AND imported_rows = (SELECT COUNT(*) FROM content_import_row_results cir
+          JOIN content_items ci ON ci.content_key = cir.content_key
+          WHERE cir.import_id = content_imports.id AND cir.status = 'imported'
+            AND ci.version = cir.content_version
+            AND ci.status IN ('draft','pending_review','published','rejected','scheduled','archived')
+            AND CAST(json_extract(ci.payload_json, '$.importSource.importId') AS INTEGER) = cir.import_id)`)
+      .bind(importId),
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'snapshot'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'rolling_back')`).bind(importId),
+    db.prepare(`WITH rollback_rows AS (
+        SELECT ci.id, imported.version AS import_version, imported.change_type,
+          previous.title AS previous_title, previous.payload_json AS previous_payload_json,
+          previous.access_level AS previous_access_level
+        FROM content_import_row_results cir
+        JOIN content_items ci ON ci.content_key = cir.content_key AND ci.version = cir.content_version
+        JOIN content_item_versions imported ON imported.content_id = ci.id
+          AND imported.change_type IN ('import','import_create')
+          AND CAST(json_extract(imported.payload_json, '$.importSource.importId') AS INTEGER) = cir.import_id
+        LEFT JOIN content_item_versions previous ON previous.content_id = ci.id
+          AND previous.version = imported.version - 1
+        WHERE cir.import_id = ? AND cir.status = 'imported'
+          AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'rolling_back')
+      )
+      UPDATE content_items AS target SET
+        title = CASE WHEN rollback_rows.change_type = 'import_create' THEN target.title ELSE rollback_rows.previous_title END,
+        payload_json = CASE WHEN rollback_rows.change_type = 'import_create' THEN target.payload_json ELSE rollback_rows.previous_payload_json END,
+        access_level = CASE WHEN rollback_rows.change_type = 'import_create' THEN target.access_level ELSE rollback_rows.previous_access_level END,
+        status = CASE WHEN rollback_rows.change_type = 'import_create' THEN 'archived' ELSE 'draft' END,
+        publish_at = NULL, review_note = '批次回滚', submitted_by = NULL, submitted_at = NULL,
+        reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, version = target.version + 1,
+        updated_at = CURRENT_TIMESTAMP
+      FROM rollback_rows WHERE target.id = rollback_rows.id`).bind(importId, admin.id),
+    db.prepare(`INSERT OR REPLACE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT ci.id, ci.version, ci.content_type, ci.content_key, ci.title, ci.payload_json,
+        ci.access_level, ci.status, ci.publish_at, 'import_rollback'
+      FROM content_import_row_results cir JOIN content_items ci ON ci.content_key = cir.content_key
+      WHERE cir.import_id = ? AND cir.status = 'imported' AND ci.version = cir.content_version + 1
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = cir.import_id AND job.review_status = 'rolling_back')`).bind(importId),
+    db.prepare(`UPDATE content_import_row_results SET content_version = content_version + 1
+      WHERE import_id = ? AND status = 'imported'
+        AND EXISTS (SELECT 1 FROM content_imports job WHERE job.id = import_id AND job.review_status = 'rolling_back')`).bind(importId),
+    db.prepare(`UPDATE content_imports SET review_status = 'rolled_back', reviewed_by = ?,
+      reviewed_at = CURRENT_TIMESTAMP, review_note = '批次回滚', rolled_back_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ? AND review_status = 'rolling_back'`).bind(admin.id, importId),
+  ]);
+  if (!results[0]?.meta.changes) {
+    return json({ error: "批次在回滚前发生版本变化，未执行任何内容更新", code: "CONTENT_IMPORT_VERSION_CONFLICT" }, 409);
+  }
+  return json({ ok: true, importId, dataVersion: String(job.data_version), reviewStatus: "rolled_back", affected: total });
 }
 
 async function adminStartQuestionImport(payload: Record<string, unknown>) {
@@ -4160,6 +6924,7 @@ async function adminStartQuestionImport(payload: Record<string, unknown>) {
   const fileName = trimmed(payload.fileName, 160);
   const fileSize = Math.max(0, Math.floor(Number(payload.fileSize ?? 0)));
   const fileHash = trimmed(payload.fileHash, 64).toLowerCase();
+  const duplicateStrategy = trimmed(payload.duplicateStrategy, 40) || "reject";
   const totalRows = Math.max(0, Math.floor(Number(payload.totalRows ?? 0)));
   const requestedChunks = Math.floor(Number(payload.totalChunks ?? 0));
   const chunkSize = Math.max(1, Math.min(QUESTION_IMPORT_CHUNK_ROWS, Math.floor(Number(payload.chunkSize ?? QUESTION_IMPORT_CHUNK_ROWS))));
@@ -4171,6 +6936,9 @@ async function adminStartQuestionImport(payload: Record<string, unknown>) {
   if (!/\.(xlsx|xls|csv)$/i.test(fileName)) return json({ error: "仅支持 XLSX、XLS 或 CSV 文件" }, 400);
   if (fileSize > 20 * 1024 * 1024) return json({ error: "单个文件不能超过20MB" }, 400);
   if (!/^[a-f0-9]{64}$/.test(fileHash)) return json({ error: "文件指纹无效，请重新选择文件" }, 400);
+  if (!QUESTION_IMPORT_DUPLICATE_STRATEGIES.has(duplicateStrategy)) {
+    return json({ error: "请选择明确的已存在题目处理策略" }, 400);
+  }
   if (totalRows < 1 || totalRows > QUESTION_IMPORT_MAX_FILE_ROWS) {
     return json({ error: `单个文件最多${QUESTION_IMPORT_MAX_FILE_ROWS}道题；超出请按年份或地区拆成多个文件导入` }, 400);
   }
@@ -4178,12 +6946,18 @@ async function adminStartQuestionImport(payload: Record<string, unknown>) {
     return json({ error: `单个文件最多${QUESTION_IMPORT_MAX_CHUNKS_PER_FILE}个持久化分块；内容过大时请按年份或地区拆分文件` }, 400);
   }
   const db = getD1();
-  const bank = await db.prepare("SELECT id FROM question_banks WHERE id = ?").bind(bankId).first();
+  const bank = await db.prepare("SELECT id, status FROM question_banks WHERE id = ?")
+    .bind(bankId).first<{ id: number; status: string }>();
   if (!bank) return json({ error: "目标题库不存在" }, 404);
+  if (bank.status === "published") {
+    return json({ error: "已发布题库不能直接导入；请先下架为草稿，完成导入、复核和审核后再重新发布" }, 409);
+  }
   const result = await db.prepare(`INSERT INTO question_imports
-    (bank_id, file_name, file_size, file_hash, total_rows, total_chunks, status, created_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'uploading', ?, CURRENT_TIMESTAMP)`)
-    .bind(bankId, fileName, fileSize, fileHash, totalRows, totalChunks, admin?.id ?? null).run();
+    (bank_id, file_name, file_size, file_hash, duplicate_strategy, total_rows, total_chunks, status, created_by, updated_at)
+    SELECT id, ?, ?, ?, ?, ?, ?, 'uploading', ?, CURRENT_TIMESTAMP
+    FROM question_banks WHERE id = ? AND status = 'draft'`)
+    .bind(fileName, fileSize, fileHash, duplicateStrategy, totalRows, totalChunks, admin?.id ?? null, bankId).run();
+  if (!result.meta.changes) return json({ error: "题库状态刚刚发生变化，请刷新后下架为草稿再导入" }, 409);
   return json({ ok: true, importId: Number(result.meta.last_row_id), chunkSize, totalChunks, status: "uploading" });
 }
 
@@ -4197,30 +6971,30 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   const explanation = trimmed(item.explanation, 8_000);
   const source = trimmed(item.source, 120);
   const rawSourceExamType = trimmed(item.sourceExamType, 40);
-  const sourceBatch = trimmed(item.sourceBatch, 80);
+  const sourceBatch = trimmed(item.sourceBatch, 80).toUpperCase();
   const region = trimmed(item.region ?? item.sourceRegion, 24).replace(/[·•]/g, "-");
-  const sourceExamType = rawSourceExamType.includes("国考") || /^(national|国考)$/i.test(rawSourceExamType)
-    || new Set(["全国", "国考"]).has(normalizeProvince(region))
+  const explicitSourceExamType = /^(national|国考|国家公务员考试)$/i.test(rawSourceExamType)
     ? "national"
-    : rawSourceExamType.includes("事业") || rawSourceExamType.includes("公安") || rawSourceExamType.includes("行政执法")
-      || /^special$/i.test(rawSourceExamType)
-      ? "special"
-      : "provincial";
+    : /^(provincial|省考|省级公务员考试)$/i.test(rawSourceExamType) || rawSourceExamType.includes("省考") || rawSourceExamType.includes("联考")
+      ? "provincial"
+      : /^(special|专项)$/i.test(rawSourceExamType)
+        || rawSourceExamType.includes("事业") || rawSourceExamType.includes("公安") || rawSourceExamType.includes("行政执法")
+        ? "special"
+        : "";
+  const nationalRegion = new Set(["全国", "国考"]).has(normalizeProvince(region));
+  const sourceExamType = explicitSourceExamType || (nationalRegion ? "national" : "provincial");
   const examYear = Math.floor(Number(item.examYear ?? item.sourceYear));
-  const frequencyOccurrences = Math.max(0, Math.floor(Number(item.frequencyOccurrences ?? 0)));
-  const frequencyPapers = Math.max(0, Math.floor(Number(item.frequencyPapers ?? 0)));
-  const frequencyYears = parseYearList(item.frequencyYears);
-  const frequencyCoverage = frequencyPapers > 0 ? frequencyOccurrences / frequencyPapers : 0;
-  const frequency = frequencyOccurrences > 0 && frequencyPapers > 0 && frequencyYears.length
-    ? frequencyCoverage >= 0.55 ? "高频" : frequencyCoverage >= 0.25 ? "中频" : "低频"
-    : "";
-  const frequencyUpdatedAt = frequency ? new Date().toISOString() : null;
-  const importanceRuleVersion = trimmed(item.importanceRuleVersion, 40);
-  const importanceReason = trimmed(item.importanceReason, 500);
-  const importanceOverrideReason = trimmed(item.importanceOverrideReason, 500);
-  const importanceValue = Math.floor(Number(item.importanceStars));
-  const importanceStars = importanceValue >= 1 && importanceValue <= 5
-    && importanceRuleVersion && (importanceReason || importanceOverrideReason) ? importanceValue : 0;
+  // 考频和重要星级只能由审核后的真实试卷样本生成。上传文件里的
+  // 同名字段一律不进入可信数据，避免编辑人员通过模板注入“高频/5星”。
+  const frequencyOccurrences = 0;
+  const frequencyPapers = 0;
+  const frequencyYears: number[] = [];
+  const frequency = "";
+  const frequencyUpdatedAt = null;
+  const importanceRuleVersion = "";
+  const importanceReason = "";
+  const importanceOverrideReason = "";
+  const importanceStars = 0;
   const scoreRateCorrect = Math.max(0, Math.floor(Number(item.scoreRateCorrect ?? 0)));
   const scoreRateAttempts = Math.max(0, Math.floor(Number(item.scoreRateAttempts ?? 0)));
   const scoreRate = scoreRateAttempts > 0 ? Math.round(scoreRateCorrect * 100 / scoreRateAttempts) : 0;
@@ -4246,17 +7020,12 @@ function validateImportedQuestion(raw: unknown): { question?: ImportedQuestion; 
   if (!questionModule) return { error: "模块不能为空" };
   if (!stem) return { error: "题干/材料不能为空" };
   if (!source) return { error: "真题来源不能为空" };
-  if (!sourceBatch) return { error: "真题必须填写可追溯的来源批次（同一套试卷使用同一批次）" };
+  if (!/^[A-Z0-9][A-Z0-9_-]{2,79}$/.test(sourceBatch)) return { error: "来源批次需使用3—80位大写字母、数字、横线或下划线，同一套试卷使用同一稳定编号" };
   if (!region) return { error: "真题必须填写地区" };
+  if (rawSourceExamType && !explicitSourceExamType) return { error: "来源考试类型无法识别，请填写 national/国考、provincial/省考或 special/专项" };
+  if (sourceExamType === "national" && !nationalRegion) return { error: "来源考试类型与地区冲突：国考题地区应填写国考或全国" };
+  if (sourceExamType === "provincial" && nationalRegion) return { error: "来源考试类型与地区冲突：省考题必须填写具体省份" };
   if (!Number.isInteger(examYear) || examYear < 1990 || examYear > new Date().getFullYear()) return { error: "真题年份无效" };
-  if (frequencyOccurrences > frequencyPapers && frequencyPapers > 0) return { error: "考频出现次数不能大于有效试卷数" };
-  if ((frequencyOccurrences || frequencyPapers || frequencyYears.length)
-    && (!frequencyOccurrences || !frequencyPapers || !frequencyYears.length)) return { error: "考频需同时填写近5年出现次数、有效试卷数和年份" };
-  const hasImportanceInput = Boolean(Number(item.importanceStars) || importanceRuleVersion || importanceReason || importanceOverrideReason);
-  if (hasImportanceInput && !(importanceValue >= 1 && importanceValue <= 5
-    && importanceRuleVersion && (importanceReason || importanceOverrideReason))) {
-    return { error: "重要星级需同时填写1—5星、规则版本及评分理由；人工覆盖还需填写覆盖理由" };
-  }
   if (scoreRateCorrect > scoreRateAttempts) return { error: "拿分率正确人数不能大于有效首答样本数" };
   if (scoreRateAttempts > 0 && !scoreRateScope) return { error: "外部拿分率有样本时必须填写统计范围" };
   if (scoreRateAttempts > 0 && !/^https:\/\//i.test(scoreRateSource)) {
@@ -4332,77 +7101,28 @@ function importedQuestionIdentityMatches(row: Record<string, unknown>, item: Imp
     && normalize(row.source_batch) === normalize(item.sourceBatch);
 }
 
-async function recomputeQuestionValueMetrics(bankId: number) {
-  const db = getD1();
-  const firstYear = new Date().getFullYear() - 4;
-  const scopes = await db.prepare(`SELECT DISTINCT q.source_exam_type, q.source_region
-    FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
-    WHERE qbi.bank_id = ? AND q.truth_verified = 1 AND q.review_status = 'approved'`)
-    .bind(bankId).all<{ source_exam_type: string; source_region: string }>();
-  if (!scopes.results.length) return;
-  const rowsByScope = await Promise.all(scopes.results.map(async (scope) => ({
-    scope,
-    rows: (await db.prepare(`SELECT DISTINCT q.id, q.module, q.sub_type, q.source_batch, q.source_year
-      FROM questions q
-      WHERE q.source_exam_type = ? AND q.source_region = ?
-        AND q.truth_verified = 1 AND q.review_status = 'approved' AND q.status = 'active'
-        AND q.source_year >= ? AND q.source_batch <> ''`)
-      .bind(scope.source_exam_type, scope.source_region, firstYear).all<Record<string, unknown>>()).results,
-  })));
-  const paperKey = (row: Record<string, unknown>) => String(row.source_batch || `${row.source}|${row.source_year}`);
-  const statements: D1PreparedStatement[] = [];
-  for (const { scope, rows } of rowsByScope) {
-    const validPapers = new Set(rows.map(paperKey).filter(Boolean));
-    if (!validPapers.size) continue;
-    const grouped = new Map<string, Record<string, unknown>[]>();
-    for (const row of rows) {
-      const key = `${String(row.module)}|${String(row.sub_type ?? "")}`;
-      const list = grouped.get(key) ?? [];
-      list.push(row);
-      grouped.set(key, list);
-    }
-    for (const [key, group] of grouped) {
-      const occurrencePapers = new Set(group.map(paperKey).filter(Boolean));
-      const years = Array.from(new Set(group.map((row) => Number(row.source_year)).filter(Number.isInteger)))
-        .sort((a, b) => b - a).slice(0, 5);
-      const coverage = occurrencePapers.size / validPapers.size;
-      const frequency = coverage >= 0.55 ? "高频" : coverage >= 0.25 ? "中频" : "低频";
-      const recentPersistence = years.filter((year) => year >= new Date().getFullYear() - 2).length;
-      const calculatedStars = Math.max(1, Math.min(5,
-        1 + (coverage >= 0.55 ? 2 : coverage >= 0.25 ? 1 : 0) + (years.length >= 3 ? 1 : 0) + (recentPersistence >= 2 ? 1 : 0)));
-      const [moduleName, subType] = key.split("|");
-      statements.push(db.prepare(`UPDATE questions SET frequency = ?, frequency_occurrences = ?,
-        frequency_papers = ?, frequency_years_json = ?, frequency_updated_at = CURRENT_TIMESTAMP,
-        importance_stars = CASE WHEN importance_override_reason <> '' THEN importance_stars ELSE ? END,
-        importance_rule_version = CASE WHEN importance_override_reason <> '' THEN importance_rule_version ELSE 'importance-v1' END,
-        importance_reason = CASE WHEN importance_override_reason <> '' THEN importance_reason ELSE ? END,
-        updated_at = CURRENT_TIMESTAMP
-        WHERE source_exam_type = ? AND source_region = ? AND module = ? AND sub_type = ?
-          AND id IN (${group.map(() => "?").join(",")})`)
-        .bind(frequency, occurrencePapers.size, validPapers.size, JSON.stringify(years), calculatedStars,
-          `近5年同范围${occurrencePapers.size}/${validPapers.size}套试卷出现，覆盖${years.length}个年份，近3年持续${recentPersistence}年`,
-          scope.source_exam_type, scope.source_region, moduleName, subType, ...group.map((row) => Number(row.id))));
-    }
-  }
-  if (statements.length) await db.batch(statements);
-}
-
 async function adminReviewQuestion(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "question.review")) return adminForbidden("question.review");
   const admin = adminFromPayload(payload);
   if (!admin || admin.role === "question_editor") return adminForbidden("question.review");
   const id = Math.floor(Number(payload.id));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
   const decision = payload.decision === "approve" ? "approve" : payload.decision === "reject" ? "reject" : "";
   const reviewNote = trimmed(payload.reviewNote, 1_000);
   if (!Number.isFinite(id) || id < 1) return json({ error: "待审核题目不存在" }, 400);
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    return json({ error: "审核页面中的题目版本已失效，请刷新后重试", code: "QUESTION_REVIEW_VERSION_MISMATCH" }, 409);
+  }
   if (!decision) return json({ error: "审核决定无效" }, 400);
   if (decision === "reject" && !reviewNote) return json({ error: "驳回时必须填写原因" }, 400);
   const db = getD1();
-  const question = await db.prepare(`SELECT id, question_code, subject, options_json, answer, explanation, prompt,
-    source, source_region, source_year, source_batch, score_rate, score_rate_correct, score_rate_attempts,
-    score_rate_scope, score_rate_source, score_rate_updated_at, review_status, truth_verified
-    FROM questions WHERE id = ?`).bind(id).first<Record<string, unknown>>();
+  const question = await db.prepare(`SELECT ${ADMIN_QUESTION_SELECT} FROM questions q WHERE q.id = ?`)
+    .bind(id).first<Record<string, unknown>>();
   if (!question) return json({ error: "待审核题目不存在" }, 404);
+  if (Number(question.version ?? 1) !== expectedVersion || String(question.review_status) !== "pending_review") {
+    return json({ error: "题目已被编辑或审核，请刷新队列后重试", code: "QUESTION_REVIEW_VERSION_MISMATCH",
+      currentVersion: Number(question.version ?? 1) }, 409);
+  }
   const sourceYear = Number(question.source_year);
   if (decision === "approve" && (!trimmed(question.source, 120) || !trimmed(question.source_region, 24)
     || !Number.isInteger(sourceYear) || sourceYear < 1990 || sourceYear > new Date().getFullYear()
@@ -4438,7 +7158,11 @@ async function adminReviewQuestion(payload: Record<string, unknown>) {
     }
     if (scoreRateSource === "platform") {
       const platformStats = await db.prepare(`SELECT COUNT(*) AS attempts,
-        COALESCE(SUM(is_correct), 0) AS correct FROM practice_attempts WHERE question_code = ?`)
+        COALESCE(SUM(metric_attempt.is_correct), 0) AS correct
+        FROM practice_attempts metric_attempt
+        JOIN users metric_user ON metric_user.id = metric_attempt.user_id
+        WHERE metric_attempt.question_code = ?
+          AND ${eligibleFirstAttemptSql("metric_attempt", "metric_user")}`)
         .bind(String(question.question_code)).first<{ attempts: number; correct: number }>();
       if (Number(platformStats?.attempts ?? 0) !== scoreRateAttempts
         || Number(platformStats?.correct ?? 0) !== scoreRateCorrect) {
@@ -4455,22 +7179,66 @@ async function adminReviewQuestion(payload: Record<string, unknown>) {
       }
     }
   }
-  const bankRows = await db.prepare("SELECT DISTINCT bank_id FROM question_bank_items WHERE question_id = ?")
-    .bind(id).all<{ bank_id: number }>();
-  const nextStatus = decision === "approve" ? "approved" : "rejected";
-  const updated = await db.prepare(`UPDATE questions SET truth_verified = ?,
-    truth_verified_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
-    review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, review_note = ?,
-    updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-    .bind(decision === "approve" ? 1 : 0, decision === "approve" ? 1 : 0,
-      nextStatus, admin.id, reviewNote, id).run();
-  if (!updated.meta.changes) return json({ error: "题目审核状态未更新" }, 409);
+  const bankRows = await db.prepare(`SELECT DISTINCT qb.id AS bank_id, qb.exam_type, qb.province, qb.exam_year, qb.subject
+    FROM question_bank_items qbi JOIN question_banks qb ON qb.id = qbi.bank_id
+    WHERE qbi.question_id = ?`).bind(id).all<{
+      bank_id: number; exam_type: string; province: string | null; exam_year: number | null; subject: string;
+    }>();
   if (decision === "approve") {
-    for (const bank of bankRows.results) await recomputeQuestionValueMetrics(Number(bank.bank_id));
+    const mismatchedBank = bankRows.results.find((bank) => !questionMatchesQuestionBankScope(bank, question));
+    if (mismatchedBank) {
+      return json({ error: "题目考试类型、科目或地区与关联题库不一致；请先移入正确题库后再审核" }, 409);
+    }
   }
-  return json({ ok: true, id, questionCode: question.question_code, reviewStatus: nextStatus,
+  const nextStatus = decision === "approve" ? "approved" : "rejected";
+  const currentSnapshot = adminQuestionSnapshot(question);
+  const nextVersion = expectedVersion + 1;
+  const nextSnapshot = { ...currentSnapshot, truthVerified: decision === "approve", reviewStatus: nextStatus };
+  const statements = [
+    db.prepare(`INSERT OR IGNORE INTO question_versions
+      (question_id, version, question_code, snapshot_json, change_type, admin_user_id, review_status)
+      VALUES (?, ?, ?, ?, 'review_baseline', ?, ?)`)
+      .bind(id, expectedVersion, String(question.question_code), JSON.stringify(currentSnapshot), admin.id, String(question.review_status)),
+    db.prepare(`UPDATE questions SET truth_verified = ?,
+      truth_verified_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+      review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, review_note = ?,
+      version = version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND version = ? AND review_status = 'pending_review'
+        AND ${QUESTION_NOT_LOCKED_BY_IMPORT_SQL}`)
+      .bind(decision === "approve" ? 1 : 0, decision === "approve" ? 1 : 0,
+        nextStatus, admin.id, reviewNote, id, expectedVersion),
+  ];
+  if (decision === "reject") {
+    statements.push(db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'active' AND json_valid(question_codes_json)
+        AND EXISTS (SELECT 1 FROM json_each(practice_sessions.question_codes_json) WHERE json_each.value = ?)
+        AND EXISTS (SELECT 1 FROM questions WHERE id = ? AND version = ? AND review_status = 'rejected')`)
+      .bind(String(question.question_code), id, nextVersion));
+    const rejectedPostState = { questionId: id, version: nextVersion, reviewStatus: "rejected" };
+    statements.push(draftInvalidPublishedBanksForQuestion(db, rejectedPostState));
+    statements.push(abandonActiveSessionsForDraftedQuestionBanks(db, rejectedPostState));
+  }
+  if (decision === "approve") {
+    const currentYear = new Date().getFullYear();
+    statements.push(db.prepare(QUESTION_VALUE_METRICS_SQL)
+      .bind(...questionValueMetricBindsForReview(id, nextVersion, currentYear - 4, currentYear - 2)));
+  }
+  statements.push(db.prepare(`INSERT OR IGNORE INTO question_versions
+    (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
+    SELECT id, version, question_code, ?, 'review', ?, ?, ? FROM questions
+    WHERE id = ? AND version = ? AND review_status = ?`)
+    .bind(JSON.stringify(nextSnapshot), expectedVersion, admin.id, nextStatus, id, nextVersion, nextStatus));
+  const results = await db.batch(statements);
+  const updated = results[1];
+  const abandoned = decision === "reject"
+    ? Number(results[2]?.meta.changes ?? 0) + Number(results[4]?.meta.changes ?? 0)
+    : 0;
+  if (!updated.meta.changes) return json({ error: "题目已被编辑或审核，请刷新队列后重试",
+    code: "QUESTION_REVIEW_VERSION_MISMATCH" }, 409);
+  return json({ ok: true, id, questionCode: question.question_code, version: nextVersion, reviewStatus: nextStatus,
     truthVerified: decision === "approve", reviewedBy: admin.id, reviewedAt: new Date().toISOString(),
-    affectedBankIds: bankRows.results.map((bank) => Number(bank.bank_id)) });
+    affectedBankIds: bankRows.results.map((bank) => Number(bank.bank_id)),
+    abandonedSessions: abandoned });
 }
 
 async function sha256Text(value: string) {
@@ -4611,20 +7379,38 @@ async function refreshQuestionImportProgress(importId: number) {
   return { status, processed, imported: Number(rows?.imported ?? 0), failed };
 }
 
-async function processQuestionImportChunk(importId: number, chunkId: number) {
+async function processQuestionImportChunk(importId: number, chunkId: number, leaseToken: string) {
   const db = getD1();
-  const chunk = await db.prepare(`SELECT qic.*, qi.bank_id, qi.created_by
+  const chunk = await db.prepare(`SELECT qic.*, qi.bank_id, qi.created_by, qi.duplicate_strategy,
+      qb.exam_type AS bank_exam_type, qb.province AS bank_province,
+      qb.exam_year AS bank_exam_year, qb.subject AS bank_subject, qb.status AS bank_status
     FROM question_import_chunks qic JOIN question_imports qi ON qi.id = qic.import_id
-    WHERE qic.id = ? AND qic.import_id = ?`).bind(chunkId, importId).first<Record<string, unknown>>();
+    JOIN question_banks qb ON qb.id = qi.bank_id
+    WHERE qic.id = ? AND qic.import_id = ? AND qic.status = 'processing'
+      AND qi.status = 'processing' AND qi.cancel_requested = 0 AND qi.lease_token = ?`)
+    .bind(chunkId, importId, leaseToken).first<Record<string, unknown>>();
   if (!chunk) throw new Error("导入分块不存在");
+  if (String(chunk.bank_status) === "published") {
+    throw new Error("目标题库已发布；请先下架为草稿后再安全重试本导入任务");
+  }
   const rows = JSON.parse(String(chunk.rows_json)) as unknown[];
   if (!Array.isArray(rows) || rows.length !== Number(chunk.row_count)) throw new Error("持久化分块内容损坏");
   const chunkIndex = Number(chunk.chunk_index);
   const rowOffset = Number(chunk.row_offset);
   const bankId = Number(chunk.bank_id);
-  const completedRows = await db.prepare("SELECT row_number FROM question_import_row_results WHERE import_id = ? AND chunk_index = ?")
-    .bind(importId, chunkIndex).all<{ row_number: number }>();
-  const completedSet = new Set(completedRows.results.map((item) => Number(item.row_number)));
+  const duplicateStrategy = QUESTION_IMPORT_DUPLICATE_STRATEGIES.has(String(chunk.duplicate_strategy))
+    ? String(chunk.duplicate_strategy) : "reject";
+  const importCodeRows = await db.prepare(`SELECT code.row_number, code.base_version,
+      CASE WHEN result.row_number IS NULL THEN 0 ELSE 1 END AS completed
+    FROM question_import_codes code
+    LEFT JOIN question_import_row_results result
+      ON result.import_id = code.import_id AND result.row_number = code.row_number
+    WHERE code.import_id = ? AND code.chunk_index = ?`).bind(importId, chunkIndex)
+    .all<{ row_number: number; base_version: number; completed: number }>();
+  const completedSet = new Set(importCodeRows.results
+    .filter((item) => Number(item.completed) === 1).map((item) => Number(item.row_number)));
+  const baseVersionByRow = new Map(importCodeRows.results
+    .map((item) => [Number(item.row_number), Math.max(0, Number(item.base_version ?? 0))]));
   const duplicateRows = await db.prepare(`SELECT all_codes.question_code, MIN(all_codes.row_number) AS first_row,
     COUNT(*) AS count FROM question_import_codes all_codes
     WHERE all_codes.import_id = ? AND all_codes.question_code IN (
@@ -4632,7 +7418,7 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
     ) GROUP BY all_codes.question_code HAVING COUNT(*) > 1`)
     .bind(importId, importId, chunkIndex).all<{ question_code: string; first_row: number; count: number }>();
   const duplicateMap = new Map(duplicateRows.results.map((item) => [item.question_code, Number(item.first_row)]));
-  const valid: Array<{ question: ImportedQuestion; row: number; raw: unknown }> = [];
+  const valid: Array<{ question: ImportedQuestion; row: number; raw: unknown; baseVersion: number }> = [];
   const errors: ImportRowError[] = [];
   rows.forEach((raw, index) => {
     const row = rowOffset + index + 2;
@@ -4644,21 +7430,39 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
       errors.push({ row, questionCode, kind: "validation", message: result.error ?? "未知错误", rawJson: JSON.stringify(raw).slice(0, 500) });
       return;
     }
+    const baseVersion = baseVersionByRow.get(row);
+    if (baseVersion === undefined) {
+      errors.push({ row, questionCode, kind: "conflict", message: "导入行缺少持久化版本基线，请取消任务后重新上传",
+        rawJson: JSON.stringify(raw).slice(0, 500) });
+      return;
+    }
+    if (!questionMatchesQuestionBankScope({
+      examType: String(chunk.bank_exam_type ?? ""),
+      province: String(chunk.bank_province ?? ""),
+      examYear: chunk.bank_exam_year == null ? null : Number(chunk.bank_exam_year),
+      subject: String(chunk.bank_subject ?? ""),
+    }, result.question)) {
+      errors.push({ row, questionCode, kind: "validation",
+        message: "题目考试类型、科目或地区与目标题库不一致；省考真题必须进入对应省份题库",
+        rawJson: JSON.stringify(raw).slice(0, 500) });
+      return;
+    }
     const firstRow = duplicateMap.get(result.question.questionCode);
     if (firstRow && firstRow !== row) {
       errors.push({ row, questionCode, kind: "duplicate", message: `文件内题目编号重复，首次出现在第${firstRow}行`, rawJson: JSON.stringify(raw).slice(0, 500) });
       return;
     }
-    valid.push({ question: result.question, row, raw });
+    valid.push({ question: result.question, row, raw, baseVersion });
   });
 
-  type AcceptedImport = { question: ImportedQuestion; row: number; mode: "write" | "reuse" };
+  type AcceptedImport = { question: ImportedQuestion; row: number; mode: "write" | "reuse"; expectedVersion: number };
   const accepted: AcceptedImport[] = [];
   if (valid.length) {
     const placeholders = valid.map(() => "?").join(",");
     const existingRows = await db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem,
       q.options_json, q.answer, q.prompt, q.source, q.source_exam_type, q.source_region, q.source_year, q.source_batch,
-      q.version, COUNT(DISTINCT qb.id) AS bank_count,
+      q.version, q.score_rate, q.score_rate_correct, q.score_rate_attempts, q.score_rate_scope,
+      q.score_rate_source, q.score_rate_updated_at, COUNT(DISTINCT qb.id) AS bank_count,
       MAX(CASE WHEN qb.id = ? THEN 1 ELSE 0 END) AS in_current_bank,
       GROUP_CONCAT(DISTINCT qb.name) AS bank_names
       FROM questions q
@@ -4669,11 +7473,34 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
     const existingMap = new Map(existingRows.results.map((item) => [String(item.question_code), item]));
     for (const item of valid) {
       const existing = existingMap.get(item.question.questionCode);
-      if (!existing) accepted.push({ question: item.question, row: item.row, mode: "write" });
+      const currentVersion = existing ? Number(existing.version ?? 1) : 0;
+      if (currentVersion !== item.baseVersion) {
+        errors.push({ row: item.row, questionCode: item.question.questionCode, kind: "conflict",
+          message: `题目在本导入任务上传后已变化（基线v${item.baseVersion}，当前v${currentVersion}）；已阻止覆盖，请新建导入任务`,
+          rawJson: JSON.stringify(item.raw).slice(0, 500) });
+      } else if (!existing) accepted.push({ question: item.question, row: item.row, mode: "write", expectedVersion: item.baseVersion });
       else if (Number(existing.in_current_bank) === 1 && Number(existing.bank_count) === 1) {
-        accepted.push({ question: item.question, row: item.row, mode: "write" });
+        if (duplicateStrategy === "reject") {
+          errors.push({ row: item.row, questionCode: item.question.questionCode, kind: "duplicate",
+            message: "题号已存在；本任务选择了“拒绝覆盖”策略", rawJson: JSON.stringify(item.raw).slice(0, 500) });
+        } else if (duplicateStrategy === "replace_external_metrics"
+          && (!(item.question.scoreRateAttempts > 0) || !/^https:\/\//i.test(item.question.scoreRateSource))) {
+          errors.push({ row: item.row, questionCode: item.question.questionCode, kind: "conflict",
+            message: "选择替换外部拿分率时，每个覆盖行都必须提供可追溯HTTPS来源及有效样本", rawJson: JSON.stringify(item.raw).slice(0, 500) });
+        } else {
+          const question = duplicateStrategy === "preserve_metrics" ? {
+            ...item.question,
+            scoreRate: Number(existing.score_rate ?? item.question.scoreRate),
+            scoreRateCorrect: Number(existing.score_rate_correct ?? 0),
+            scoreRateAttempts: Number(existing.score_rate_attempts ?? 0),
+            scoreRateScope: String(existing.score_rate_scope ?? ""),
+            scoreRateSource: String(existing.score_rate_source ?? "platform") || "platform",
+            scoreRateUpdatedAt: existing.score_rate_updated_at ? String(existing.score_rate_updated_at) : null,
+          } : item.question;
+          accepted.push({ question, row: item.row, mode: "write", expectedVersion: item.baseVersion });
+        }
       } else if (importedQuestionIdentityMatches(existing, item.question)) {
-        accepted.push({ question: item.question, row: item.row, mode: "reuse" });
+        accepted.push({ question: item.question, row: item.row, mode: "reuse", expectedVersion: item.baseVersion });
       } else {
         errors.push({ row: item.row, questionCode: item.question.questionCode, kind: "conflict",
           message: `题目编号已用于“${String(existing.bank_names ?? "其他题库")}”且核心内容不一致；共通题可复用编号，但题干、选项和答案必须一致`,
@@ -4689,6 +7516,7 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
     const acceptedJson = JSON.stringify(accepted.map((item) => ({
       row: item.row,
       mode: item.mode,
+      expectedVersion: item.expectedVersion,
       question: importedQuestionSnapshot(item.question),
     })));
     if (new TextEncoder().encode(acceptedJson).byteLength >= QUESTION_IMPORT_MAX_BINDING_BYTES) {
@@ -4723,7 +7551,9 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
           json_extract(incoming.value, '$.question.region'),
           CAST(json_extract(incoming.value, '$.question.examYear') AS INTEGER),
           COALESCE(json_extract(incoming.value, '$.question.sourceBatch'), ''),
-          0, NULL, 'pending_review', NULL, NULL, '',
+          0, NULL, 'pending_review', NULL, NULL,
+          CASE WHEN CAST(json_extract(incoming.value, '$.expectedVersion') AS INTEGER) > 0
+            THEN CAST(json_extract(incoming.value, '$.expectedVersion') AS TEXT) ELSE '' END,
           COALESCE(json_extract(incoming.value, '$.question.frequency'), ''),
           COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyOccurrences') AS INTEGER), 0),
           COALESCE(CAST(json_extract(incoming.value, '$.question.frequencyPapers') AS INTEGER), 0),
@@ -4748,6 +7578,7 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
           AND NOT EXISTS (SELECT 1 FROM question_import_row_results completed
             WHERE completed.import_id = ?
               AND completed.row_number = CAST(json_extract(incoming.value, '$.row') AS INTEGER))
+          AND ${QUESTION_IMPORT_WRITE_GUARD_SQL}
         ON CONFLICT(question_code) DO UPDATE SET
           subject = excluded.subject, module = excluded.module, sub_type = excluded.sub_type, stem = excluded.stem,
           options_json = excluded.options_json, answer = excluded.answer, explanation = excluded.explanation,
@@ -4761,12 +7592,28 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
           frequency_years_json = excluded.frequency_years_json, frequency_updated_at = excluded.frequency_updated_at,
           importance_stars = excluded.importance_stars, importance_rule_version = excluded.importance_rule_version,
           importance_reason = excluded.importance_reason, importance_override_reason = excluded.importance_override_reason,
-          score_rate = excluded.score_rate, score_rate_correct = excluded.score_rate_correct,
-          score_rate_attempts = excluded.score_rate_attempts, score_rate_scope = excluded.score_rate_scope,
-          score_rate_source = excluded.score_rate_source, score_rate_updated_at = excluded.score_rate_updated_at,
+          score_rate = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate ELSE questions.score_rate END,
+          score_rate_correct = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate_correct ELSE questions.score_rate_correct END,
+          score_rate_attempts = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate_attempts ELSE questions.score_rate_attempts END,
+          score_rate_scope = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate_scope ELSE questions.score_rate_scope END,
+          score_rate_source = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate_source ELSE questions.score_rate_source END,
+          score_rate_updated_at = CASE WHEN ? = 'replace_external_metrics' THEN excluded.score_rate_updated_at ELSE questions.score_rate_updated_at END,
           suggested_seconds = excluded.suggested_seconds, image_url = excluded.image_url,
           resource_url = excluded.resource_url, status = 'active', version = questions.version + 1,
-          updated_at = CURRENT_TIMESTAMP`).bind(acceptedJson, importId),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE questions.version = CAST(excluded.review_note AS INTEGER)`)
+        .bind(acceptedJson, importId, chunkId, importId, leaseToken,
+          duplicateStrategy, duplicateStrategy, duplicateStrategy, duplicateStrategy, duplicateStrategy, duplicateStrategy),
+      db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'active' AND json_valid(question_codes_json)
+          AND EXISTS (
+            SELECT 1 FROM json_each(practice_sessions.question_codes_json) session_question
+            JOIN json_each(?) incoming
+              ON session_question.value = json_extract(incoming.value, '$.question.questionCode')
+            JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')
+            WHERE json_extract(incoming.value, '$.mode') = 'write'
+              AND ${QUESTION_IMPORT_POST_STATE_SQL}
+          ) AND ${QUESTION_IMPORT_WRITE_GUARD_SQL}`).bind(acceptedJson, chunkId, importId, leaseToken),
       db.prepare(`INSERT OR IGNORE INTO question_versions
         (question_id, version, question_code, snapshot_json, change_type, import_id, source_row, admin_user_id, review_status)
         SELECT q.id, q.version, q.question_code, json(json_extract(incoming.value, '$.question')),
@@ -4774,21 +7621,27 @@ async function processQuestionImportChunk(importId: number, chunkId: number) {
         FROM json_each(?) AS incoming
         JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')
         WHERE json_extract(incoming.value, '$.mode') = 'write'
+          AND ${QUESTION_IMPORT_POST_STATE_SQL}
           AND NOT EXISTS (SELECT 1 FROM question_import_row_results completed
             WHERE completed.import_id = ?
-              AND completed.row_number = CAST(json_extract(incoming.value, '$.row') AS INTEGER))`)
-        .bind(importId, chunk.created_by ?? null, acceptedJson, importId),
+              AND completed.row_number = CAST(json_extract(incoming.value, '$.row') AS INTEGER))
+          AND ${QUESTION_IMPORT_WRITE_GUARD_SQL}`)
+        .bind(importId, chunk.created_by ?? null, acceptedJson, importId, chunkId, importId, leaseToken),
       db.prepare(`INSERT OR IGNORE INTO question_bank_items (bank_id, question_id, sort_order)
         SELECT ?, q.id, CAST(json_extract(incoming.value, '$.row') AS INTEGER) - 2
         FROM json_each(?) AS incoming
-        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')`)
-        .bind(bankId, acceptedJson),
+        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')
+        WHERE ${QUESTION_IMPORT_POST_STATE_SQL}
+          AND ${QUESTION_IMPORT_WRITE_GUARD_SQL}`)
+        .bind(bankId, acceptedJson, chunkId, importId, leaseToken),
       db.prepare(`INSERT OR IGNORE INTO question_import_row_results
         (import_id, row_number, chunk_index, status, question_code, question_version)
         SELECT ?, CAST(json_extract(incoming.value, '$.row') AS INTEGER), ?, 'imported', q.question_code, q.version
         FROM json_each(?) AS incoming
-        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')`)
-        .bind(importId, chunkIndex, acceptedJson),
+        JOIN questions q ON q.question_code = json_extract(incoming.value, '$.question.questionCode')
+        WHERE ${QUESTION_IMPORT_POST_STATE_SQL}
+          AND ${QUESTION_IMPORT_WRITE_GUARD_SQL}`)
+        .bind(importId, chunkIndex, acceptedJson, chunkId, importId, leaseToken),
     ]);
   }
   const counts = await db.prepare(`SELECT COUNT(*) AS processed,
@@ -4852,6 +7705,144 @@ async function requestQuestionImportContinuation(importId: number, origin: strin
   return false;
 }
 
+async function requestContentImportInternal(origin: string, payload: Record<string, unknown>) {
+  const secret = internalJobSecret();
+  if (secret.length < 32 || !/^https?:\/\//i.test(origin)) return false;
+  const bypassToken = sitesBypassBearerToken();
+  try {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      [INTERNAL_IMPORT_HEADER]: secret,
+    };
+    if (bypassToken) headers["OAI-Sites-Authorization"] = `Bearer ${bypassToken}`;
+    const response = await fetch(new URL("/api/app", origin), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    return response.ok;
+  } catch {
+    // The job and every chunk remain durable in D1. A task-list poll can
+    // safely dispatch the same slot/chunk again without duplicating rows.
+    return false;
+  }
+}
+
+async function requestContentImportFanout(importId: number, totalChunks: number, origin: string) {
+  const slotCount = Math.min(CONTENT_IMPORT_WORKER_SLOTS, Math.max(0, totalChunks));
+  if (slotCount < 1) return false;
+  const results = await Promise.all(Array.from({ length: slotCount }, (_, slot) => requestContentImportInternal(origin, {
+    action: "fanoutContentImportInternal",
+    importId,
+    totalChunks,
+    slot,
+  })));
+  return results.every(Boolean);
+}
+
+async function requestContentImportSlotChunks(importId: number, totalChunks: number, slot: number, origin: string) {
+  const chunkIndexes = Array.from({ length: CONTENT_IMPORT_CHUNKS_PER_SLOT }, (_, offset) => (
+    slot + offset * CONTENT_IMPORT_WORKER_SLOTS
+  )).filter((chunkIndex) => chunkIndex < totalChunks);
+  if (!chunkIndexes.length) return true;
+  const results = await Promise.all(chunkIndexes.map((chunkIndex) => requestContentImportInternal(origin, {
+    action: "processContentImportChunkInternal",
+    importId,
+    chunkIndex,
+  })));
+  return results.every(Boolean);
+}
+
+async function reapImportCancellation(importId: number, importKind: "question" | "content") {
+  const db = getD1();
+  if (importKind === "question") {
+    await db.batch([
+      db.prepare(`UPDATE question_import_chunks SET status = 'cancelled', rows_json = '[]', updated_at = CURRENT_TIMESTAMP
+        WHERE import_id = ? AND status IN ('queued','processing') AND EXISTS (
+          SELECT 1 FROM question_imports cancelling_job WHERE cancelling_job.id = ?
+            AND cancelling_job.cancel_requested = 1 AND cancelling_job.status = 'cancelling'
+            AND (cancelling_job.lease_until IS NULL OR datetime(cancelling_job.lease_until) <= CURRENT_TIMESTAMP)
+        )`).bind(importId, importId),
+      db.prepare(`UPDATE question_imports SET status = 'cancelled', lease_token = NULL, lease_until = NULL,
+          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND cancel_requested = 1 AND status = 'cancelling'
+          AND (lease_until IS NULL OR datetime(lease_until) <= CURRENT_TIMESTAMP)`).bind(importId),
+    ]);
+    return;
+  }
+  await db.prepare(`UPDATE content_import_chunks SET status = 'cancelled', lease_token = NULL, lease_until = NULL,
+      rows_json = '[]', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE import_id = ? AND status IN ('queued','processing')
+      AND (status = 'queued' OR lease_until IS NULL OR datetime(lease_until) <= CURRENT_TIMESTAMP)
+      AND EXISTS (SELECT 1 FROM content_imports cancelling_job WHERE cancelling_job.id = ?
+        AND cancelling_job.cancel_requested = 1 AND cancelling_job.status = 'cancelling')`)
+    .bind(importId, importId).run();
+  await refreshContentImportProgress(importId);
+}
+
+async function dispatchDueImportWork(request: Request) {
+  const db = getD1();
+  const job = await db.prepare(`SELECT kind, id, total_chunks, due_at FROM (
+      SELECT CASE WHEN cancel_requested = 1 THEN 'question_cancel' ELSE 'question' END AS kind,
+        id, 0 AS total_chunks,
+        COALESCE(lease_until, updated_at, created_at) AS due_at
+      FROM question_imports
+      WHERE ((cancel_requested = 0 AND status IN ('queued','processing'))
+          OR (cancel_requested = 1 AND status = 'cancelling'))
+        AND (lease_until IS NULL OR datetime(lease_until) <= CURRENT_TIMESTAMP)
+      UNION ALL
+      SELECT 'content' AS kind, id, total_chunks,
+        COALESCE(next_retry_at, sealed_at, created_at) AS due_at
+      FROM content_imports
+      WHERE cancel_requested = 0 AND status IN ('queued','processing')
+        AND (next_retry_at IS NULL OR datetime(next_retry_at) <= CURRENT_TIMESTAMP)
+      UNION ALL
+      SELECT 'content_cancel' AS kind, cancel_job.id, cancel_job.total_chunks,
+        cancel_job.updated_at AS due_at
+      FROM content_imports cancel_job
+      WHERE cancel_job.cancel_requested = 1 AND cancel_job.status = 'cancelling'
+        AND NOT EXISTS (SELECT 1 FROM content_import_chunks active_chunk
+          WHERE active_chunk.import_id = cancel_job.id AND active_chunk.status = 'processing'
+            AND datetime(active_chunk.lease_until) > CURRENT_TIMESTAMP)
+    ) ORDER BY due_at, id LIMIT 1`)
+    .first<{ kind: "question" | "question_cancel" | "content" | "content_cancel"; id: number; total_chunks: number }>();
+  if (!job) return false;
+  const origin = new URL(request.url).origin;
+  if (job.kind === "question_cancel" || job.kind === "content_cancel") {
+    const importKind = job.kind === "question_cancel" ? "question" : "content";
+    const schedule = () => requestContentImportInternal(origin, {
+      action: "reapImportCancellationInternal", importId: Number(job.id), importKind,
+    });
+    return scheduleRequestTask(request, schedule) || await schedule();
+  }
+  if (job.kind === "question") {
+    // Always resume in a fresh Worker invocation. Running the importer inside
+    // this ordinary request would add its D1 reads to bootstrap/action reads
+    // and can cross the Free-plan per-invocation query ceiling.
+    return scheduleRequestTask(request, () => requestQuestionImportContinuation(Number(job.id), origin));
+  }
+  const claimed = await db.prepare(`UPDATE content_imports SET
+      dispatch_attempts = dispatch_attempts + 1,
+      next_retry_at = CASE
+        WHEN dispatch_attempts < 2 THEN datetime('now','+15 seconds')
+        WHEN dispatch_attempts < 5 THEN datetime('now','+1 minute')
+        ELSE datetime('now','+5 minutes') END,
+      last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND cancel_requested = 0 AND status IN ('queued','processing')
+      AND (next_retry_at IS NULL OR datetime(next_retry_at) <= CURRENT_TIMESTAMP)`)
+    .bind(Number(job.id)).run();
+  if (!claimed.meta.changes) return false;
+  return scheduleRequestTask(request, async () => {
+    const accepted = await requestContentImportFanout(Number(job.id), Number(job.total_chunks), origin);
+    if (!accepted) {
+      await db.prepare(`UPDATE content_imports SET next_retry_at = MIN(
+          COALESCE(next_retry_at, datetime('now','+1 minute')), datetime('now','+1 minute')
+        ), updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status IN ('queued','processing')`).bind(Number(job.id)).run();
+    }
+  });
+}
+
 async function processQuestionImport(importId: number, budgetMs = 24_000, continuationOrigin = "") {
   const db = getD1();
   const leaseToken = crypto.randomUUID();
@@ -4898,7 +7889,7 @@ async function processQuestionImport(importId: number, budgetMs = 24_000, contin
       attemptedChunks += 1;
       remainingD1QueryBudget -= QUESTION_IMPORT_CHUNK_QUERY_BUDGET;
       try {
-        await processQuestionImportChunk(importId, Number(chunk.id));
+        await processQuestionImportChunk(importId, Number(chunk.id), leaseToken);
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 1_000) : "分块处理失败";
         const nextStatus = Number(chunk.attempts ?? 0) + 1 >= 3 ? "failed" : "queued";
@@ -4975,9 +7966,13 @@ async function adminImportQuestionBatch(payload: Record<string, unknown>) {
     db.prepare(`INSERT INTO question_import_chunks
       (import_id, chunk_index, row_offset, row_count, payload_hash, rows_json, status)
       VALUES (?, ?, ?, ?, ?, ?, 'queued')`).bind(importId, chunkIndex, rowOffset, payload.rows.length, payloadHash, rowsJson),
-    db.prepare(`INSERT OR IGNORE INTO question_import_codes (import_id, chunk_index, row_number, question_code)
-      SELECT ?, ?, CAST(json_extract(value, '$.rowNumber') AS INTEGER), json_extract(value, '$.questionCode')
-      FROM json_each(?)`).bind(importId, chunkIndex, JSON.stringify(codes)),
+    db.prepare(`INSERT OR IGNORE INTO question_import_codes
+      (import_id, chunk_index, row_number, question_code, base_version)
+      SELECT ?, ?, CAST(json_extract(incoming.value, '$.rowNumber') AS INTEGER),
+        json_extract(incoming.value, '$.questionCode'), COALESCE(q.version, 0)
+      FROM json_each(?) incoming
+      LEFT JOIN questions q ON q.question_code = json_extract(incoming.value, '$.questionCode')`)
+      .bind(importId, chunkIndex, JSON.stringify(codes)),
     db.prepare(`UPDATE question_imports SET uploaded_chunks =
         (SELECT COUNT(*) FROM question_import_chunks WHERE import_id = ?),
       uploaded_rows = (SELECT COALESCE(SUM(row_count), 0) FROM question_import_chunks WHERE import_id = ?),
@@ -5158,6 +8153,10 @@ async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
   const admin = adminFromPayload(payload);
   const questionId = Math.floor(Number(payload.questionId));
   const targetVersion = Math.floor(Number(payload.version));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    return json({ error: "缺少题目当前版本，请刷新后重试", code: "QUESTION_VERSION_REQUIRED" }, 409);
+  }
   const db = getD1();
   const [live, target] = await Promise.all([
     db.prepare("SELECT id, question_code, version, status FROM questions WHERE id = ?").bind(questionId).first<Record<string, unknown>>(),
@@ -5165,13 +8164,21 @@ async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
       WHERE question_id = ? AND version = ?`).bind(questionId, targetVersion).first<Record<string, unknown>>(),
   ]);
   if (!live || !target) return json({ error: "题目或目标版本不存在" }, 404);
+  if (Number(live.version) !== expectedVersion) {
+    return json({
+      error: "题目已被其他管理员更新，请刷新版本历史后重试",
+      code: "QUESTION_VERSION_CONFLICT",
+      currentVersion: Number(live.version),
+    }, 409);
+  }
   if (targetVersion === Number(live.version)) return json({ error: "当前已经是该版本，无需回滚" }, 409);
   let snapshot: Record<string, unknown>;
   try { snapshot = JSON.parse(String(target.snapshot_json)) as Record<string, unknown>; }
   catch { return json({ error: "目标版本快照损坏，已拒绝回滚" }, 409); }
   if (String(snapshot.questionCode) !== String(live.question_code)) return json({ error: "版本快照与当前题目不匹配" }, 409);
   const pendingSnapshot = { ...snapshot, truthVerified: false, reviewStatus: "pending_review", status: String(live.status ?? "active") };
-  await db.batch([
+  const nextVersion = expectedVersion + 1;
+  const results = await db.batch([
     db.prepare(`UPDATE questions SET subject = ?, module = ?, sub_type = ?, stem = ?, options_json = ?, answer = ?,
       explanation = ?, technique = ?, material = ?, prompt = ?, word_limit = ?, scoring_points_json = ?, difficulty = ?,
       source = ?, source_exam_type = ?, source_region = ?, source_year = ?, source_batch = ?, truth_verified = 0,
@@ -5179,8 +8186,9 @@ async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
       frequency = ?, frequency_occurrences = ?, frequency_papers = ?, frequency_years_json = ?, frequency_updated_at = ?,
       importance_stars = ?, importance_rule_version = ?, importance_reason = ?, importance_override_reason = ?,
       score_rate = ?, score_rate_correct = ?, score_rate_attempts = ?, score_rate_scope = ?, score_rate_source = ?,
-      score_rate_updated_at = ?, suggested_seconds = ?, image_url = ?, resource_url = ?, status = ?,
-      version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+       score_rate_updated_at = ?, suggested_seconds = ?, image_url = ?, resource_url = ?, status = ?,
+      version = version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND version = ? AND ${QUESTION_NOT_LOCKED_BY_IMPORT_SQL}`)
       .bind(String(snapshot.subject ?? ""), String(snapshot.module ?? ""), String(snapshot.subType ?? ""), String(snapshot.stem ?? ""),
         JSON.stringify(Array.isArray(snapshot.options) ? snapshot.options : []), snapshot.answer ?? null,
         String(snapshot.explanation ?? ""), String(snapshot.technique ?? ""), String(snapshot.material ?? ""),
@@ -5193,15 +8201,29 @@ async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
         String(snapshot.importanceOverrideReason ?? ""), Number(snapshot.scoreRate ?? 0), Number(snapshot.scoreRateCorrect ?? 0),
         Number(snapshot.scoreRateAttempts ?? 0), String(snapshot.scoreRateScope ?? ""), String(snapshot.scoreRateSource ?? "platform"),
         snapshot.scoreRateUpdatedAt ?? null, Number(snapshot.suggestedSeconds ?? 60), String(snapshot.imageUrl ?? ""),
-        String(snapshot.resourceUrl ?? ""), String(live.status ?? "active"), questionId),
+        String(snapshot.resourceUrl ?? ""), String(live.status ?? "active"), questionId, expectedVersion),
     db.prepare(`INSERT INTO question_versions
       (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
-      SELECT id, version, question_code, ?, 'rollback', ?, ?, 'pending_review' FROM questions WHERE id = ?`)
-      .bind(JSON.stringify(pendingSnapshot), targetVersion, admin?.id ?? null, questionId),
+      SELECT id, version, question_code, ?, 'rollback', ?, ?, 'pending_review' FROM questions
+      WHERE id = ? AND version = ? AND changes() = 1`)
+      .bind(JSON.stringify(pendingSnapshot), targetVersion, admin?.id ?? null, questionId, nextVersion),
+    db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
+      WHERE changes() = 1 AND status = 'active' AND json_valid(question_codes_json)
+        AND EXISTS (SELECT 1 FROM json_each(practice_sessions.question_codes_json)
+          WHERE json_each.value = ?)`)
+      .bind(String(live.question_code)),
+    draftInvalidPublishedBanksForQuestion(db,
+      { questionId, version: nextVersion, reviewStatus: "pending_review" }),
+    abandonActiveSessionsForDraftedQuestionBanks(db,
+      { questionId, version: nextVersion, reviewStatus: "pending_review" }),
   ]);
-  const updated = await db.prepare("SELECT version, review_status FROM questions WHERE id = ?").bind(questionId)
-    .first<{ version: number; review_status: string }>();
-  return json({ ok: true, id: questionId, version: updated?.version, reviewStatus: updated?.review_status,
+  if (!results[0]?.meta.changes) {
+    return json({
+      error: "题目已被其他管理员更新，请刷新版本历史后重试",
+      code: "QUESTION_VERSION_CONFLICT",
+    }, 409);
+  }
+  return json({ ok: true, id: questionId, version: nextVersion, reviewStatus: "pending_review",
     rolledBackFromVersion: targetVersion, message: "已生成新的待审核版本；历史版本未被删除" });
 }
 
@@ -5306,7 +8328,7 @@ async function adminDashboard(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "dashboard.read")) return adminForbidden("dashboard.read");
   const db = getD1();
   const [users, activeUsers, publishedContent, pendingReview, banks, questionsCount, redemptions7d,
-    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, recent] = await Promise.all([
+    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, sourceIncomplete, recent] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status IN ('published','scheduled')").first<{ count: number }>(),
@@ -5316,11 +8338,25 @@ async function adminDashboard(payload: Record<string, unknown>) {
     db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('failed','completed_with_errors')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('uploading','queued','processing','cancelling')").first<{ count: number }>(),
-    db.prepare(`SELECT COUNT(*) AS count FROM question_banks b WHERE b.status = 'published'
-      AND NOT EXISTS (SELECT 1 FROM question_bank_items i WHERE i.bank_id = b.id)`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM question_banks qb WHERE qb.status = 'published'
+      AND NOT ${QUESTION_BANK_CAN_PUBLISH_SQL}`).first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review' AND submitted_at < datetime('now','-2 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'scheduled' AND datetime(publish_at) <= datetime('now','+7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_reports WHERE status = 'pending'").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM content_items
+      WHERE status IN ('pending_review','published','scheduled') AND (
+        (content_type IN ('morning_read','current_affairs','essay_micro','audio_track') AND (
+          COALESCE(json_extract(payload_json,'$.source'),'') = ''
+          OR COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.sourceDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'exam_notice' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.publishDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'exam_event' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.eventDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'job_position' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.updatedAt'),'') NOT GLOB '????-??-??'
+          OR COALESCE(json_extract(payload_json,'$.dataVersion'),0) < 1))
+      )`).first<{ count: number }>(),
     db.prepare(`SELECT id, username, role, action, resource_type, resource_id, summary, result, created_at
       FROM admin_audit_logs ORDER BY id DESC LIMIT 12`).all(),
   ]);
@@ -5329,18 +8365,20 @@ async function adminDashboard(payload: Record<string, unknown>) {
   const anomalies: Array<Record<string, unknown>> = [];
   if (number(pendingReview)) todos.push({ id: "pending-review", type: "review", title: "待审核内容", description: "内容已提交，等待审核后发布", count: number(pendingReview), href: "/admin/content?status=pending_review", priority: "high" });
   if (number(pendingReports)) todos.push({ id: "content-reports", type: "content_report", title: "用户内容报错", description: "核对题目、答案、解析或题源标签", count: number(pendingReports), href: "/admin/content?queue=reports", priority: "high" });
+  if (number(sourceIncomplete)) todos.push({ id: "source-incomplete", type: "source", title: "来源/数据版本不完整", description: "发布内容必须补齐权威来源、HTTPS原文和来源日期", count: number(sourceIncomplete), href: "/admin/content", priority: "high" });
   if (number(processingImports)) todos.push({ id: "processing-imports", type: "import", title: "导入任务进行中", description: "题库文件仍在处理", count: number(processingImports), href: "/admin/imports", priority: "medium" });
   if (number(scheduledSoon)) todos.push({ id: "scheduled-soon", type: "schedule", title: "7天内待发布", description: "检查定时内容和素材完整性", count: number(scheduledSoon), href: "/admin/content?status=scheduled", priority: "medium" });
   if (number(failedImports)) anomalies.push({ id: "failed-imports", type: "import", title: "导入失败或有错误", description: "需要下载错误信息并修正数据", count: number(failedImports), href: "/admin/imports", severity: "error" });
-  if (number(emptyPublishedBanks)) anomalies.push({ id: "empty-banks", type: "question_bank", title: "已发布空题库", description: "用户能看到但无法开始练习", count: number(emptyPublishedBanks), href: "/admin/question-banks", severity: "warning" });
+  if (number(emptyPublishedBanks)) anomalies.push({ id: "empty-banks", type: "question_bank", title: "已发布但不可练题库", description: "题目为空、审核失效、范围冲突或导入状态异常，请立即下架复核", count: number(emptyPublishedBanks), href: "/admin/question-banks", severity: "error" });
   if (number(staleReview)) anomalies.push({ id: "stale-review", type: "review", title: "审核超过48小时", description: "待审核内容已积压", count: number(staleReview), href: "/admin/content?status=pending_review", severity: "warning" });
+  if (number(sourceIncomplete)) anomalies.push({ id: "source-gate", type: "source", title: "线上内容来源不完整", description: "已被发布门禁阻断；历史线上内容需补录后再发版", count: number(sourceIncomplete), href: "/admin/content", severity: "error" });
   return json({
     metrics: {
       users: number(users), activeUsers7d: number(activeUsers), publishedContent: number(publishedContent),
-      pendingReview: number(pendingReview), pendingContentReports: number(pendingReports), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
+      pendingReview: number(pendingReview), pendingContentReports: number(pendingReports), sourceIncomplete: number(sourceIncomplete), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
     },
-    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon) + number(pendingReports),
-    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports) },
+    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon) + number(pendingReports) + number(sourceIncomplete),
+    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports), sources: number(sourceIncomplete) },
     todos,
     anomalies,
     recentActivity: recent.results,
@@ -5361,13 +8399,18 @@ async function adminListQuestions(payload: Record<string, unknown>) {
   const where = conditions.join(" AND ");
   const [questionBanks, questionImports, questions, total, summary, bankSummary, importSummary] = await Promise.all([
     db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
-      b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
+      b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count,
+      (SELECT COUNT(*) FROM question_imports qi WHERE qi.bank_id = b.id) AS import_count,
+      (SELECT COUNT(*) FROM user_question_banks uqb WHERE uqb.bank_code = b.bank_code) AS selection_count,
+      (SELECT COUNT(*) FROM practice_sessions ps WHERE ps.status = 'active' AND EXISTS (
+        SELECT 1 FROM json_each(ps.bank_codes_json) selected WHERE selected.value = b.bank_code
+      )) AS active_session_count
       FROM question_banks b LEFT JOIN question_bank_items i ON i.bank_id = b.id GROUP BY b.id ORDER BY b.id DESC LIMIT 500`).all(),
     db.prepare(`SELECT qi.id, qi.bank_id, qb.name AS bank_name, qi.file_name, qi.file_size, qi.total_rows,
       qi.uploaded_rows, qi.processed_rows, qi.imported_rows, qi.failed_rows, qi.duplicate_rows,
       qi.total_chunks, qi.uploaded_chunks, qi.processed_chunks, qi.cancel_requested,
       qi.status, qi.error_summary, qi.sealed_at, qi.started_at, qi.last_heartbeat_at,
-      qi.created_at, qi.updated_at, qi.completed_at
+      qi.duplicate_strategy, qi.created_at, qi.updated_at, qi.completed_at
       FROM question_imports qi JOIN question_banks qb ON qb.id = qi.bank_id ORDER BY qi.id DESC LIMIT 200`).all(),
     db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem, q.options_json,
       q.answer, q.explanation, q.technique, q.material, q.prompt, q.word_limit, q.scoring_points_json,
@@ -5392,10 +8435,9 @@ async function adminListQuestions(payload: Record<string, unknown>) {
       SUM(CASE WHEN review_status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review_count,
       SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count FROM questions`).first(),
     db.prepare(`SELECT COUNT(*) AS total_banks,
-      SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published_banks,
-      SUM(CASE WHEN status = 'published' AND NOT EXISTS (
-        SELECT 1 FROM question_bank_items i WHERE i.bank_id = question_banks.id
-      ) THEN 1 ELSE 0 END) AS empty_published_banks FROM question_banks`).first(),
+      SUM(CASE WHEN qb.status = 'published' THEN 1 ELSE 0 END) AS published_banks,
+      SUM(CASE WHEN qb.status = 'published' AND NOT ${QUESTION_BANK_CAN_PUBLISH_SQL}
+        THEN 1 ELSE 0 END) AS empty_published_banks FROM question_banks qb`).first(),
     db.prepare(`SELECT COALESCE(SUM(imported_rows), 0) AS imported_rows,
       SUM(CASE WHEN status IN ('uploading','queued','processing','cancelling') THEN 1 ELSE 0 END) AS processing_imports,
       SUM(CASE WHEN status IN ('failed','completed_with_errors') THEN 1 ELSE 0 END) AS failed_imports
@@ -5436,13 +8478,13 @@ async function adminListContent(payload: Record<string, unknown>) {
   const keyword = trimmed(payload.keyword, 100);
   if (keyword) { conditions.push("(title LIKE ? OR content_key LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`); }
   const where = conditions.join(" AND ");
-  const [content, total, media, statusCounts, reports, reportStatusCounts] = await Promise.all([
-    db.prepare(`SELECT id, content_type, content_key, title, payload_json, status, publish_at, version,
+  const [content, total, media, statusCounts, reports, reportStatusCounts, contentImports] = await Promise.all([
+    db.prepare(`SELECT id, content_type, content_key, title, payload_json, access_level, status, publish_at, version,
       review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at,
       (SELECT COUNT(*) FROM content_item_versions v WHERE v.content_id = content_items.id) AS version_count
       FROM content_items WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, unknown>>(),
     db.prepare(`SELECT COUNT(*) AS count FROM content_items WHERE ${where}`).bind(...binds).first<{ count: number }>(),
-    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, status, created_at,
+    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, access_level, status, created_at,
       '/api/app?media=' || id AS url FROM media_assets ORDER BY created_at DESC LIMIT 200`).all(),
     db.prepare("SELECT status, COUNT(*) AS count FROM content_items WHERE content_type NOT IN ('exam_event','exam_notice','job_position') GROUP BY status").all(),
     db.prepare(`SELECT cr.id, cr.content_type, cr.content_key, cr.reason_code, cr.detail, cr.context_json,
@@ -5457,10 +8499,18 @@ async function adminListContent(payload: Record<string, unknown>) {
       ORDER BY CASE cr.status WHEN 'pending' THEN 0 ELSE 1 END, cr.created_at DESC
       LIMIT 100`).all<Record<string, unknown>>(),
     db.prepare("SELECT status, COUNT(*) AS count FROM content_reports GROUP BY status").all<Record<string, unknown>>(),
+    db.prepare(`SELECT id, content_type, file_name, file_size, file_hash, source_name, source_url,
+      source_published_at, data_version, duplicate_strategy, metadata_json, total_rows, uploaded_rows, processed_rows,
+      imported_rows, failed_rows, duplicate_rows, total_chunks, uploaded_chunks, processed_chunks,
+      status, error_summary, dispatch_attempts, next_retry_at, review_status, review_note,
+      sealed_at, started_at, last_heartbeat_at, created_at, updated_at, completed_at
+      FROM content_imports WHERE content_type NOT IN ('exam_event','exam_notice','job_position')
+      ORDER BY id DESC LIMIT 100`).all<Record<string, unknown>>(),
   ]);
   const contentStatusCounts = Object.fromEntries(statusCounts.results.map((item) => [String((item as Record<string, unknown>).status), Number((item as Record<string, unknown>).count ?? 0)]));
   const reportCounts = Object.fromEntries(reportStatusCounts.results.map((item) => [String(item.status), Number(item.count ?? 0)]));
-  return json({ content: parseContentRows(content.results), mediaAssets: media.results, reports: reports.results,
+  return json({ content: parseContentRows(content.results), contentImports: contentImports.results,
+    mediaAssets: media.results, reports: reports.results,
     reportSummary: {
       total: Object.values(reportCounts).reduce((sum, value) => sum + Number(value), 0),
       pending: reportCounts.pending ?? 0,
@@ -5492,17 +8542,25 @@ async function adminListRadar(payload: Record<string, unknown>) {
   const keyword = trimmed(payload.keyword, 100);
   if (keyword) { conditions.push("(title LIKE ? OR content_key LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`); }
   const where = conditions.join(" AND ");
-  const [rows, total, summary] = await Promise.all([
-    db.prepare(`SELECT id, content_type, content_key, title, payload_json, status, publish_at, version,
+  const [rows, total, summary, contentImports] = await Promise.all([
+    db.prepare(`SELECT id, content_type, content_key, title, payload_json, access_level, status, publish_at, version,
       review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at
       FROM content_items WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, unknown>>(),
     db.prepare(`SELECT COUNT(*) AS count FROM content_items WHERE ${where}`).bind(...binds).first<{ count: number }>(),
     db.prepare("SELECT content_type, status, COUNT(*) AS count FROM content_items WHERE content_type IN ('exam_event','exam_notice','job_position') GROUP BY content_type, status").all(),
+    db.prepare(`SELECT id, content_type, file_name, file_size, file_hash, source_name, source_url,
+      source_published_at, data_version, duplicate_strategy, metadata_json, total_rows, uploaded_rows, processed_rows,
+      imported_rows, failed_rows, duplicate_rows, total_chunks, uploaded_chunks, processed_chunks,
+      status, error_summary, dispatch_attempts, next_retry_at, review_status, review_note,
+      sealed_at, started_at, last_heartbeat_at, created_at, updated_at, completed_at
+      FROM content_imports WHERE content_type IN ('exam_event','exam_notice','job_position')
+      ORDER BY id DESC LIMIT 100`).all<Record<string, unknown>>(),
   ]);
   const radarSummary = summary.results as Array<Record<string, unknown>>;
   const countType = (type: string) => radarSummary.filter((item) => String(item.content_type) === type).reduce((sum, item) => sum + Number(item.count ?? 0), 0);
   const countStatus = (status: string) => radarSummary.filter((item) => String(item.status) === status).reduce((sum, item) => sum + Number(item.count ?? 0), 0);
-  return json({ content: parseContentRows(rows.results), pagination: { page, pageSize, total: Number(total?.count ?? 0) }, summary: radarSummary, stats: {
+  return json({ content: parseContentRows(rows.results), contentImports: contentImports.results,
+    pagination: { page, pageSize, total: Number(total?.count ?? 0) }, summary: radarSummary, stats: {
     total: radarSummary.reduce((sum, item) => sum + Number(item.count ?? 0), 0),
     notices: countType("exam_notice"), events: countType("exam_event"), positions: countType("job_position"),
     pendingReview: countStatus("pending_review"), published: countStatus("published"),
@@ -5530,8 +8588,14 @@ async function adminListGrowth(payload: Record<string, unknown>) {
       FROM redemption_codes ORDER BY id DESC LIMIT 300`).all(),
     db.prepare(`SELECT r.id, r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 300`).all(),
-    db.prepare("SELECT event_name, COUNT(*) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days') GROUP BY event_name ORDER BY count DESC").all(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare(`SELECT event_name, COUNT(*) AS count FROM analytics_events
+      WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)
+      GROUP BY event_name ORDER BY count DESC`).all(),
+    db.prepare(`SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events
+      WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)`)
+      .first<{ count: number }>(),
     getConfigNumber("invite_reward_days", 7),
     getConfigNumber("invitee_reward_days", 3),
     getConfigNumber("invite_monthly_cap", 30),
@@ -5540,29 +8604,79 @@ async function adminListGrowth(payload: Record<string, unknown>) {
     analytics: { activeUsers: Number(activeUsers?.count ?? 0), eventCounts: events.results } });
 }
 
+async function recomputePlatformScoreRatesForUser(userId: string) {
+  const db = getD1();
+  await db.prepare(`WITH eligible_stats AS (
+      SELECT metric_attempt.question_code, COUNT(*) AS attempts, COALESCE(SUM(metric_attempt.is_correct), 0) AS correct
+      FROM practice_attempts metric_attempt
+      JOIN users metric_user ON metric_user.id = metric_attempt.user_id
+      WHERE ${eligibleFirstAttemptSql("metric_attempt", "metric_user")}
+      GROUP BY metric_attempt.question_code
+    )
+    UPDATE questions SET
+      score_rate_attempts = COALESCE((SELECT attempts FROM eligible_stats WHERE eligible_stats.question_code = questions.question_code), 0),
+      score_rate_correct = COALESCE((SELECT correct FROM eligible_stats WHERE eligible_stats.question_code = questions.question_code), 0),
+      score_rate = COALESCE((SELECT CAST(ROUND(correct * 100.0 / NULLIF(attempts, 0)) AS INTEGER)
+        FROM eligible_stats WHERE eligible_stats.question_code = questions.question_code), 0),
+      score_rate_scope = CASE WHEN EXISTS (SELECT 1 FROM eligible_stats WHERE eligible_stats.question_code = questions.question_code)
+        THEN '平台有效账号·每人首答' ELSE '' END,
+      score_rate_source = 'platform', score_rate_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE score_rate_source IN ('', 'platform') AND question_code IN (
+      SELECT DISTINCT question_code FROM practice_attempts WHERE user_id = ?
+    )`).bind(userId).run();
+}
+
+async function adminSetAnalyticsEligibility(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "users.manage")) return adminForbidden("users.manage");
+  const userId = trimmed(payload.userId, 160);
+  if (!validUserId(userId)) return json({ error: "学习用户ID格式无效" }, 400);
+  if (typeof payload.eligible !== "boolean") return json({ error: "请选择纳入或排除统计" }, 400);
+  const db = getD1();
+  const updated = await db.prepare("UPDATE users SET analytics_eligible = ? WHERE id = ?")
+    .bind(payload.eligible ? 1 : 0, userId).run();
+  if (!updated.meta.changes) return json({ error: "学习用户不存在" }, 404);
+  await recomputePlatformScoreRatesForUser(userId);
+  return json({ ok: true, userId, analyticsEligible: payload.eligible });
+}
+
 async function adminListAnalytics(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "analytics.read")) return adminForbidden("analytics.read");
   const db = getD1();
   const days = Number(payload.days) <= 14 ? 14 : 30;
   const windowModifier = `-${days} days`;
   const [totalUsers, active7, active30, members, attempts30, dailyTrend, eventCounts, modules, redemptions30, invites30, apiMetricSummary] = await Promise.all([
-    db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM users WHERE membership_type = 'lifetime' OR datetime(membership_end) > CURRENT_TIMESTAMP").first<{ count: number }>(),
-    db.prepare(`SELECT COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy FROM practice_attempts
-      WHERE answered_at >= datetime('now','-30 days')`).first<{ answers: number; accuracy: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM users WHERE analytics_eligible = 1").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events
+      WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)`)
+      .first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events
+      WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days')
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)`)
+      .first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM users WHERE analytics_eligible = 1
+      AND (membership_type = 'lifetime' OR datetime(membership_end) > CURRENT_TIMESTAMP)`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS answers, COALESCE(AVG(pa.is_correct),0) AS accuracy FROM practice_attempts pa
+      JOIN users metric_user ON metric_user.id = pa.user_id AND metric_user.analytics_eligible = 1
+      WHERE pa.apply_status = 'applied' AND pa.answered_at >= datetime('now','-30 days')`).first<{ answers: number; accuracy: number }>(),
     db.prepare(`SELECT date(created_at,'+8 hours') AS date, COUNT(DISTINCT user_id) AS active_users,
       SUM(CASE WHEN event_name = 'app_open' THEN 1 ELSE 0 END) AS opens,
       SUM(CASE WHEN event_name = 'practice_answer' THEN 1 ELSE 0 END) AS answers
       FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now', ?)
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)
       GROUP BY date(created_at,'+8 hours') ORDER BY date ASC`).bind(windowModifier).all<Record<string, unknown>>(),
     db.prepare(`SELECT event_name, COUNT(*) AS count, COUNT(DISTINCT user_id) AS users
-      FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days') GROUP BY event_name ORDER BY count DESC`).all<Record<string, unknown>>(),
+      FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-30 days')
+        AND EXISTS (SELECT 1 FROM users metric_user WHERE metric_user.id = analytics_events.user_id AND metric_user.analytics_eligible = 1)
+      GROUP BY event_name ORDER BY count DESC`).all<Record<string, unknown>>(),
     db.prepare(`SELECT module, COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy
-      FROM practice_attempts WHERE answered_at >= datetime('now','-30 days') GROUP BY module ORDER BY answers DESC`).all<Record<string, unknown>>(),
-    db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-30 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM invite_relations WHERE bound_at >= datetime('now','-30 days')").first<{ count: number }>(),
+      FROM practice_attempts pa JOIN users metric_user ON metric_user.id = pa.user_id AND metric_user.analytics_eligible = 1
+      WHERE pa.apply_status = 'applied' AND pa.answered_at >= datetime('now','-30 days')
+      GROUP BY module ORDER BY answers DESC`).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM redemptions r JOIN users metric_user ON metric_user.id = r.user_id
+      AND metric_user.analytics_eligible = 1 WHERE r.redeemed_at >= datetime('now','-30 days')`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM invite_relations ir JOIN users metric_user ON metric_user.id = ir.invitee_id
+      AND metric_user.analytics_eligible = 1 WHERE ir.bound_at >= datetime('now','-30 days')`).first<{ count: number }>(),
     db.prepare(`SELECT COUNT(*) AS sample_count,
       COALESCE(SUM(CASE WHEN CAST(json_extract(event_data, '$.status') AS INTEGER) >= 500 THEN 1 ELSE 0 END), 0) AS error_5xx_count
       FROM analytics_events
@@ -5785,33 +8899,102 @@ async function adminSubmitContentReview(payload: Record<string, unknown>) {
 async function adminReviewContent(payload: Record<string, unknown>) {
   const admin = adminFromPayload(payload);
   if (!admin || (admin.role !== "reviewer" && admin.role !== "super_admin")) return adminForbidden("content.review");
-  if (payload.decision === "reject") payload.status = "rejected";
-  else if (payload.decision === "approve") {
-    const contentId = Math.floor(Number(payload.id));
-    const content = await getD1().prepare("SELECT publish_at, payload_json FROM content_items WHERE id = ?")
-      .bind(contentId).first<{ publish_at: string | null; payload_json: string }>();
-    if (!content) return json({ error: "内容不存在" }, 404);
-    let storedRequestedAt = "";
-    try {
-      const storedPayload = JSON.parse(content.payload_json) as Record<string, unknown>;
-      storedRequestedAt = String(storedPayload.requestedPublishAt ?? storedPayload.publishAt ?? "");
-    } catch { storedRequestedAt = ""; }
-    const requestedAt = String(payload.publishAt ?? payload.requestedPublishAt ?? content.publish_at ?? storedRequestedAt ?? "");
-    const publishAt = requestedAt ? Date.parse(requestedAt) : 0;
-    if (publishAt > Date.now()) payload.publishAt = new Date(publishAt).toISOString();
-    payload.status = publishAt > Date.now() ? "scheduled" : "published";
-  } else return json({ error: "审核决定无效" }, 400);
-  return adminSetContentStatus(payload);
+  if (payload.decision === "reject") {
+    payload.status = "rejected";
+    return adminSetContentStatus(payload);
+  }
+  if (payload.decision !== "approve") return json({ error: "审核决定无效" }, 400);
+
+  const contentId = Math.floor(Number(payload.id));
+  const expectedVersion = Math.floor(Number(payload.expectedVersion));
+  const db = getD1();
+  const content = await db.prepare(`SELECT id, content_type, content_key, title, access_level, status, version,
+    publish_at, payload_json FROM content_items WHERE id = ?`)
+    .bind(contentId).first<{
+      id: number; content_type: string; content_key: string; title: string; access_level: "free" | "member";
+      status: string; version: number; publish_at: string | null; payload_json: string;
+    }>();
+  if (!content) return json({ error: "内容不存在" }, 404);
+  if (content.status !== "pending_review" || content.version !== expectedVersion) {
+    return json({
+      error: "待审内容版本已经变化，请刷新后重新审核",
+      code: "CONTENT_REVIEW_VERSION_MISMATCH",
+      currentVersion: content.version,
+    }, 409);
+  }
+
+  let storedRequestedAt = "";
+  let storedPayload: Record<string, unknown> = {};
+  try {
+    storedPayload = JSON.parse(content.payload_json) as Record<string, unknown>;
+    storedRequestedAt = String(storedPayload.requestedPublishAt ?? storedPayload.publishAt ?? "");
+  } catch { storedRequestedAt = ""; }
+  const invalid = publishabilityError(content.content_type, content.content_key, storedPayload);
+  if (invalid) return invalid;
+  const mediaValidation = await validateContentMediaAssets(
+    content.content_type,
+    content.content_key,
+    content.access_level,
+    storedPayload,
+    true,
+  );
+  if (mediaValidation.invalid) return mediaValidation.invalid;
+
+  const requestedAt = String(payload.publishAt ?? payload.requestedPublishAt ?? content.publish_at ?? storedRequestedAt ?? "");
+  const requestedTimestamp = requestedAt ? Date.parse(requestedAt) : 0;
+  const status = requestedTimestamp > Date.now() ? "scheduled" : "published";
+  const publishAt = status === "scheduled" ? new Date(requestedTimestamp).toISOString() : null;
+  const nextVersion = expectedVersion + 1;
+  const reviewedAssetIds = mediaValidation.referencedAssetIds;
+  const mediaAccessPredicate = content.access_level === "member" ? " AND access_level = 'member'" : "";
+  const reviewedMediaCondition = reviewedAssetIds.length
+    ? ` AND (SELECT COUNT(*) FROM media_assets WHERE id IN (${reviewedAssetIds.map(() => "?").join(",")})
+        AND status = 'active'${mediaAccessPredicate}) = ?`
+    : "";
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`INSERT OR IGNORE INTO content_item_versions
+      (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+      SELECT id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, 'snapshot'
+      FROM content_items WHERE id = ? AND version = ? AND status = 'pending_review'`)
+      .bind(contentId, expectedVersion),
+    db.prepare(`UPDATE content_items SET status = ?, publish_at = ?, review_note = '', reviewed_by = ?,
+      reviewed_at = CURRENT_TIMESTAMP, version = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND version = ? AND status = 'pending_review'${reviewedMediaCondition}`)
+      .bind(status, publishAt, admin.id, nextVersion, contentId, expectedVersion,
+        ...reviewedAssetIds, ...(reviewedAssetIds.length ? [reviewedAssetIds.length] : [])),
+    db.prepare(`UPDATE media_assets AS ma SET access_level = 'free', updated_at = CURRENT_TIMESTAMP
+      WHERE ma.id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+        AND ma.status = 'active' AND ma.access_level IN ('member','free')
+        AND EXISTS (
+          SELECT 1 FROM content_items ci, json_tree(ci.payload_json) media_ref
+          WHERE ci.id = ? AND ci.version = ? AND ci.status = ? AND ci.access_level = 'free'
+            AND media_ref.type = 'text' AND media_ref.value = '/api/app?media=' || ma.id
+        )`)
+      .bind(JSON.stringify(content.access_level === "free" ? reviewedAssetIds : []),
+        contentId, nextVersion, status),
+  ];
+  statements.push(db.prepare(`INSERT OR REPLACE INTO content_item_versions
+    (content_id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, change_type)
+    SELECT id, version, content_type, content_key, title, payload_json, access_level, status, publish_at, 'review_approve'
+    FROM content_items WHERE id = ? AND version = ? AND status = ?`)
+    .bind(contentId, nextVersion, status));
+  const results = await db.batch(statements);
+  if (!results[1]?.meta.changes) {
+    return json({ error: "待审内容版本已经变化，请刷新后重新审核", code: "CONTENT_VERSION_CONFLICT" }, 409);
+  }
+  return json({ ok: true, id: contentId, status, version: nextVersion });
 }
 
 const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminDashboard: ["dashboard.read"],
   adminList: ["system.read"],
   adminListQuestions: ["question.read"],
+  adminSearchQuestions: ["question.read"],
   adminListContent: ["content.read"],
   adminListRadar: ["radar.read"],
   adminListGrowth: ["growth.read"],
   adminListAnalytics: ["analytics.read"],
+  adminSetAnalyticsEligibility: ["users.manage"],
   adminListSystem: ["system.read", "users.manage", "audit.read"],
   adminListUsers: ["system.read", "users.manage"],
   adminListAuditLogs: ["audit.read"],
@@ -5819,12 +9002,17 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminCreateCodes: ["growth.write"],
   adminDisableCode: ["growth.write"],
   adminUpdateConfig: ["growth.write"],
+  adminSetMediaAccess: ["media.upload"],
+  adminUpsertContentBatch: ["content.write", "radar.write"],
+  adminSetContentStatus: ["content.publish", "content.write", "radar.write"],
   adminListContentVersions: ["content.read", "radar.read"],
   adminRollbackContent: ["content.publish"],
   adminDisableContent: ["content.publish"],
   adminDuplicateContent: ["content.write", "radar.write"],
   adminUpsertQuestionBank: ["question.write"],
   adminSetQuestionBankStatus: ["question.write"],
+  adminUpsertQuestion: ["question.write"],
+  adminSetQuestionStatus: ["question.write"],
   adminStartQuestionImport: ["question.import"],
   adminImportQuestionBatch: ["question.import"],
   adminFinishQuestionImport: ["question.import"],
@@ -5833,6 +9021,16 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminCancelQuestionImport: ["question.import"],
   adminRetryQuestionImport: ["question.import"],
   adminDownloadQuestionImportErrors: ["question.read", "question.import"],
+  adminStartContentImport: ["radar.write", "content.write"],
+  adminUploadContentImportChunk: ["radar.write", "content.write"],
+  adminFinishContentImport: ["radar.write", "content.write"],
+  adminGetContentImport: ["radar.read", "content.read"],
+  adminCancelContentImport: ["radar.write", "content.write"],
+  adminRetryContentImport: ["radar.write", "content.write"],
+  adminDownloadContentImportErrors: ["radar.read", "content.read"],
+  adminSubmitContentImportReview: ["radar.write", "content.write"],
+  adminReviewContentImport: ["content.review"],
+  adminRollbackContentImport: ["content.publish"],
   adminListQuestionVersions: ["question.read"],
   adminRollbackQuestionVersion: ["question.write"],
   adminReviewQuestion: ["question.review"],
@@ -5845,17 +9043,22 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
 };
 
 const ADMIN_WRITE_ACTIONS = new Set([
-  "adminCreateCodes", "adminDisableCode", "adminUpdateConfig", "adminUpsertContentBatch",
+  "adminCreateCodes", "adminDisableCode", "adminUpdateConfig", "adminSetMediaAccess", "adminUpsertContentBatch",
   "adminDisableContent", "adminSetContentStatus", "adminRollbackContent", "adminDuplicateContent",
-  "adminUpsertQuestionBank", "adminSetQuestionBankStatus", "adminStartQuestionImport",
+  "adminUpsertQuestionBank", "adminSetQuestionBankStatus", "adminUpsertQuestion", "adminSetQuestionStatus", "adminStartQuestionImport",
   "adminImportQuestionBatch", "adminFinishQuestionImport", "adminCancelQuestionImport", "adminRetryQuestionImport",
+  "adminStartContentImport", "adminUploadContentImportChunk", "adminFinishContentImport",
+  "adminCancelContentImport", "adminRetryContentImport", "adminSubmitContentImportReview",
+  "adminReviewContentImport", "adminRollbackContentImport",
   "adminRollbackQuestionVersion", "adminCreateUser", "adminSetUserStatus",
-  "adminUpdateUser", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
+  "adminUpdateUser", "adminSetAnalyticsEligibility", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
 ]);
 
 function resourceTypeForAdminAction(action: string) {
   if (action.includes("ContentReport")) return "content_report";
+  if (action.includes("Media")) return "media";
   if (action.includes("QuestionImport")) return "question_import";
+  if (action.includes("ContentImport")) return "content_import";
   if (action.includes("QuestionBank")) return "question_bank";
   if (action.includes("Question")) return "question";
   if (action.includes("Content")) return "content";
@@ -5929,6 +9132,7 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminListRadar") response = await adminListRadar(payload);
   else if (action === "adminListGrowth") response = await adminListGrowth(payload);
   else if (action === "adminListAnalytics") response = await adminListAnalytics(payload);
+  else if (action === "adminSetAnalyticsEligibility") response = await adminSetAnalyticsEligibility(payload);
   else if (action === "adminListSystem") response = await adminListSystem(payload);
   else if (action === "adminListUsers") response = await adminListUsers(payload);
   else if (action === "adminListAuditLogs") response = await adminListAuditLogs(payload);
@@ -5936,6 +9140,7 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminCreateCodes") response = await adminCreateCodes(payload);
   else if (action === "adminDisableCode") response = await adminDisableCode(payload);
   else if (action === "adminUpdateConfig") response = await adminUpdateConfig(payload);
+  else if (action === "adminSetMediaAccess") response = await adminSetMediaAccess(payload);
   else if (action === "adminUpsertContentBatch") response = await adminUpsertContentBatch(payload);
   else if (action === "adminDisableContent") response = await adminDisableContent(payload);
   else if (action === "adminSetContentStatus") response = await adminSetContentStatus(payload);
@@ -5944,6 +9149,9 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminDuplicateContent") response = await adminDuplicateContent(payload);
   else if (action === "adminUpsertQuestionBank") response = await adminUpsertQuestionBank(payload);
   else if (action === "adminSetQuestionBankStatus") response = await adminSetQuestionBankStatus(payload);
+  else if (action === "adminSearchQuestions") response = await adminSearchQuestions(payload);
+  else if (action === "adminUpsertQuestion") response = await adminUpsertQuestion(payload);
+  else if (action === "adminSetQuestionStatus") response = await adminSetQuestionStatus(payload);
   else if (action === "adminStartQuestionImport") response = await adminStartQuestionImport(payload);
   else if (action === "adminImportQuestionBatch") response = await adminImportQuestionBatch(payload);
   else if (action === "adminPreviewQuestionImportDuplicates") response = await adminPreviewQuestionImportDuplicates(payload);
@@ -5952,6 +9160,16 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminCancelQuestionImport") response = await adminCancelQuestionImport(payload);
   else if (action === "adminRetryQuestionImport") response = await adminRetryQuestionImport(request, payload);
   else if (action === "adminDownloadQuestionImportErrors") response = await adminDownloadQuestionImportErrors(payload);
+  else if (action === "adminStartContentImport") response = await adminStartContentImport(payload);
+  else if (action === "adminUploadContentImportChunk") response = await adminUploadContentImportChunk(payload);
+  else if (action === "adminFinishContentImport") response = await adminFinishContentImport(request, payload);
+  else if (action === "adminGetContentImport") response = await adminGetContentImport(request, payload);
+  else if (action === "adminCancelContentImport") response = await adminCancelContentImport(payload);
+  else if (action === "adminRetryContentImport") response = await adminRetryContentImport(request, payload);
+  else if (action === "adminDownloadContentImportErrors") response = await adminDownloadContentImportErrors(payload);
+  else if (action === "adminSubmitContentImportReview") response = await adminSubmitContentImportReview(payload);
+  else if (action === "adminReviewContentImport") response = await adminReviewContentImport(payload);
+  else if (action === "adminRollbackContentImport") response = await adminRollbackContentImport(payload);
   else if (action === "adminListQuestionVersions") response = await adminListQuestionVersions(payload);
   else if (action === "adminRollbackQuestionVersion") response = await adminRollbackQuestionVersion(payload);
   else if (action === "adminReviewQuestion") response = await adminReviewQuestion(payload);
@@ -5976,17 +9194,23 @@ function adminRequestIsSameOrigin(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    await ensureSchema();
     const url = new URL(request.url);
     const mediaId = url.searchParams.get("media");
-    if (mediaId) return serveMedia(mediaId, request);
+    if (!mediaId && !allowPassiveBootstrap(request)) {
+      const response = json({ error: "访问过于频繁，请稍后再试", code: "RATE_LIMITED" }, 429);
+      response.headers.set("retry-after", "60");
+      return response;
+    }
+    await ensureSchema();
+    if (mediaId) return serveAuthorizedMedia(mediaId, request);
+    await dispatchDueImportWork(request).catch(() => false);
     return await bootstrap(request);
   } catch { return json({ error: "服务暂时不可用，请稍后重试", code: "INTERNAL_ERROR" }, 500); }
 }
 
 export async function POST(request: Request) {
   try {
-    // The durable import continuation only runs after an upload task has
+    // Durable import continuations only run after an upload task has
     // already proven the schema exists. Handle it before the additive runtime
     // bootstrap so a cold self-fetch keeps its full D1 Free query allowance for
     // the import chunk itself.
@@ -5995,18 +9219,43 @@ export async function POST(request: Request) {
         return json({ error: "内部任务凭证无效" }, 403);
       }
       const internalPayload = await request.json() as Record<string, unknown>;
-      if (String(internalPayload.action ?? "") !== "continueQuestionImportInternal") {
-        return json({ error: "内部任务类型无效" }, 400);
-      }
+      const internalAction = String(internalPayload.action ?? "");
       const importId = Math.floor(Number(internalPayload.importId));
       if (!Number.isFinite(importId) || importId < 1) return json({ error: "导入任务无效" }, 400);
-      const scheduled = scheduleRequestTask(request, () => processQuestionImport(importId, 24_000, new URL(request.url).origin));
+      let scheduled = false;
+      if (internalAction === "continueQuestionImportInternal") {
+        scheduled = scheduleRequestTask(request, () => processQuestionImport(importId, 24_000, new URL(request.url).origin));
+      } else if (internalAction === "reapImportCancellationInternal") {
+        const importKind = String(internalPayload.importKind ?? "");
+        if (importKind !== "question" && importKind !== "content") {
+          return json({ error: "取消回收任务类型无效" }, 400);
+        }
+        scheduled = scheduleRequestTask(request, () => reapImportCancellation(importId, importKind));
+      } else if (internalAction === "fanoutContentImportInternal") {
+        const totalChunks = Math.floor(Number(internalPayload.totalChunks));
+        const slot = Math.floor(Number(internalPayload.slot));
+        if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > CONTENT_IMPORT_MAX_CHUNKS
+          || !Number.isInteger(slot) || slot < 0 || slot >= CONTENT_IMPORT_WORKER_SLOTS || slot >= totalChunks) {
+          return json({ error: "内容导入分发参数无效" }, 400);
+        }
+        scheduled = scheduleRequestTask(request, () => requestContentImportSlotChunks(
+          importId, totalChunks, slot, new URL(request.url).origin,
+        ));
+      } else if (internalAction === "processContentImportChunkInternal") {
+        const chunkIndex = Math.floor(Number(internalPayload.chunkIndex));
+        if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= CONTENT_IMPORT_MAX_CHUNKS) {
+          return json({ error: "内容导入分块无效" }, 400);
+        }
+        scheduled = scheduleRequestTask(request, () => processContentImportChunk(importId, chunkIndex));
+      } else {
+        return json({ error: "内部任务类型无效" }, 400);
+      }
       if (!scheduled) return json({ error: "后台执行上下文不可用" }, 503);
       return json({ ok: true, accepted: true }, 202);
     }
-    await ensureSchema();
-    await seedDefaults();
     if ((request.headers.get("content-type") ?? "").toLowerCase().includes("multipart/form-data")) {
+      await ensureSchema();
+      await ensureDefaults();
       if (!adminRequestIsSameOrigin(request)) return json({ error: "跨站管理请求已拒绝" }, 403);
       const admin = await getAdminIdentity(getD1(), request);
       if (!admin) return adminUnauthorized();
@@ -6027,7 +9276,22 @@ export async function POST(request: Request) {
     }
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action ?? "");
+    if (!action.startsWith("admin") && !PUBLIC_ACTIONS.has(action)) {
+      return json({ error: "未知操作" }, 400);
+    }
+    if (action.startsWith("admin") && !new Set(["adminLogin", "adminSession", "adminLogout"]).has(action)
+      && !Object.prototype.hasOwnProperty.call(ADMIN_ACTION_PERMISSIONS, action)) {
+      return json({ error: "未知管理操作" }, 400);
+    }
+    if (!action.startsWith("admin") && !allowPublicWrite(request, action)) {
+      const response = json({ error: "操作过于频繁，请稍后再试", code: "RATE_LIMITED" }, 429);
+      response.headers.set("retry-after", "60");
+      return response;
+    }
     if (action.startsWith("admin") && !adminRequestIsSameOrigin(request)) return json({ error: "跨站管理请求已拒绝" }, 403);
+    await ensureSchema();
+    await ensureDefaults();
+    await dispatchDueImportWork(request).catch(() => false);
     if (action === "adminLogin") return adminLogin(request, payload);
     if (action === "adminSession") return adminSession(request);
     if (action === "adminLogout") return adminLogout(request);
@@ -6035,7 +9299,21 @@ export async function POST(request: Request) {
       delete payload.adminToken;
       return dispatchAdminAction(request, payload, action);
     }
-    const identity = await ensureUser(request);
+    const identity = await ensureUser(request, { persist: !PASSIVE_PUBLIC_ACTIONS.has(action) });
+    if (identity.bootstrapDeferred) {
+      // Identity/session preparation may include a device→account merge close
+      // to D1 Free's per-invocation query ceiling. No business handler has run
+      // yet, so the same payload is safe to retry after the new opaque cookie
+      // is stored by the browser.
+      return json({
+        error: "账号初始化中，正在安全重试",
+        code: "IDENTITY_PREPARING",
+        retryAction: true,
+        retryBootstrap: true,
+        bootstrapStage: identity.bootstrapStage ?? "identity_prepared",
+        maxBootstrapRequests: BOOTSTRAP_MAX_REQUESTS,
+      }, 409, identity.setCookie);
+    }
     const verifiedLearningActions = new Set([
       "saveEssayAttempt", "redeem", "bindInvite",
       "createTestOrder", "completeTestPayment", "recordDailyCheckin", "submitContentReport",
@@ -6045,7 +9323,7 @@ export async function POST(request: Request) {
         error: "请先登录后继续；答题次数、错题进度与会员权益需要绑定到同一账号",
         code: "VERIFIED_ACCOUNT_REQUIRED",
       }, 403);
-      if (identity.setCookie) response.headers.set("set-cookie", identity.setCookie);
+      appendCookies(response.headers, identity.setCookie);
       return response;
     }
     let response: Response;
@@ -6068,7 +9346,7 @@ export async function POST(request: Request) {
     else if (action === "completeTestPayment") response = await completeTestPayment(request, identity.userId, payload);
     else if (action === "trackEvent") response = await trackEvent(identity.userId, payload);
     else response = json({ error: "未知操作" }, 400);
-    if (identity.setCookie) response.headers.set("set-cookie", identity.setCookie);
+    appendCookies(response.headers, identity.setCookie);
     return response;
   } catch {
     return json({ error: "请求暂时失败，请稍后重试", code: "INTERNAL_ERROR" }, 500);

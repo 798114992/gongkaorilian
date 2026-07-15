@@ -8,6 +8,7 @@ import type { PracticeDay, Question } from "./data/content";
 import type { AudioTrack } from "./data/audio";
 import AudioHub from "./AudioHub";
 import CommercePaywall, { type PaywallReason } from "./CommercePaywall";
+import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 
 type Tab = "today" | "banks" | "audio" | "review" | "report" | "calendar" | "me";
 type Module = "morning" | "practice" | "affairs" | "essay" | null;
@@ -339,6 +340,8 @@ type QuestionBank = {
   weakCount: number;
   dueCount: number;
   added: boolean;
+  practiceAvailable?: boolean;
+  locked?: boolean;
   targetMatch: boolean;
   recommended: boolean;
   scopeLabel: string;
@@ -444,6 +447,14 @@ type PracticeComposition = {
   byBank: Array<{ bankCode: string; bankName: string; count: number }>;
 };
 
+type DailyReadiness = {
+  ready: boolean;
+  distinctQuestionCount: number;
+  requiredQuestionCount: number;
+  effectiveBankCodes: string[];
+  planMinutes?: number;
+};
+
 type PracticeSummary = {
   kind: PracticeKind;
   mode: PracticeMode;
@@ -488,6 +499,7 @@ type Bootstrap = {
   progressVersion: number;
   examProfile: ExamProfile;
   questionBanks: QuestionBank[];
+  dailyReadiness?: DailyReadiness;
   studyInsights: StudyInsights;
   ledger: Array<{ delta_days: number; source_type: string; note: string; created_at: string }>;
   inviteStats: { total: number; rewarded: number; pending: number };
@@ -502,6 +514,7 @@ type Bootstrap = {
     bankCode: string;
     bankName: string;
   }>;
+  dailyPracticeCompleted?: boolean;
   todayKey: string;
 };
 
@@ -1121,7 +1134,7 @@ function bankCanPowerDailyPractice(target: ExamTarget, bank: QuestionBank) {
   return bank.code !== "starter-gk"
     && targetMatchesBank(target, bank)
     && (bank.subject === "行测" || bank.subject === "综合")
-    && bank.questionCount > 0
+    && bank.questionCount >= 5
     && bankYearSupportsTarget(bank.examYear, target.examYear);
 }
 
@@ -1276,6 +1289,7 @@ export default function DailyPracticeApp() {
   const [practiceBankCodes, setPracticeBankCodes] = useState<string[]>([]);
   const [practiceComposition, setPracticeComposition] = useState<PracticeComposition>({ due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] });
   const [practiceSummary, setPracticeSummary] = useState<PracticeSummary | null>(null);
+  const [serverDailyPracticeCompleted, setServerDailyPracticeCompleted] = useState(false);
   const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
   const [eventFormOpen, setEventFormOpen] = useState(false);
   const [eventDraft, setEventDraft] = useState({ targetCode: "", eventType: "报名截止", title: "报名截止", eventDate: "", reminderDays: 3, sourceUrl: "" });
@@ -1288,6 +1302,7 @@ export default function DailyPracticeApp() {
   const [radarTargetFilter, setRadarTargetFilter] = useState("");
   const [radarPage, setRadarPage] = useState(1);
   const [radarTotal, setRadarTotal] = useState(0);
+  const [radarLimited, setRadarLimited] = useState(false);
   const [comparePositions, setComparePositions] = useState<JobPosition[]>([]);
   const [essayPracticeQuestions, setEssayPracticeQuestions] = useState<EssayPracticeQuestion[]>([]);
   const [essayPracticeIndex, setEssayPracticeIndex] = useState(0);
@@ -1341,10 +1356,10 @@ export default function DailyPracticeApp() {
     ...(bootstrap?.questionBanks ?? []).map((bank) => bank.province).filter(Boolean),
     ...profile.targets.map((target) => target.province).filter(Boolean),
   ]));
-  const activeLearningBanks = addedBanks.filter((bank) => bank.subject !== "申论");
-  const activeEssayBanks = addedBanks.filter((bank) => bank.subject === "申论");
+  const activeLearningBanks = addedBanks.filter((bank) => bank.subject !== "申论" && bank.practiceAvailable !== false);
+  const activeEssayBanks = addedBanks.filter((bank) => bank.subject === "申论" && bank.practiceAvailable !== false);
   const hasMorningContent = day.morning.paragraphs.length > 0 || Boolean(day.morning.lead.trim());
-  const hasEssayContent = activeEssayBanks.some((bank) => bank.questionCount > 0) || Boolean(day.essay.prompt.trim());
+  const hasEssayContent = activeEssayBanks.some((bank) => bank.questionCount > 0);
   const primaryTarget = profile.targets[0] ?? null;
   const validLearningBanks = activeLearningBanks.filter((bank) => profile.targets.some((target) => bankCanPowerDailyPractice(target, bank)));
   const savedPrimaryBank = validLearningBanks.find((bank) => bank.code === progress.primaryBankCode);
@@ -1353,16 +1368,19 @@ export default function DailyPracticeApp() {
     ?? validLearningBanks[0]
     ?? null;
   const orderedBankCodes = validLearningBanks.map((bank) => bank.code).sort((a, b) => Number(b === primaryBank?.code) - Number(a === primaryBank?.code));
-  const bankConfigGaps = profile.targets.filter((target) => !addedBanks.some((bank) => bankCanPowerDailyPractice(target, bank)));
+  const bankConfigGaps = profile.targets.filter((target) => !validLearningBanks.some((bank) => bankCanPowerDailyPractice(target, bank)));
   // 未完成首次配置时也不能让旧的本地完成标记伪装成一套可执行日练。
-  // 只要今天需要行测、却没有至少一套可发布且有审核真题的题库，就保持配置缺口。
-  const dailyConfigurationBlocking = Boolean(bootstrap && dailyPlan.questionCount > 0 && validLearningBanks.length === 0);
+  // 新服务端直接给出“有效权益题库内的不重复真题数”；旧服务端才回退到题库存在性。
+  const dailyConfigurationBlocking = Boolean(bootstrap && dailyPlan.questionCount > 0
+    && (bootstrap.dailyReadiness ? !bootstrap.dailyReadiness.ready : validLearningBanks.length === 0));
+  const dailyReadinessCount = bootstrap?.dailyReadiness?.distinctQuestionCount ?? 0;
+  const dailyReadinessRequired = bootstrap?.dailyReadiness?.requiredQuestionCount ?? 5;
   const targetSummary = profile.targets.length
     ? `${profile.targets.slice(0, 3).map((target) => target.label).join("＋")}${profile.targets.length > 3 ? `等${profile.targets.length}项` : ""}`
     : "尚未设置报考目标";
   // 规范化打卡由服务端在真实 daily 会话完成后写入；旧 progress_json 中的
   // completed/checkins 不能单独让页面显示“已完成”。
-  const practiceDone = progress.checkins.includes(dayKey);
+  const practiceDone = serverDailyPracticeCompleted;
   const enabledDailySteps: DailyStep[] = [
     ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? ["morning" as const] : []),
     ...(dailyPlan.questionCount > 0 && !dailyConfigurationBlocking ? ["practice" as const] : []),
@@ -1472,15 +1490,25 @@ export default function DailyPracticeApp() {
   }, []);
 
   const api = useCallback(async <T,>(payload: Record<string, unknown>, options: { signal?: AbortSignal } = {}) => {
-    const response = await fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: options.signal });
-    let data: T & { error?: string; code?: string };
-    try {
-      data = await response.json() as T & { error?: string; code?: string };
-    } catch {
-      data = {} as T & { error?: string; code?: string };
+    for (let requestNumber = 1; requestNumber <= BOOTSTRAP_MAX_REQUESTS; requestNumber += 1) {
+      const response = await fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: options.signal });
+      let data: T & { error?: string; code?: string; retryAction?: boolean };
+      try {
+        data = await response.json() as T & { error?: string; code?: string; retryAction?: boolean };
+      } catch {
+        data = {} as T & { error?: string; code?: string; retryAction?: boolean };
+      }
+      // The server emits this signal only before entering a business handler.
+      // Replaying the same payload is therefore safe and lets the newly issued
+      // opaque session cookie isolate identity work from the action's queries.
+      if (response.status === 409 && data.code === "IDENTITY_PREPARING" && data.retryAction) {
+        if (requestNumber < BOOTSTRAP_MAX_REQUESTS) continue;
+        throw Object.assign(new Error("账号初始化未完成，请稍后重试"), { status: response.status, data });
+      }
+      if (!response.ok) throw Object.assign(new Error(data.error || "操作失败，请稍后再试"), { status: response.status, data });
+      return data;
     }
-    if (!response.ok) throw Object.assign(new Error(data.error || "操作失败，请稍后再试"), { status: response.status, data });
-    return data;
+    throw new Error("账号初始化未完成，请稍后重试");
   }, []);
 
   const upsertPendingPracticeAttempt = useCallback((attempt: QueuedPracticeAttempt) => {
@@ -1531,14 +1559,27 @@ export default function DailyPracticeApp() {
 
   const loadBootstrap = useCallback(async () => {
     try {
-      const response = await fetch("/api/app", { cache: "no-store" });
-      const data = await response.json() as Bootstrap & { error?: string };
+      let response: Response | undefined;
+      let data: (Bootstrap & { error?: string; retryBootstrap?: boolean; bootstrapStage?: string }) | undefined;
+      for (let requestNumber = 1; requestNumber <= BOOTSTRAP_MAX_REQUESTS; requestNumber += 1) {
+        response = await fetch("/api/app", { cache: "no-store" });
+        data = await response.json() as Bootstrap & { error?: string; retryBootstrap?: boolean; bootstrapStage?: string };
+        const retryDecision = bootstrapRetryDecision(requestNumber, response.ok, Boolean(data.retryBootstrap));
+        if (retryDecision === "retry") continue;
+        if (retryDecision === "exhausted") {
+          throw new Error("账号初始化未完成，请稍后刷新");
+        }
+        break;
+      }
+      if (!response || !data) throw new Error("加载失败");
       if (!response.ok) throw new Error(data.error || "加载失败");
+      if (data.retryBootstrap) throw new Error("账号初始化未完成，请稍后刷新");
       setBootstrap(data);
       progressVersionRef.current = Number(data.progressVersion ?? 0);
       const nextProgress = mergeProgress(data.progress);
       progressRef.current = nextProgress;
       setProgress(nextProgress);
+      setServerDailyPracticeCompleted(Boolean(data.dailyPracticeCompleted));
       setProfileDraft({ ...data.examProfile, dailyMinutes: normalizePlanMinutes(data.examProfile.dailyMinutes) });
       setOnboardingOpen(!data.examProfile.onboarded);
       setSignInHref(signInHrefFor(currentSafeReturnPath()));
@@ -1660,7 +1701,7 @@ export default function DailyPracticeApp() {
   useEffect(() => {
     if (!bootstrap?.user.id || !profile.targets.length) {
       radarRequestSequenceRef.current += 1;
-      const emptyTimer = window.setTimeout(() => { setRadarPositions([]); setRadarTotal(0); }, 0);
+      const emptyTimer = window.setTimeout(() => { setRadarPositions([]); setRadarTotal(0); setRadarLimited(false); }, 0);
       return () => window.clearTimeout(emptyTimer);
     }
     const requestSequence = radarRequestSequenceRef.current + 1;
@@ -1668,7 +1709,7 @@ export default function DailyPracticeApp() {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setRadarPositionsLoading(true);
-      void api<{ positions: JobPosition[]; total: number }>({
+      void api<{ positions: JobPosition[]; total: number; limited?: boolean }>({
         action: "searchJobPositions",
         targetCodes: radarTargetFilter ? [radarTargetFilter] : profile.targets.map((target) => target.code),
         candidateProfile: progressRef.current.candidateProfile,
@@ -1678,6 +1719,10 @@ export default function DailyPracticeApp() {
       }, { signal: controller.signal }).then((result) => {
         if (radarRequestSequenceRef.current !== requestSequence) return;
         const total = Number(result.total ?? 0);
+        if (result.limited && radarPage !== 1) {
+          setRadarPage(1);
+          return;
+        }
         const maxPage = Math.max(1, Math.ceil(total / 20));
         if (radarPage > maxPage) {
           setRadarPage(maxPage);
@@ -1685,11 +1730,13 @@ export default function DailyPracticeApp() {
         }
         setRadarPositions(result.positions ?? []);
         setRadarTotal(total);
+        setRadarLimited(Boolean(result.limited));
       })
         .catch((error) => {
           if (controller.signal.aborted || radarRequestSequenceRef.current !== requestSequence || (error instanceof DOMException && error.name === "AbortError")) return;
           setRadarPositions([]);
           setRadarTotal(0);
+          setRadarLimited(false);
         })
         .finally(() => {
           if (radarRequestSequenceRef.current === requestSequence) setRadarPositionsLoading(false);
@@ -1785,7 +1832,7 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     const next = { ...current, completed: { ...current.completed, [key]: true } };
     const allDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && enabledDailySteps.every((step) => step === "practice"
-      ? Boolean(next.completed[`${dayKey}-practice`])
+      ? serverDailyPracticeCompleted
       : Boolean(next.completed[`${dayKey}-${step}`]));
     if (allDone && !next.checkins.includes(dayKey) && await recordValidDailyCheckin()) next.checkins = [...next.checkins, dayKey];
     await persist(next);
@@ -1845,7 +1892,7 @@ export default function DailyPracticeApp() {
     if (!profileDraft.targets.length) return notify("请至少选择国考或一个省考目标");
     const firstSetup = !profile.onboarded;
     const matchingBanks = (bootstrap?.questionBanks ?? []).filter((bank) =>
-      (bank.subject === "行测" || bank.subject === "综合") && bank.questionCount > 0
+      (bank.subject === "行测" || bank.subject === "综合") && bank.questionCount >= 5
       && profileDraft.targets.some((target) => targetMatchesBank(target, bank) && bankYearSupportsTarget(bank.examYear, target.examYear)));
     if (firstSetup && matchingBanks.length > 0 && !matchingBanks.some((bank) => bank.code === onboardingBankCode)) {
       return notify("请选择一套已上架且与报考目标匹配的真题库");
@@ -1949,6 +1996,10 @@ export default function DailyPracticeApp() {
   };
 
   const toggleSavedPosition = async (position: JobPosition) => {
+    if (radarLimited) {
+      openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions", resumeAction: "save_position", positionId: position.id });
+      return;
+    }
     const current = progressRef.current;
     const exists = current.savedPositionIds.includes(position.id);
     const savedPositionIds = exists
@@ -1960,6 +2011,10 @@ export default function DailyPracticeApp() {
   };
 
   const toggleComparedPosition = (position: JobPosition) => {
+    if (radarLimited) {
+      openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions", resumeAction: "compare_position", positionId: position.id });
+      return;
+    }
     setComparePositions((current) => current.some((item) => item.id === position.id)
       ? current.filter((item) => item.id !== position.id)
       : current.length >= 3 ? [...current.slice(1), position] : [...current, position]);
@@ -1986,13 +2041,60 @@ export default function DailyPracticeApp() {
   const toggleBank = async (bank: QuestionBank): Promise<void> => {
     setBusy(true);
     try {
-      const result = await api<{ banks: QuestionBank[]; profile: ExamProfile }>({ action: "toggleQuestionBank", bankCode: bank.code, added: !bank.added });
-      setBootstrap((current) => current ? { ...current, questionBanks: result.banks, examProfile: result.profile } : current);
+      const result = await api<{ banks: QuestionBank[]; profile: ExamProfile; dailyReadiness?: DailyReadiness; abandonedSessionIds?: string[] }>(
+        { action: "toggleQuestionBank", bankCode: bank.code, added: !bank.added, planMinutes: dailyPlan.minutes },
+      );
+      setBootstrap((current) => current ? {
+        ...current,
+        questionBanks: result.banks,
+        examProfile: result.profile,
+        dailyReadiness: result.dailyReadiness ?? current.dailyReadiness,
+      } : current);
       setProfileDraft(result.profile);
       trackEvent("bank_toggle", { bankCode: bank.code, added: !bank.added });
       const nextBank = result.banks.find((item) => item.code === bank.code);
+      let abandonedLocalSession = false;
+      let clearedPendingAttempts = 0;
+      if (bank.added) {
+        const abandonedIds = new Set((result.abandonedSessionIds ?? []).map(String));
+        const currentUserId = bootstrap?.user.id ?? "";
+        const current = progressRef.current;
+        const active = current.activePractice;
+        abandonedLocalSession = Boolean(active && (
+          active.bankCodes.includes(bank.code)
+          || (active.serverSessionId && abandonedIds.has(active.serverSessionId))
+        ));
+        const remainingAttempts = pendingPracticeAttemptsRef.current.filter((attempt) => {
+          const belongsToCurrentUser = !currentUserId || attempt.userId === currentUserId;
+          const matchesCancelledPractice = attempt.payload.bankCode === bank.code
+            || Boolean(attempt.payload.practiceSessionId && abandonedIds.has(attempt.payload.practiceSessionId));
+          return !(belongsToCurrentUser && matchesCancelledPractice);
+        });
+        clearedPendingAttempts = pendingPracticeAttemptsRef.current.length - remainingAttempts.length;
+        if (clearedPendingAttempts > 0) {
+          pendingPracticeAttemptsRef.current = remainingAttempts;
+          setPendingPracticeAttempts(remainingAttempts);
+          setPendingQueueDurable(writePendingPracticeAttempts(remainingAttempts));
+          autoRetriedPracticeKeyRef.current = "";
+        }
+        if (abandonedLocalSession) {
+          await persist({ ...current, activePractice: null });
+          setPracticeQuestions([]);
+          setPracticeBankCodes([]);
+          setPracticeSummary(null);
+          setPracticeIndex(0);
+          setSelectedAnswer(null);
+          setFeedback(null);
+          setAnswerConfidence("");
+          setActiveModule(null);
+        }
+      }
       notify(bank.added
-        ? nextBank?.added ? "至少保留一套可练题库，基础题库已继续保留" : "已取消加入；报考目标和本题库进度仍会保留"
+        ? nextBank?.added
+          ? "至少保留一套可练题库，基础题库已继续保留"
+          : abandonedLocalSession || clearedPendingAttempts
+            ? `已取消题库；相关未完成练习已结束${clearedPendingAttempts ? `，${clearedPendingAttempts}条未同步答题已清除` : ""}`
+            : "已取消加入；报考目标和本题库历史进度仍会保留"
         : bank.targetMatch ? "已加入我的题库" : `已加入题库，并同步加入${bank.examType === "省考" ? bank.province : "国考"}备考目标`);
     } catch (error) {
       if (apiErrorCode(error) === "FREE_BANK_LIMIT") {
@@ -2072,7 +2174,11 @@ export default function DailyPracticeApp() {
       const clientSessionId = activeSession?.clientSessionId ?? createClientSessionId();
       const serverSessionKind = activeSession?.serverSessionKind
         ?? (kind === "daily" ? "daily" : kind === "diagnostic" ? "diagnostic" : kind === "review" ? `review:${dayKey}` : `${kind}:${clientSessionId}`);
-      const result = await api<{ questions: PracticeQuestion[]; composition: PracticeComposition; sessionId?: string; quotaExceeded?: boolean; freeRemaining?: number | null }>({
+      const result = await api<{
+        questions: PracticeQuestion[]; composition: PracticeComposition; sessionId?: string; quotaExceeded?: boolean;
+        freeRemaining?: number | null; dailyCompleted?: boolean;
+        session?: { targetCount: number; answeredCount: number; correctCount: number; reviewAdded: number; elapsedSeconds: number; status: string } | null;
+      }>({
         action: "getPracticeBatch",
         mode,
         limit: resumeQuestionCodes.length || requestedLimit,
@@ -2097,6 +2203,23 @@ export default function DailyPracticeApp() {
         openPaywall("daily_limit", () => startPractice(mode, bankCodes, options), { tab: "today", sessionKind: serverSessionKind, resumeAction: "start_practice", mode, bankCodes: bankCodes ?? [], practiceOptions: options });
         return;
       }
+      if (result.dailyCompleted && kind === "daily") {
+        setServerDailyPracticeCompleted(true);
+        const current = progressRef.current;
+        const completed = { ...current.completed, [`${dayKey}-practice`]: true };
+        const dailyComplete = !dailyConfigurationBlocking && enabledDailySteps.length > 0
+          && enabledDailySteps.every((step) => step === "practice" || Boolean(completed[`${dayKey}-${step}`]));
+        const checked = dailyComplete && !current.checkins.includes(dayKey) ? await recordValidDailyCheckin() : false;
+        await persist({
+          ...current,
+          completed,
+          checkins: checked ? [...current.checkins, dayKey] : current.checkins,
+          activePractice: null,
+        });
+        setTab("today");
+        notify("已保留更新前完成的真题记录，今日练习无需重做");
+        return;
+      }
       if (!result.questions.length) {
         setPracticeEmpty(true);
         setTab(mode === "review" ? "review" : "banks");
@@ -2112,14 +2235,14 @@ export default function DailyPracticeApp() {
         kind,
         mode,
         planMinutes: activeSession?.planMinutes ?? (kind === "daily" ? dailyPlan.minutes : normalizePlanMinutes(profile.dailyMinutes)),
-        questionTarget: activeSession?.questionTarget ?? result.questions.length,
+        questionTarget: result.session?.targetCount ?? activeSession?.questionTarget ?? result.questions.length,
         bankCodes: requestedBankCodes.length ? requestedBankCodes : effectiveBanks,
         questionIds: result.questions.map((question) => question.id),
         cursor: 0,
-        answered: activeSession?.answered ?? 0,
-        correct: activeSession?.correct ?? 0,
-        reviewAdded: activeSession?.reviewAdded ?? 0,
-        elapsedSeconds: activeSession?.elapsedSeconds ?? 0,
+        answered: result.session?.answeredCount ?? activeSession?.answered ?? 0,
+        correct: result.session?.correctCount ?? activeSession?.correct ?? 0,
+        reviewAdded: result.session?.reviewAdded ?? activeSession?.reviewAdded ?? 0,
+        elapsedSeconds: result.session?.elapsedSeconds ?? activeSession?.elapsedSeconds ?? 0,
       };
       setPracticeQuestions(result.questions);
       setPracticeMode(mode);
@@ -2146,6 +2269,12 @@ export default function DailyPracticeApp() {
     } catch (error) {
       if (apiErrorCode(error) === "FREE_DAILY_LIMIT") {
         openPaywall("daily_limit", () => startPractice(mode, bankCodes, options), { tab: "today", sessionKind: kind, resumeAction: "start_practice", mode, bankCodes: bankCodes ?? [], practiceOptions: options });
+      } else if (apiErrorCode(error) === "FREE_BANK_LIMIT") {
+        openPaywall("second_bank", () => startPractice(mode, bankCodes, options), { tab: "banks", sessionKind: kind, resumeAction: "start_practice", mode, bankCodes: bankCodes ?? [], practiceOptions: options });
+      } else if (apiErrorCode(error) === "DAILY_BANK_INSUFFICIENT") {
+        setBankFilter("适合我");
+        setTab("banks");
+        notify("当前题库可练真题不足5道，请添加一套题量充足的已审核题库");
       } else {
         notify(error instanceof Error ? error.message : "组题失败");
       }
@@ -2174,13 +2303,15 @@ export default function DailyPracticeApp() {
       if (questions.length) {
         setEssayPracticeQuestions(questions);
         trackEvent("essay_practice_open", { bankCodes, questionId: questions[0].id, daily: options.daily !== false });
-      } else if (options.daily === false) {
-        notify("该申论题库暂时没有已上架真题，先完成今日微练");
+      } else {
+        setActiveModule(null);
+        notify(options.daily === false ? "该申论题库暂时没有已上架真题" : "今日申论真题暂时无法生成，本项未计为完成");
       }
     } catch (error) {
       if (apiErrorCode(error) === "PAYWALL_ESSAY") {
         openPaywall("essay", () => startEssayPractice(options), { tab: "today", sessionKind: options.daily === false ? "essay_drill" : "daily_essay", resumeAction: "start_essay", essayOptions: options });
-      } else if (options.daily === false) {
+      } else {
+        setActiveModule(null);
         notify(error instanceof Error ? error.message : "申论真题暂时无法加载");
       }
     } finally {
@@ -2284,18 +2415,40 @@ export default function DailyPracticeApp() {
           ? { ...current.completed, [`${dayKey}-practice`]: true }
           : current.completed;
         const dailyComplete = !dailyConfigurationBlocking && enabledDailySteps.length > 0
-          && enabledDailySteps.every((step) => Boolean(completed[`${dayKey}-${step}`]));
+          && enabledDailySteps.every((step) => step === "practice" || Boolean(completed[`${dayKey}-${step}`]));
         const checked = isFinal && !result.correct && activeSession.kind === "daily" && dailyComplete && !current.checkins.includes(dayKey)
           ? await recordValidDailyCheckin()
           : false;
         const checkins = checked ? [...current.checkins, dayKey] : current.checkins;
         await persist({ ...current, completed, checkins, activePractice: nextSession });
+        if (isFinal && !result.correct && activeSession.kind === "daily") setServerDailyPracticeCompleted(true);
       }
       trackEvent("practice_answer", { module: currentPractice.module, correct: result.correct, uncertain: answerUncertain, overtime: result.overtime, seconds: answerSeconds, retried: Boolean(queuedAttempt) });
     } catch (error) {
       if (apiErrorCode(error) === "FREE_DAILY_LIMIT") {
         setSelectedAnswer(null);
         openPaywall("daily_limit", () => answerPractice(answer), { tab: "today", sessionKind: practiceKind, resumeAction: "resume_practice", mode: practiceMode, bankCodes: practiceBankCodes, practiceKind });
+      } else if (["PRACTICE_SESSION_INVALIDATED", "PRACTICE_SESSION_ENTITLEMENT_CHANGED"].includes(apiErrorCode(error))) {
+        const entitlementChanged = apiErrorCode(error) === "PRACTICE_SESSION_ENTITLEMENT_CHANGED";
+        const invalidSessionId = answeringSession?.serverSessionId ?? "";
+        const remainingAttempts = pendingPracticeAttemptsRef.current.filter((attempt) => (
+          !invalidSessionId || attempt.payload.practiceSessionId !== invalidSessionId
+        ));
+        pendingPracticeAttemptsRef.current = remainingAttempts;
+        setPendingPracticeAttempts(remainingAttempts);
+        setPendingQueueDurable(writePendingPracticeAttempts(remainingAttempts));
+        setSelectedAnswer(null);
+        setFeedback(null);
+        setPracticeQuestions([]);
+        setActiveModule(null);
+        setTab("today");
+        const current = progressRef.current;
+        if (current.activePractice?.serverSessionId === invalidSessionId) {
+          await persist({ ...current, activePractice: null });
+        }
+        notify(entitlementChanged
+          ? "会员或试用权益、题库组合已变化，旧练习已结束；已完成记录保留，请重新开始"
+          : "题库内容已更新，旧练习已结束；已完成记录仍保留，请重新开始本组");
       } else if (isRetryablePracticeError(error)) {
         const now = new Date().toISOString();
         upsertPendingPracticeAttempt({
@@ -2435,23 +2588,30 @@ export default function DailyPracticeApp() {
 
   const markConfidence = async (confidence: Exclude<AnswerConfidence, "">) => {
     if (!currentPractice || !feedback || !feedback.correct || busy) return;
+    if (answerConfidence) return notify("掌握程度已保存，本题不再重复改判");
     if (uncertain && confidence === "confident") return notify("答题前已标记没把握，这题会按犹豫题回炉");
     setBusy(true);
     try {
       const firstClassification = answerConfidence === "";
-      const result = await api<{ state: AnswerFeedback["state"]; nextReviewAt: string | null }>({
+      const result = await api<{ state: AnswerFeedback["state"]; nextReviewAt: string | null; duplicate?: boolean; confidence?: AnswerConfidence; needsReview?: boolean }>({
         action: "updateQuestionMeta",
         questionCode: currentPractice.id,
         attemptId: feedback.attemptId,
         confidence,
       });
-      const newlyAdded = confidence !== "confident" && !feedback.needsReview;
-      setAnswerConfidence(confidence);
-      if (confidence !== "confident") setFeedback((current) => current ? {
+      const serverConfidence = result.confidence === "confident" || result.confidence === "hesitant" || result.confidence === "guessed"
+        ? result.confidence
+        : confidence;
+      const serverNeedsReview = typeof result.needsReview === "boolean"
+        ? result.needsReview
+        : serverConfidence !== "confident" || feedback.overtime || uncertain;
+      const newlyAdded = serverNeedsReview && !feedback.needsReview;
+      setAnswerConfidence(serverConfidence);
+      setFeedback((current) => current ? {
         ...current,
-        state: "weak",
-        needsReview: true,
-        reviewDays: 1,
+        state: result.state ?? current.state,
+        needsReview: serverNeedsReview,
+        reviewDays: serverNeedsReview ? 1 : current.reviewDays,
         nextReviewAt: result.nextReviewAt ?? current.nextReviewAt,
       } : current);
       const nextReviewAdded = newlyAdded ? sessionReviewAdded + 1 : sessionReviewAdded;
@@ -2470,18 +2630,19 @@ export default function DailyPracticeApp() {
           ? { ...current.completed, [`${dayKey}-practice`]: true }
           : current.completed;
         const dailyComplete = !dailyConfigurationBlocking && enabledDailySteps.length > 0
-          && enabledDailySteps.every((step) => Boolean(completed[`${dayKey}-${step}`]));
+          && enabledDailySteps.every((step) => step === "practice" || Boolean(completed[`${dayKey}-${step}`]));
         const checked = firstClassification && isFinal && current.activePractice.kind === "daily" && dailyComplete && !current.checkins.includes(dayKey)
           ? await recordValidDailyCheckin()
           : false;
         const checkins = checked ? [...current.checkins, dayKey] : current.checkins;
         await persist({ ...current, completed, checkins, activePractice: nextActivePractice });
+        if (firstClassification && isFinal && current.activePractice.kind === "daily") setServerDailyPracticeCompleted(true);
       }
-      if (confidence === "guessed") setPracticeQuestions((items) => items.map((item, index) => index === practiceIndex ? { ...item, wrongReason: "蒙对了" } : item));
-      trackEvent("practice_confidence", { confidence, module: currentPractice.module });
-      notify(confidence === "confident"
+      if (serverConfidence === "guessed") setPracticeQuestions((items) => items.map((item, index) => index === practiceIndex ? { ...item, wrongReason: "蒙对了" } : item));
+      trackEvent("practice_confidence", { confidence: serverConfidence, module: currentPractice.module, duplicate: Boolean(result.duplicate) });
+      notify(serverConfidence === "confident"
         ? feedback.overtime ? "已记录为会做，但因超时仍会回炉" : "已记录为真正掌握"
-        : confidence === "hesitant" ? "已加入明日犹豫题回炉" : "蒙对不算掌握，明天再做一次");
+        : serverConfidence === "hesitant" ? "已加入明日犹豫题回炉" : "蒙对不算掌握，明天再做一次");
     } catch (error) { notify(error instanceof Error ? error.message : "掌握状态保存失败"); }
     finally { setBusy(false); }
   };
@@ -2509,7 +2670,10 @@ export default function DailyPracticeApp() {
   };
 
   const saveEssayStage = async (stage: EssayStage, current: Progress, rewriteDueAt?: string) => {
-    if (!essayQuestion) return false;
+    if (!essayQuestion) {
+      notify("这道申论真题尚未成功加载，请返回后重试");
+      return false;
+    }
     try {
       const result = await api<{ scoringPoints?: string[]; reference?: string }>({
         action: "saveEssayAttempt",
@@ -2845,7 +3009,7 @@ export default function DailyPracticeApp() {
           </div>}
         </article>
         {feedback && !feedback.correct && <div className="wrong-reason-box"><span>这次为什么错？</span><div>{reasonOptions.map((reason) => <button key={reason} className={currentPractice.wrongReason === reason ? "active" : ""} onClick={() => void updateQuestionMeta({ wrongReason: reason })}>{reason}</button>)}</div></div>}
-        {feedback?.correct && <div className="confidence-box"><span>这题是真会，还是只是做对了？</span><div><button disabled={uncertain || busy} className={answerConfidence === "confident" ? "active" : ""} onClick={() => void markConfidence("confident")}>真会</button><button disabled={busy} className={answerConfidence === "hesitant" ? "active" : ""} onClick={() => void markConfidence("hesitant")}>有点犹豫</button><button disabled={busy} className={answerConfidence === "guessed" ? "active" : ""} onClick={() => void markConfidence("guessed")}>蒙对了</button></div><small>犹豫、蒙对或超时做对都不会被当成稳定掌握。</small></div>}
+        {feedback?.correct && <div className="confidence-box"><span>这题是真会，还是只是做对了？</span><div><button disabled={uncertain || busy || Boolean(answerConfidence)} className={answerConfidence === "confident" ? "active" : ""} onClick={() => void markConfidence("confident")}>真会</button><button disabled={busy || Boolean(answerConfidence)} className={answerConfidence === "hesitant" ? "active" : ""} onClick={() => void markConfidence("hesitant")}>有点犹豫</button><button disabled={busy || Boolean(answerConfidence)} className={answerConfidence === "guessed" ? "active" : ""} onClick={() => void markConfidence("guessed")}>蒙对了</button></div><small>{answerConfidence ? "掌握程度已按服务端记录锁定。" : "犹豫、蒙对或超时做对都不会被当成稳定掌握。"}</small></div>}
         {feedback && <button className="primary-button full-button practice-next" disabled={busy || (feedback.correct && !answerConfidence)} onClick={nextPracticeQuestion}>{feedback.correct && !answerConfidence ? "先确认掌握程度" : finished ? "查看本轮总结" : "下一题"}</button>}
       </div>
     );
@@ -2957,7 +3121,9 @@ export default function DailyPracticeApp() {
   const tomorrowPlan = insights.tomorrowPlan;
   const nextStepText = dailyConfigurationBlocking ? "备考组合待补全" : nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
   const primaryTaskTitle = dailyConfigurationBlocking
-    ? `先为${bankConfigGaps[0]?.label ?? primaryTarget?.label ?? "报考目标"}加入可练题库`
+    ? bootstrap?.dailyReadiness
+      ? `不重复真题仅${dailyReadinessCount}/${dailyReadinessRequired}道，先补足题量`
+      : `先为${bankConfigGaps[0]?.label ?? primaryTarget?.label ?? "报考目标"}加入可练题库`
     : allDailyDone
     ? "今日已完成，可以安心收工"
     : activeDailySession
@@ -2970,7 +3136,9 @@ export default function DailyPracticeApp() {
           ? "申论真题微练"
             : "今日已完成";
   const primaryTaskDetail = dailyConfigurationBlocking
-    ? "需同时满足：已加入、地区匹配、年份适用、已发布且题量大于0。配置完成后才会生成今日行测。"
+    ? bootstrap?.dailyReadiness
+      ? `只统计当前权益可用、已发布且审核通过的行测真题；跨题库重复题只算1道，还需${Math.max(0, dailyReadinessRequired - dailyReadinessCount)}道。`
+      : "需同时满足：已加入、地区匹配、年份适用、已发布且至少有5道不重复真题。配置完成后才会生成今日行测。"
     : allDailyDone
     ? `已完成${doneCount}/${enabledDailySteps.length}个有效动作，明日建议：${tomorrowPlan.taskText}`
     : nextDailyStep === "morning"
@@ -3027,12 +3195,12 @@ export default function DailyPracticeApp() {
 
         {activeModule ? renderModule() : <>
           {tab === "today" && <div className="page-content today-redesign">
-            <section className={`today-focus-strip${profile.onboarded && bankConfigGaps.length > 0 ? " has-config-gap" : ""}`}>
+            <section className={`today-focus-strip${profile.onboarded && dailyConfigurationBlocking ? " has-config-gap" : ""}`}>
               <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
               <button className="today-focus-adjust" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
-              {profile.onboarded && bankConfigGaps.length > 0 && <button className="bank-config-gap" onClick={() => { setBankFilter("适合我"); setTab("banks"); }}>
+              {profile.onboarded && dailyConfigurationBlocking && <button className="bank-config-gap" onClick={() => { setBankFilter("适合我"); setTab("banks"); }}>
                 <span>备考组合配置缺口</span>
-                <div><b>{bankConfigGaps[0].label}还没有可练的行测题库</b><small>{bankConfigGaps.length > 1 ? `共${bankConfigGaps.length}个目标待补全；需匹配地区、适用年份且已上架有题` : "需加入适用年份匹配、已上架且有题的行测/综合题库"}</small></div>
+                <div><b>{bootstrap?.dailyReadiness ? `当前仅${dailyReadinessCount}/${dailyReadinessRequired}道不重复可练真题` : `${bankConfigGaps[0]?.label ?? "当前目标"}还没有可练的行测题库`}</b><small>{bootstrap?.dailyReadiness ? "只统计当前权益内已发布、已审核真题；不同题库里的重复题不会重复累计" : "需加入适用年份匹配、已上架且至少有5道不重复真题的行测/综合题库"}</small></div>
                 <i>去补全 ›</i>
               </button>}
             </section>
@@ -3043,7 +3211,7 @@ export default function DailyPracticeApp() {
                 <div><p>{nextStepText}</p><h1>{primaryTaskTitle}</h1><small>{primaryTaskDetail}</small></div>
                 <div className="today-progress-orb" style={{ "--progress": `${doneCount * (360 / Math.max(1, enabledDailySteps.length))}deg` } as React.CSSProperties}><strong>{dailyConfigurationBlocking ? "—" : `${doneCount}/${enabledDailySteps.length}`}</strong><span>{dailyConfigurationBlocking ? "待配置" : "完成"}</span></div>
               </div>
-              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? "加入后才生成真实日练" : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
+              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道，补足后才生成真实日练` : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>}{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}{quickBank && <button onClick={() => void startPractice("mixed", [quickBank.code], { kind: "bank" })}>单本加练</button>}</div>
             </section>
 
@@ -3088,12 +3256,13 @@ export default function DailyPracticeApp() {
               const percent = bank.questionCount ? Math.round((bank.studiedCount / bank.questionCount) * 100) : 0;
               const estimatedDays = bank.questionCount ? Math.max(1, Math.ceil(Math.max(0, bank.questionCount - bank.studiedCount) / dailyPlan.questionCount)) : 0;
               const isPrimary = bank.code === primaryBank?.code;
+              const bankLocked = bank.added && (bank.locked === true || bank.practiceAvailable === false);
               const fit = bankFitMap.get(bank.code) ?? resolveBankFit(bank, profile, primaryTarget, primaryBank?.code);
-              return <article className={`bank-card bank-${bank.coverColor}${isPrimary ? " is-primary" : ""}`} key={bank.code}>
+              return <article className={`bank-card bank-${bank.coverColor}${isPrimary ? " is-primary" : ""}${bankLocked ? " is-locked" : ""}`} key={bank.code}>
                 <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bankTruthLabel(bank)}</small></div>
                 <div className="bank-copy"><div><span>{bankTruthLabel(bank)} · {bank.questionCount}题</span><h3>{bank.name}</h3>{isPrimary && <div className="primary-bank-badge">主攻题库</div>}<p>{bank.description}</p><div className={`scope-badge ${fit.tone}`}>{fit.badge}</div>{bankFilter === "适合我" && <small className="fit-reason">推荐依据：{[fit.reason, frequencyText(bank.frequency), starText(bank.importanceStars), scoreRateText(bank.scoreRate)].filter(Boolean).join(" · ")}</small>}</div>
                   <div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-                  <footer><small>{bank.questionCount === 0 ? "题库框架已建，等待后台上传题目；加入后不会影响基础日练" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 约${estimatedDays}天过一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">✓ 已加入</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "单本练" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
+                  <footer><small>{bank.questionCount === 0 ? "题库框架已建，等待后台上传题目；加入后不会影响基础日练" : bankLocked ? "试用已结束，本题库和历史进度已保留；开通后立即恢复" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 约${estimatedDays}天过一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">{bankLocked ? "🔒 已保留" : "✓ 已加入"}</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && !bankLocked && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bankLocked && bank.questionCount > 0 ? <button className="start-bank" onClick={() => bank.subject === "申论" ? openPaywall("essay", () => startEssayPractice({ bankCodes: [bank.code], daily: false }), { tab: "banks", bankCode: bank.code, resumeAction: "start_essay" }) : openPaywall("second_bank", () => startPractice("mixed", [bank.code], { kind: "bank" }), { tab: "banks", bankCode: bank.code, resumeAction: "start_practice", mode: "mixed", bankCodes: [bank.code], practiceOptions: { kind: "bank" } })}>开通后继续</button> : bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "单本练" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
                 </div>
               </article>;
             })}</section>
@@ -3133,6 +3302,7 @@ export default function DailyPracticeApp() {
             </>}
 
             {radarMode === "positions" && <>
+              {radarLimited && <section className="reminder-banner"><div><span>免费职位预览</span><h3>当前展示1个考试目标的3个职位样例</h3><p>会员可同时筛国考和多个省考，并按学历、专业、身份匹配、收藏及横向对比。</p></div><button onClick={() => openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions" })}>解锁完整雷达</button></section>}
               <section className="candidate-panel"><div className="section-heading"><div><span>我的报考条件</span><h2>先录入一次，后面按岗位自动初筛</h2></div><button onClick={() => void saveCandidateProfile()}>保存条件档案</button></div>
                 <div className="candidate-grid">
                   <label><span>学历</span><select value={progress.candidateProfile.education} onChange={(event) => updateCandidateProfile({ education: event.target.value })}>{candidateOptions.education.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
@@ -3177,7 +3347,7 @@ export default function DailyPracticeApp() {
                   {position.remarks && <p className="position-remark">{position.remarks}</p>}
                   <footer><button className={saved ? "saved" : ""} onClick={() => void toggleSavedPosition(position)}>{saved ? "✓ 已加入备选" : "+ 加入备选"}</button><button className={comparePositions.some((item) => item.id === position.id) ? "compared" : ""} onClick={() => toggleComparedPosition(position)}>{comparePositions.some((item) => item.id === position.id) ? "✓ 对比中" : "加入对比"}</button>{position.sourceUrl && <a href={position.sourceUrl} target="_blank" rel="noreferrer" onClick={() => trackEvent("radar_official_source_open", { positionId: position.id, targetCode: position.targetCode })}>官方来源</a>}</footer>
                 </article>) : <div className="empty-state compact calendar-empty"><span>职</span><h3>{radarKeyword ? "没有匹配当前关键词的职位" : "后台还没有可筛选的职位表"}</h3><p>{radarKeyword ? "可尝试缩短关键词或切换考试范围。" : "导入职位表后，考生会看到“初步符合 / 待确认 / 明确不符合”，并能收藏和横向对比岗位。"}</p></div>}
-                {radarTotal > 20 && <nav className="position-pagination" aria-label="职位分页"><button disabled={radarPage <= 1 || radarPositionsLoading} onClick={() => setRadarPage((page) => Math.max(1, page - 1))}>上一页</button><span>第 {radarPage} / {Math.max(1, Math.ceil(radarTotal / 20))} 页</span><button disabled={radarPage >= Math.ceil(radarTotal / 20) || radarPositionsLoading} onClick={() => setRadarPage((page) => page + 1)}>下一页</button></nav>}
+                {!radarLimited && radarTotal > 20 && <nav className="position-pagination" aria-label="职位分页"><button disabled={radarPage <= 1 || radarPositionsLoading} onClick={() => setRadarPage((page) => Math.max(1, page - 1))}>上一页</button><span>第 {radarPage} / {Math.max(1, Math.ceil(radarTotal / 20))} 页</span><button disabled={radarPage >= Math.ceil(radarTotal / 20) || radarPositionsLoading} onClick={() => setRadarPage((page) => page + 1)}>下一页</button></nav>}
               </section>
             </>}
 
@@ -3374,7 +3544,7 @@ export default function DailyPracticeApp() {
               </div>
               {!profile.onboarded && (() => {
                 const choices = bootstrap.questionBanks.filter((bank) =>
-                  (bank.subject === "行测" || bank.subject === "综合") && bank.questionCount > 0
+                  (bank.subject === "行测" || bank.subject === "综合") && bank.questionCount >= 5
                   && profileDraft.targets.some((target) => targetMatchesBank(target, bank) && bankYearSupportsTarget(bank.examYear, target.examYear)));
                 return <div className="choice-group onboarding-bank-choice"><label>选择首套可练真题库</label>{choices.length ? <div>{choices.slice(0, 8).map((bank) => <button key={bank.code} className={onboardingBankCode === bank.code ? "active" : ""} onClick={() => setOnboardingBankCode(bank.code)}><b>{bank.name}</b><small>{bank.province}-{bank.examYear ?? "近年"} · {bank.questionCount}题 · 已审核上架</small></button>)}</div> : <p>当前目标暂时没有已审核上架的行测真题库。可以先保存目标，题库上架后首页会持续提示配置缺口，不会生成假任务。</p>}</div>;
               })()}

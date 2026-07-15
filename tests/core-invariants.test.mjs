@@ -26,6 +26,7 @@ test("user identity is backed by an opaque hashed server session", async () => {
   const route = await readFile(files.route, "utf8");
   const ensureUser = functionBody(route, "ensureUser");
   const issueSession = functionBody(route, "issueUserSession");
+  const verifyAnonymousSession = functionBody(route, "anonymousSessionUserId");
   const submitPractice = functionBody(route, "submitPracticeAnswer");
   const updateMeta = functionBody(route, "updateQuestionMeta");
   const getPractice = functionBody(route, "getPracticeBatch");
@@ -36,7 +37,11 @@ test("user identity is backed by an opaque hashed server session", async () => {
   assert.match(issueSession, /digestText\(`gongkao-session:\$\{token\}`\)/);
   assert.match(issueSession, /INSERT INTO user_sessions/);
   assert.doesNotMatch(issueSession, /INSERT INTO user_sessions[\s\S]*?\.bind\(token,/);
-  assert.match(ensureUser, /validLegacyDeviceId\(cookieValue\)/);
+  assert.doesNotMatch(route, /function validLegacyDeviceId/);
+  assert.doesNotMatch(ensureUser, /legacyDeviceId/);
+  assert.match(ensureUser, /activeSession\?\.userId \?\? anonymousSession\?\.userId \?\? null/);
+  assert.match(verifyAnonymousSession, /anonymousSessionSignature\(value\)/);
+  assert.match(verifyAnonymousSession, /constantTimeStringEqual\(expected, parts\[3\]\)/);
   assert.match(ensureUser, /signedOutAccountSession/);
   assert.match(ensureUser, /revoked_at = CURRENT_TIMESTAMP/);
   assert.match(ensureUser, /oai-authenticated-user-email/);
@@ -49,6 +54,33 @@ test("user identity is backed by an opaque hashed server session", async () => {
   assert.match(getPractice, /kind = 'diagnostic' AND status = 'completed'/);
   assert.match(getPractice, /diagnostic_used/);
   assert.match(route, /VERIFIED_ACCOUNT_REQUIRED/);
+});
+
+test("passive anonymous bootstrap is signed, rate-limited and does not persist a user", async () => {
+  const [route, runtime] = await Promise.all([readFile(files.route, "utf8"), readFile(files.runtime, "utf8")]);
+  const ensureUser = functionBody(route, "ensureUser");
+  const bootstrap = functionBody(route, "bootstrap");
+  const anonymousSignature = functionBody(route, "anonymousSessionSignature");
+  const post = functionBody(route, "POST");
+
+  assert.match(bootstrap, /ensureUser\(request, \{ persist: false \}\)/);
+  assert.match(bootstrap, /if \(!identity\.persistent && !identity\.signedIn\)/);
+  assert.match(ensureUser, /if \(!shouldPersist && !identity\.signedIn && !identity\.persistent\)/);
+  assert.match(ensureUser, /issueAnonymousSession\(identity\.userId\)/);
+  assert.match(anonymousSignature, /name: "HMAC", hash: "SHA-256"/);
+  assert.match(route, /if \(!mediaId && !allowPassiveBootstrap\(request\)\)/);
+  assert.match(route, /code: "RATE_LIMITED"/);
+  assert.match(route, /const PUBLIC_ACTIONS = new Set/);
+  assert.match(route, /const PASSIVE_PUBLIC_ACTIONS = new Set/);
+  assert.match(post, /!PUBLIC_ACTIONS\.has\(action\)[\s\S]*?return json\(\{ error: "未知操作" \}, 400\)/);
+  assert.match(post, /const payload = \(await request\.json\(\)\)[\s\S]*?!PUBLIC_ACTIONS\.has\(action\)[\s\S]*?await ensureSchema\(\)/);
+  assert.ok(post.indexOf("!PUBLIC_ACTIONS.has(action)") < post.indexOf("ensureUser(request"),
+    "unknown public actions must be rejected before identity persistence");
+  assert.match(post, /ensureUser\(request, \{ persist: !PASSIVE_PUBLIC_ACTIONS\.has\(action\) \}\)/);
+  assert.match(route, /consume\(`\$\{client\}:\*`, 240\)/);
+  assert.match(route, /let defaultsPromise: Promise<void> \| null = null/);
+  assert.match(route, /default_system_seed_version[\s\S]*?marker\?\.value !== DEFAULT_SEED_VERSION[\s\S]*?seedDefaults\(\)/);
+  assert.match(runtime, /DELETE FROM user_sessions[\s\S]*?datetime\(expires_at\) <= CURRENT_TIMESTAMP/);
 });
 
 test("only reviewed and truth-verified questions can enter learner flows", async () => {
@@ -94,9 +126,14 @@ test("daily sessions and answers are resumable and idempotent", async () => {
   assert.match(route, /INSERT OR IGNORE INTO daily_checkins/);
   assert.match(route, /SELECT date_key FROM daily_checkins WHERE user_id = \?/);
   assert.doesNotMatch(route, /legacyCheckins/);
-  assert.match(runtime, /status = 'completed' AND kind = 'daily' AND mode = 'mixed'[\s\S]*?target_count > 0 AND answered_count >= target_count/);
+  assert.match(runtime, /ps\.kind = 'daily' AND ps\.mode = 'mixed' AND ps\.status = 'completed'[\s\S]*?ps\.target_count >= 5 AND ps\.answered_count >= ps\.target_count/);
   assert.match(runtime, /DELETE FROM daily_checkins[\s\S]*?NOT EXISTS[\s\S]*?ps\.mode = 'mixed'/);
-  assert.match(route, /FROM practice_sessions WHERE user_id = \? AND status = 'completed' AND kind = 'daily'[\s\S]*?mode = 'mixed'/);
+  assert.match(route, /FROM practice_sessions[\s\S]*?WHERE user_id = \? AND date_key = \? AND kind = 'daily' AND mode = 'mixed'[\s\S]*?status = 'completed'/);
+  assert.match(getBatch, /const resumeQuestionCodes = existingSession \? serverResumeCodes : \[\]/);
+  assert.doesNotMatch(getBatch, /serverResumeCodes\.length \? serverResumeCodes : clientResumeCodes/);
+  assert.match(getBatch, /requiredNewDailyQuestions[\s\S]*?dailyTargetCount - dailyCarry\.answered/);
+  assert.match(getBatch, /sessionKind === "daily" && !existingSession && sessionItems\.length < requiredNewDailyQuestions/);
+  assert.match(route, /status = 'completed' AND target_count >= 5 AND answered_count >= target_count/);
   assert.match(route, /reviewIntervals: \[1, 3, 7, 14, 30\]/);
 });
 
@@ -151,6 +188,31 @@ test("commerce preserves the public lifetime offer and keeps payment in explicit
   assert.match(commerce, /completeTestPayment/);
   assert.match(commerce, /测试支付/);
   assert.doesNotMatch(route, /wechatpay|alipay/i);
+});
+
+test("uploaded media is authorized per user and never becomes a public membership token", async () => {
+  const [route, runtime] = await Promise.all([
+    readFile(files.route, "utf8"),
+    readFile(files.runtime, "utf8"),
+  ]);
+  const serveMedia = functionBody(route, "serveMedia");
+  const authorizeMedia = functionBody(route, "serveAuthorizedMedia");
+
+  assert.match(route, /if \(mediaId\) return serveAuthorizedMedia\(mediaId, request\)/);
+  assert.match(authorizeMedia, /membershipIsActive\(membership\)/);
+  assert.match(authorizeMedia, /entitlement\.access_level === "free"/);
+  assert.match(authorizeMedia, /ci\.access_level = 'free'/);
+  assert.match(authorizeMedia, /published_free_reference/);
+  assert.match(authorizeMedia, /instr\(ci\.payload_json, json_quote\(\?\)\) > 0/);
+  assert.match(authorizeMedia, /PAYWALL_MEDIA/);
+  assert.match(serveMedia, /publiclyCacheable \? "public, max-age=60, must-revalidate" : "private, no-store"/);
+  assert.match(serveMedia, /public, max-age=60, must-revalidate/);
+  assert.match(serveMedia, /"x-content-type-options": "nosniff"/);
+  assert.match(serveMedia, /row\.content_type === "application\/pdf" \? "attachment" : "inline"/);
+  assert.match(route, /function safeUploadedMediaType[\s\S]*?%PDF-[\s\S]*?return ""/);
+  assert.match(route, /code: "UNSAFE_MEDIA_TYPE"/);
+  assert.doesNotMatch(route, /type === "image\/svg\+xml"/);
+  assert.match(runtime, /UPDATE media_assets SET status = 'disabled'[\s\S]*?lower\(content_type\) NOT IN/);
 });
 
 test("login return intents and radar controls never degrade into fake actions", async () => {
@@ -224,15 +286,26 @@ test("question import is durable, resumable and versioned", async () => {
 });
 
 test("expired trials cannot retain multi-bank practice access and code dates include the selected China day", async () => {
-  const route = await readFile(files.route, "utf8");
+  const [route, daily] = await Promise.all([readFile(files.route, "utf8"), readFile(files.daily, "utf8")]);
   const getBatch = functionBody(route, "getPracticeBatch");
   const effectiveBanks = functionBody(route, "effectivePracticeBankCodes");
+  const loadBanks = functionBody(route, "loadQuestionBanks");
+  const loadContent = functionBody(route, "loadContent");
   const createCodes = functionBody(route, "adminCreateCodes");
 
   assert.match(getBatch, /effectivePracticeBankCodes\(userId, selected, active\)/);
-  assert.match(effectiveBanks, /if \(membershipActive \|\| selected\.length <= 1\) return selected/);
+  assert.match(effectiveBanks, /if \(membershipActive\) return selected/);
   assert.match(effectiveBanks, /ORDER BY uqb\.added_at, uqb\.bank_code LIMIT 1/);
   assert.match(effectiveBanks, /truth_verified = 1 AND q\.review_status = 'approved'/);
+  assert.match(effectiveBanks, /qb\.subject <> '申论' AND q\.subject = '行测'/);
+  assert.match(getBatch, /lockedRequestedBankCodes[\s\S]*?code: "FREE_BANK_LIMIT"/);
+  assert.match(loadBanks, /practiceAvailable[\s\S]*?locked: added && !practiceAvailable/);
+  assert.match(loadContent, /morningReads: \[\][\s\S]*?currentAffairs: \[\][\s\S]*?essayMicros: \[\]/);
+  assert.match(loadContent, /questions: \[\][\s\S]*?essay: \{ \.\.\.day\.essay, material: "", prompt: "", reference: "", scoringPoints: \[\] \}/);
+  assert.match(loadContent, /const previewDays = practiceDays\.map[\s\S]*?essay: \{ expressions: \[\], material: "", prompt: "", reference: "", scoringPoints: \[\], wordLimit: 0 \}/);
+  assert.match(daily, /activeLearningBanks = addedBanks\.filter\(\(bank\) => bank\.subject !== "申论" && bank\.practiceAvailable !== false\)/);
+  assert.match(daily, /const hasEssayContent = activeEssayBanks\.some\(\(bank\) => bank\.questionCount > 0\);/);
+  assert.doesNotMatch(daily, /hasEssayContent = [^;]*day\.essay\.prompt/);
   assert.match(createCodes, /T23:59:59\.999\+08:00/);
 });
 

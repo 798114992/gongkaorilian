@@ -11,10 +11,13 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  App,
+  Button,
   Card,
   Col,
   Empty,
   Flex,
+  Input,
   Progress,
   Row,
   Segmented,
@@ -274,13 +277,18 @@ function Funnel({ items }: { items: FunnelItem[] }) {
 }
 
 export default function AnalyticsPage() {
+  const { message } = App.useApp();
   const { can } = useAdminSession();
   const canRead = can("analytics.read");
+  const canManageSamples = can("users.manage");
   const [days, setDays] = useState(30);
   const [data, setData] = useState<AnalyticsData>(EMPTY_DATA);
   const [loading, setLoading] = useState(canRead);
   const [error, setError] = useState("");
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [sampleUserId, setSampleUserId] = useState("");
+  const [sampleEligibility, setSampleEligibility] = useState<"include" | "exclude">("exclude");
+  const [sampleSaving, setSampleSaving] = useState(false);
 
   const load = useCallback(async () => {
     if (!canRead) {
@@ -304,6 +312,27 @@ export default function AnalyticsPage() {
     const task = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(task);
   }, [load]);
+
+  const updateSampleEligibility = async () => {
+    const userId = sampleUserId.trim();
+    if (!userId) {
+      void message.warning("请输入学习用户ID");
+      return;
+    }
+
+    setSampleSaving(true);
+    try {
+      const eligible = sampleEligibility === "include";
+      await adminApi({ action: "adminSetAnalyticsEligibility", userId, eligible });
+      void message.success(eligible ? "该用户已纳入统计样本" : "该用户已排除出统计样本");
+      setSampleUserId("");
+      await load();
+    } catch (reason) {
+      void message.error(reason instanceof Error ? reason.message : "统计样本状态更新失败");
+    } finally {
+      setSampleSaving(false);
+    }
+  };
 
   const memberRate = data.overview.totalUsers
     ? data.overview.memberUsers / data.overview.totalUsers * 100
@@ -345,6 +374,37 @@ export default function AnalyticsPage() {
       ) : (
         <Space direction="vertical" size={18} style={{ display: "flex" }}>
           {updatedLabel && <Typography.Text type="secondary" className="admin-analytics-updated">{updatedLabel}</Typography.Text>}
+
+          {canManageSamples && (
+            <Card
+              className="admin-analytics-card"
+              size="small"
+              title="统计样本管理"
+              extra={<Typography.Text type="secondary">仅 users.manage 可操作</Typography.Text>}
+            >
+              <Flex gap={10} align="center" wrap="wrap">
+                <Input
+                  aria-label="学习用户ID"
+                  placeholder="输入学习用户ID"
+                  value={sampleUserId}
+                  onChange={(event) => setSampleUserId(event.target.value)}
+                  onPressEnter={() => void updateSampleEligibility()}
+                  style={{ flex: "1 1 240px", maxWidth: 420 }}
+                />
+                <Segmented<"include" | "exclude">
+                  value={sampleEligibility}
+                  options={[
+                    { label: "纳入统计", value: "include" },
+                    { label: "排除测试与异常样本", value: "exclude" },
+                  ]}
+                  onChange={setSampleEligibility}
+                />
+                <Button type="primary" loading={sampleSaving} onClick={() => void updateSampleEligibility()}>
+                  保存
+                </Button>
+              </Flex>
+            </Card>
+          )}
 
           <Row gutter={[14, 14]} className="admin-analytics-overview">
             <Col xs={12} md={8} xl={4}><Card><Statistic title="累计用户" value={data.overview.totalUsers} formatter={formatInteger} prefix={<TeamOutlined />} /></Card></Col>

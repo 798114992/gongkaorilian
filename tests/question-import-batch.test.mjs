@@ -17,7 +17,7 @@ function createTableSql(runtime, table) {
 }
 
 function acceptedBatchSql(route, marker) {
-  const anchor = route.indexOf("const acceptedJson = JSON.stringify");
+  const anchor = route.indexOf("const acceptedJson = JSON.stringify(accepted.map");
   assert.notEqual(anchor, -1, "missing accepted import payload");
   const prefix = `db.prepare(\`${marker}`;
   const start = route.indexOf(prefix, anchor);
@@ -25,6 +25,18 @@ function acceptedBatchSql(route, marker) {
   const sqlStart = start + "db.prepare(`".length;
   const end = route.indexOf("`)", sqlStart);
   assert.notEqual(end, -1, `unterminated import statement: ${marker}`);
+  return route.slice(sqlStart, end)
+    .replaceAll("${QUESTION_IMPORT_WRITE_GUARD_SQL}", templateConstant(route, "QUESTION_IMPORT_WRITE_GUARD_SQL"))
+    .replaceAll("${QUESTION_IMPORT_POST_STATE_SQL}", templateConstant(route, "QUESTION_IMPORT_POST_STATE_SQL"));
+}
+
+function templateConstant(route, name) {
+  const prefix = `const ${name} = \``;
+  const start = route.indexOf(prefix);
+  assert.notEqual(start, -1, `missing ${name}`);
+  const sqlStart = start + prefix.length;
+  const end = route.indexOf("`;", sqlStart);
+  assert.notEqual(end, -1, `unterminated ${name}`);
   return route.slice(sqlStart, end);
 }
 
@@ -87,18 +99,30 @@ test("question import writes, reuses, versions and retries one JSON batch idempo
     CREATE UNIQUE INDEX question_import_row_results_import_row_uq ON question_import_row_results(import_id, row_number);
     CREATE UNIQUE INDEX question_versions_question_version_uq ON question_versions(question_id, version);
     CREATE UNIQUE INDEX question_versions_import_row_uq ON question_versions(import_id, source_row);
+    CREATE TABLE question_banks (id INTEGER PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE question_imports (
+      id INTEGER PRIMARY KEY, bank_id INTEGER NOT NULL, status TEXT NOT NULL,
+      cancel_requested INTEGER NOT NULL DEFAULT 0, lease_token TEXT
+    );
+    CREATE TABLE question_import_chunks (
+      id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL, status TEXT NOT NULL
+    );
+    INSERT INTO question_banks VALUES (2,'draft');
+    INSERT INTO question_imports VALUES (77,2,'processing',0,'lease-77');
+    INSERT INTO question_import_chunks VALUES (5,77,'processing');
     INSERT INTO questions (question_code, subject, module, stem, source_region, source_year, version,
-      truth_verified, review_status, source, source_exam_type, source_batch)
-      VALUES ('UPD-001', '行测', '旧模块', '旧题干', '广东', 2023, 2, 1, 'approved', '旧来源', 'provincial', 'OLD'),
-             ('REUSE-001', '行测', '判断推理', '保持不变', '广东', 2024, 5, 1, 'approved', '广东省考真题', 'provincial', 'GD-2024-A');
+      truth_verified, review_status, source, source_exam_type, source_batch,
+      sub_type, options_json, answer)
+      VALUES ('UPD-001', '行测', '旧模块', '旧题干', '广东', 2023, 2, 1, 'approved', '旧来源', 'provincial', 'OLD', '', '[]', ''),
+             ('REUSE-001', '行测', '判断推理', '保持不变', '广东', 2024, 5, 1, 'approved', '广东省考真题', 'provincial', 'GD-2024-A', '图形推理', '["甲","乙","丙","丁"]', 'B');
     INSERT INTO question_bank_items (bank_id, question_id, sort_order)
       SELECT 9, id, 0 FROM questions WHERE question_code = 'REUSE-001';
   `);
 
   const payload = JSON.stringify([
-    { row: 2, mode: "write", question: importedQuestion("NEW-001", "新增题干") },
-    { row: 3, mode: "write", question: importedQuestion("UPD-001", "更新题干") },
-    { row: 4, mode: "reuse", question: importedQuestion("REUSE-001", "保持不变") },
+    { row: 2, mode: "write", expectedVersion: 0, question: importedQuestion("NEW-001", "新增题干") },
+    { row: 3, mode: "write", expectedVersion: 2, question: importedQuestion("UPD-001", "更新题干") },
+    { row: 4, mode: "reuse", expectedVersion: 5, question: importedQuestion("REUSE-001", "保持不变") },
   ]);
   assert.ok(Buffer.byteLength(payload) < 768 * 1024);
 
@@ -113,10 +137,12 @@ test("question import writes, reuses, versions and retries one JSON batch idempo
   const runBatch = () => {
     db.exec("BEGIN");
     try {
-      db.prepare(questionsSql).run(payload, 77);
-      db.prepare(versionsSql).run(77, 12, payload, 77);
-      db.prepare(banksSql).run(2, payload);
-      db.prepare(resultsSql).run(77, 0, payload);
+      db.prepare(questionsSql).run(payload, 77, 5, 77, "lease-77",
+        "replace_external_metrics", "replace_external_metrics", "replace_external_metrics",
+        "replace_external_metrics", "replace_external_metrics", "replace_external_metrics");
+      db.prepare(versionsSql).run(77, 12, payload, 77, 5, 77, "lease-77");
+      db.prepare(banksSql).run(2, payload, 5, 77, "lease-77");
+      db.prepare(resultsSql).run(77, 0, payload, 5, 77, "lease-77");
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");

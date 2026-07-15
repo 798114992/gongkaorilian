@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import { Alert, Card, Col, Row, Statistic } from "antd";
-import AdminContentManager, { type AdminContentItem } from "../../AdminContentManager";
+import AdminContentManager, { type AdminContentItem, type ContentImportItem } from "../../AdminContentManager";
 import { useAdminSession } from "../../AdminShell";
 import AdminPageFrame from "../_components/AdminPageFrame";
 import { useAdminDomain } from "../_components/useAdminDomain";
 
 type RadarDomain = {
   content: AdminContentItem[];
+  contentImports?: ContentImportItem[];
   summary?: Array<{ content_type: string; status: string; count: number | string }>;
 };
 
@@ -45,6 +46,7 @@ export default function RadarPage() {
         <AdminContentManager
           scope="radar"
           items={data.content}
+          contentImports={data.contentImports}
           canEdit={canWrite}
           canReview={can("content.review")}
           canPublish={can("content.publish")}

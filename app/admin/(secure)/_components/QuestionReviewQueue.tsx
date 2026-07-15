@@ -23,6 +23,7 @@ import { adminApi } from "./adminApi";
 type ReviewStatus = "pending_review" | "rejected" | "approved";
 type ReviewQuestion = {
   id: number;
+  version: number;
   question_code: string;
   subject: string;
   module: string;
@@ -154,7 +155,8 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
     }
     setSubmitting(true);
     try {
-      await adminApi({ action: "adminReviewQuestion", id: reviewing.question.id, decision: reviewing.decision, reviewNote: reviewNote.trim() || null });
+      await adminApi({ action: "adminReviewQuestion", id: reviewing.question.id, expectedVersion: reviewing.question.version,
+        decision: reviewing.decision, reviewNote: reviewNote.trim() || null });
       onMessage(reviewing.decision === "approve" ? "真题已核验通过并重新计算题库价值指标" : "题目已驳回，上传人员可按原因修正后重新导入");
       setReviewing(null);
       setDetailQuestion(null);

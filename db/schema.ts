@@ -5,10 +5,11 @@ export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   inviteCode: text("invite_code").notNull().unique(),
   invitedBy: text("invited_by"),
-  membershipType: text("membership_type").notNull().default("duration"),
-  membershipEnd: text("membership_end"),
-  verifiedAt: text("verified_at"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    membershipType: text("membership_type").notNull().default("duration"),
+    membershipEnd: text("membership_end"),
+    verifiedAt: text("verified_at"),
+    analyticsEligible: integer("analytics_eligible").notNull().default(1),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
 export const userSessions = sqliteTable(
@@ -24,6 +25,20 @@ export const userSessions = sqliteTable(
   (table) => [index("user_sessions_user_expiry_idx").on(table.userId, table.expiresAt)],
 );
 
+export const deviceAccountLinks = sqliteTable(
+  "device_account_links",
+  {
+    deviceHash: text("device_hash").notNull(),
+    userId: text("user_id").notNull(),
+    firstSeenAt: text("first_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("device_account_links_device_user_uq").on(table.deviceHash, table.userId),
+    index("device_account_links_user_device_idx").on(table.userId, table.deviceHash),
+  ],
+);
+
 export const userDailyUsage = sqliteTable(
   "user_daily_usage",
   {
@@ -34,6 +49,20 @@ export const userDailyUsage = sqliteTable(
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [uniqueIndex("user_daily_usage_user_date_uq").on(table.userId, table.dateKey)],
+);
+
+export const userDailyAudioAccess = sqliteTable(
+  "user_daily_audio_access",
+  {
+    userId: text("user_id").notNull(),
+    dateKey: text("date_key").notNull(),
+    assetId: text("asset_id").notNull(),
+    grantedAt: text("granted_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("user_daily_audio_access_user_date_uq").on(table.userId, table.dateKey),
+    index("user_daily_audio_access_asset_idx").on(table.assetId, table.dateKey),
+  ],
 );
 
 export const dailyCheckins = sqliteTable(
@@ -308,6 +337,7 @@ export const contentItems = sqliteTable(
     contentKey: text("content_key").notNull().unique(),
     title: text("title").notNull(),
     payloadJson: text("payload_json").notNull(),
+    accessLevel: text("access_level").notNull().default("member"),
     status: text("status").notNull().default("draft"),
     publishAt: text("publish_at"),
     reviewNote: text("review_note").notNull().default(""),
@@ -332,6 +362,7 @@ export const contentItemVersions = sqliteTable(
     contentKey: text("content_key").notNull(),
     title: text("title").notNull(),
     payloadJson: text("payload_json").notNull(),
+    accessLevel: text("access_level").notNull().default("member"),
     status: text("status").notNull(),
     publishAt: text("publish_at"),
     changeType: text("change_type").notNull().default("update"),
@@ -340,6 +371,134 @@ export const contentItemVersions = sqliteTable(
   (table) => [
     uniqueIndex("content_item_versions_content_version_uq").on(table.contentId, table.version),
     index("content_item_versions_content_idx").on(table.contentId, table.createdAt),
+  ],
+);
+
+export const contentImports = sqliteTable(
+  "content_imports",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    contentType: text("content_type").notNull(),
+    fileName: text("file_name").notNull(),
+    fileSize: integer("file_size").notNull().default(0),
+    fileHash: text("file_hash").notNull(),
+    sourceName: text("source_name").notNull().default(""),
+    sourceUrl: text("source_url").notNull().default(""),
+    sourcePublishedAt: text("source_published_at"),
+    dataVersion: text("data_version").notNull().default(""),
+    duplicateStrategy: text("duplicate_strategy").notNull().default("reject"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    totalRows: integer("total_rows").notNull().default(0),
+    uploadedRows: integer("uploaded_rows").notNull().default(0),
+    processedRows: integer("processed_rows").notNull().default(0),
+    importedRows: integer("imported_rows").notNull().default(0),
+    failedRows: integer("failed_rows").notNull().default(0),
+    duplicateRows: integer("duplicate_rows").notNull().default(0),
+    totalChunks: integer("total_chunks").notNull().default(0),
+    uploadedChunks: integer("uploaded_chunks").notNull().default(0),
+    processedChunks: integer("processed_chunks").notNull().default(0),
+    cancelRequested: integer("cancel_requested").notNull().default(0),
+    status: text("status").notNull().default("uploading"),
+    errorSummary: text("error_summary").notNull().default(""),
+    dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
+    nextRetryAt: text("next_retry_at"),
+    reviewStatus: text("review_status").notNull().default("draft"),
+    createdBy: integer("created_by"),
+    submittedBy: integer("submitted_by"),
+    submittedAt: text("submitted_at"),
+    reviewedBy: integer("reviewed_by"),
+    reviewedAt: text("reviewed_at"),
+    reviewNote: text("review_note").notNull().default(""),
+    publishedAt: text("published_at"),
+    rolledBackAt: text("rolled_back_at"),
+    sealedAt: text("sealed_at"),
+    startedAt: text("started_at"),
+    lastHeartbeatAt: text("last_heartbeat_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("content_imports_status_idx").on(table.status, table.updatedAt),
+    index("content_imports_hash_idx").on(table.fileHash, table.createdAt),
+  ],
+);
+
+export const contentImportChunks = sqliteTable(
+  "content_import_chunks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    importId: integer("import_id").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    rowOffset: integer("row_offset").notNull(),
+    rowCount: integer("row_count").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    rowsJson: text("rows_json").notNull(),
+    status: text("status").notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    importedRows: integer("imported_rows").notNull().default(0),
+    failedRows: integer("failed_rows").notNull().default(0),
+    duplicateRows: integer("duplicate_rows").notNull().default(0),
+    errorSummary: text("error_summary").notNull().default(""),
+    leaseToken: text("lease_token"),
+    leaseUntil: text("lease_until"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("content_import_chunks_import_index_uq").on(table.importId, table.chunkIndex),
+    index("content_import_chunks_status_idx").on(table.importId, table.status, table.chunkIndex),
+  ],
+);
+
+export const contentImportRowResults = sqliteTable(
+  "content_import_row_results",
+  {
+    importId: integer("import_id").notNull(),
+    rowIndex: integer("row_index").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    status: text("status").notNull(),
+    contentKey: text("content_key").notNull().default(""),
+    contentVersion: integer("content_version"),
+    message: text("message").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("content_import_row_results_import_row_uq").on(table.importId, table.rowIndex),
+    index("content_import_row_results_status_idx").on(table.importId, table.status),
+  ],
+);
+
+export const contentImportKeys = sqliteTable(
+  "content_import_keys",
+  {
+    importId: integer("import_id").notNull(),
+    rowIndex: integer("row_index").notNull(),
+    contentKey: text("content_key").notNull(),
+  },
+  (table) => [
+    uniqueIndex("content_import_keys_import_row_uq").on(table.importId, table.rowIndex),
+    uniqueIndex("content_import_keys_import_key_uq").on(table.importId, table.contentKey),
+  ],
+);
+
+export const contentImportErrors = sqliteTable(
+  "content_import_errors",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    importId: integer("import_id").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    rowIndex: integer("row_index").notNull(),
+    contentKey: text("content_key").notNull().default(""),
+    kind: text("kind").notNull(),
+    message: text("message").notNull(),
+    rawJson: text("raw_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("content_import_errors_import_row_kind_uq").on(table.importId, table.rowIndex, table.kind),
+    index("content_import_errors_import_idx").on(table.importId, table.rowIndex),
   ],
 );
 
@@ -381,6 +540,7 @@ export const mediaAssets = sqliteTable(
     checksum: text("checksum").notNull(),
     storage: text("storage").notNull().default("r2"),
     fallbackData: text("fallback_data"),
+    accessLevel: text("access_level").notNull().default("member"),
     status: text("status").notNull().default("active"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -494,6 +654,7 @@ export const questionImports = sqliteTable("question_imports", {
   fileName: text("file_name").notNull(),
   fileSize: integer("file_size").notNull().default(0),
   fileHash: text("file_hash").notNull().default(""),
+  duplicateStrategy: text("duplicate_strategy").notNull().default("reject"),
   totalRows: integer("total_rows").notNull().default(0),
   uploadedRows: integer("uploaded_rows").notNull().default(0),
   processedRows: integer("processed_rows").notNull().default(0),
@@ -550,6 +711,7 @@ export const questionImportCodes = sqliteTable(
     chunkIndex: integer("chunk_index").notNull(),
     rowNumber: integer("row_number").notNull(),
     questionCode: text("question_code").notNull(),
+    baseVersion: integer("base_version").notNull().default(0),
   },
   (table) => [
     uniqueIndex("question_import_codes_import_row_uq").on(table.importId, table.rowNumber),

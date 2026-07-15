@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 test("the 公考日练 product shell has a real preview boundary", async () => {
@@ -323,12 +323,12 @@ test("database migrations include durable product, content, analytics and questi
   assert.match(allMigrations, /ADD `reviewed_at`/);
 });
 
-test("the 日练电台 supports dynamic series, fixed audio fallback and the requested controls", async () => {
-  const [hub, audioData, serviceWorker, audioFile] = await Promise.all([
+test("the 日练电台 supports dynamic series, protected audio fallback and the requested controls", async () => {
+  const [hub, audioData, serviceWorker, publicFiles] = await Promise.all([
     readFile(new URL("../app/AudioHub.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/data/audio.ts", import.meta.url), "utf8"),
     readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
-    stat(new URL("../public/audio/july-flood-resilience.wav", import.meta.url)),
+    readdir(new URL("../public/", import.meta.url)),
   ]);
   assert.match(hub, /时政电台/);
   assert.match(hub, /申论晨读/);
@@ -356,13 +356,16 @@ test("the 日练电台 supports dynamic series, fixed audio fallback and the req
   assert.match(hub, /audio-floating-player/);
   assert.match(hub, /关闭播放/);
   assert.match(hub, /MediaMetadata/);
-  assert.match(hub, /gongkao-audio-v2/);
+  assert.match(hub, /gongkao-audio-v3/);
+  assert.match(hub, /track\.accessLevel === "free"/);
+  assert.match(hub, /会员节目需在线校验使用权益/);
   assert.match(audioData, /audioUrl/);
   assert.match(audioData, /新法解读/);
-  assert.ok(audioFile.size > 100_000);
+  assert.equal(publicFiles.includes("audio"), false);
+  assert.doesNotMatch(audioData, /audioUrl:\s*["']\/audio\//);
   assert.match(serviceWorker, /pathname\.startsWith\("\/api\/"\)/);
-  assert.match(serviceWorker, /request\.destination === "audio"/);
-  assert.match(serviceWorker, /request\.headers\.has\("range"\)/);
-  assert.match(serviceWorker, /responseFromCachedRange/);
-  assert.match(serviceWorker, /Content-Range/);
+  assert.match(serviceWorker, /gongkao-audio-v3/);
+  assert.doesNotMatch(serviceWorker, /request\.destination === "audio"/);
+  assert.doesNotMatch(serviceWorker, /pathname\.startsWith\("\/audio\/"\)/);
+  assert.doesNotMatch(serviceWorker, /responseFromCachedRange/);
 });

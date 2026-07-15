@@ -7,6 +7,7 @@ import type { AudioTrack } from "./data/audio";
 type Filter = string;
 type VoicePreset = "newsMale" | "newsFemale" | "youngMale" | "youngFemale";
 type PlaybackEngine = "audio" | "speech" | null;
+const AUDIO_CACHE_NAME = "gongkao-audio-v3";
 
 type SpeechCursor = {
   trackId: string;
@@ -42,6 +43,21 @@ const audioReviewReferenceTime = Date.now();
 
 function trackSeriesId(track: AudioTrack) {
   return track.seriesId?.trim() || track.category || "other";
+}
+
+function managedAudioUrl(value: string | undefined) {
+  if (!value?.startsWith("/api/app?")) return false;
+  try {
+    const url = new URL(value, "https://gongkao-rilian.invalid");
+    return url.origin === "https://gongkao-rilian.invalid"
+      && url.pathname === "/api/app"
+      && Array.from(url.searchParams.keys()).length === 1
+      && /^[0-9a-f-]{36}$/i.test(url.searchParams.get("media") ?? "");
+  } catch { return false; }
+}
+
+function canCacheOffline(track: AudioTrack) {
+  return track.accessLevel === "free" && managedAudioUrl(track.audioUrl);
 }
 
 const voiceOptions: Array<{ id: VoicePreset; label: string; tone: string; pitch: number; rateOffset: number; hints: string[] }> = [
@@ -274,15 +290,14 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     return () => window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
   }, []);
 
+  const offlineCacheableIds = useMemo(() => curatedTracks.filter(canCacheOffline).map((track) => track.id).sort(), [curatedTracks]);
+  const offlineCacheableKey = offlineCacheableIds.join("|");
+
   useEffect(() => {
     const audioElement = audioRef.current;
-    const cachedTimer = window.setTimeout(() => {
-      try { setCachedIds(JSON.parse(window.localStorage.getItem("gkrl-cached-audio") ?? "[]") as string[]); }
-      catch { setCachedIds([]); }
-    }, 0);
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
+    if ("caches" in window) void caches.delete("gongkao-audio-v2");
     return () => {
-      window.clearTimeout(cachedTimer);
       sessionRef.current += 1;
       engineRef.current = null;
       window.speechSynthesis?.cancel();
@@ -291,6 +306,19 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const allowed = new Set(offlineCacheableKey.split("|").filter(Boolean));
+    const cachedTimer = window.setTimeout(() => {
+      let stored: string[] = [];
+      try { stored = JSON.parse(window.localStorage.getItem("gkrl-cached-audio") ?? "[]") as string[]; }
+      catch { stored = []; }
+      const next = stored.filter((id) => allowed.has(id));
+      setCachedIds(next);
+      window.localStorage.setItem("gkrl-cached-audio", JSON.stringify(next));
+    }, 0);
+    return () => window.clearTimeout(cachedTimer);
+  }, [offlineCacheableKey]);
 
   const stop = useCallback((message?: string, reason = "stop") => {
     const stoppedTrack = activeTrackRef.current;
@@ -528,8 +556,8 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   }, [emitAudioBehavior, emitPlaybackLifecycle, notify, startSpeech, stop]);
 
   const cachedAudioSource = useCallback(async (track: AudioTrack) => {
-    if (!track.audioUrl || !("caches" in window)) return null;
-    const cache = await caches.open("gongkao-audio-v2");
+    if (!canCacheOffline(track) || !track.audioUrl || !("caches" in window)) return null;
+    const cache = await caches.open(AUDIO_CACHE_NAME);
     const request = new Request(new URL(track.audioUrl, window.location.origin).toString());
     const response = await cache.match(request);
     if (!response) return null;
@@ -726,9 +754,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
   const cacheTrack = async (track: AudioTrack) => {
     if (!track.audioUrl) return notify("系统合成朗读依赖当前设备语音，不标记为离线音频");
+    if (!canCacheOffline(track)) return notify("会员节目需在线校验使用权益；仅免费试听音频支持离线缓冲");
     if (!("caches" in window)) return notify("当前浏览器暂不支持离线缓冲");
     try {
-      const cache = await caches.open("gongkao-audio-v2");
+      const cache = await caches.open(AUDIO_CACHE_NAME);
       const request = new Request(new URL(track.audioUrl, window.location.origin).toString());
       const response = await fetch(request);
       if (!response.ok && response.type !== "opaque") throw new Error("audio fetch failed");
@@ -815,7 +844,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         <section className="audio-category-board" aria-label="音频精选分类">
           {series.map((item) => {
             const categoryTracks = tracksBySeries.get(item.id) ?? [];
-            const hasCacheableAudio = categoryTracks.some((track) => Boolean(track.audioUrl));
+            const hasCacheableAudio = categoryTracks.some(canCacheOffline);
             return (
               <article className={`audio-category-card ${item.id === "current" || item.id === "essay" || item.id === "wrong" ? item.id : "dynamic"}`} style={{ "--series-color": item.color } as React.CSSProperties} key={item.id}>
                 <header><span>{item.icon}</span><div><h3>{item.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 可倍速/循环${hasCacheableAudio ? "/离线缓冲" : ""}` : item.empty}</p></div></header>
@@ -841,14 +870,15 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             )
           ) : visibleTracks.map((track) => {
             const selected = selectedTrack?.id === track.id;
-            const cached = cachedIds.includes(track.id);
+            const cacheable = canCacheOffline(track);
+            const cached = cacheable && cachedIds.includes(track.id);
             return (
               <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
                 <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
                 <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
                   <span>{track.kicker}{track.audioUrl && !speechFallbackIds.includes(track.id) ? " · 真人/固定音频" : " · 系统合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
                 </button>
-                <button className={`cache-button ${cached ? "cached" : ""}`} disabled={!track.audioUrl} onClick={() => void cacheTrack(track)} aria-label={track.audioUrl ? `离线缓冲${track.title}` : `${track.title}使用设备语音，不能标记为离线音频`}>{track.audioUrl ? (cached ? "✓ 已缓冲" : "↓ 离线") : "设备语音"}</button>
+                <button className={`cache-button ${cached ? "cached" : ""}`} disabled={!cacheable} onClick={() => void cacheTrack(track)} aria-label={cacheable ? `离线缓冲${track.title}` : track.audioUrl ? `${track.title}为会员在线音频，不能离线缓存` : `${track.title}使用设备语音，不能标记为离线音频`}>{cacheable ? (cached ? "✓ 已缓冲" : "↓ 离线") : track.audioUrl ? "在线收听" : "设备语音"}</button>
               </article>
             );
           })}

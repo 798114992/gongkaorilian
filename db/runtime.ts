@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
+const RUNTIME_SCHEMA_VERSION = "17";
 
 export function getD1() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -35,6 +36,7 @@ async function initializeSchema() {
       membership_type TEXT NOT NULL DEFAULT 'duration',
       membership_end TEXT,
       verified_at TEXT,
+      analytics_eligible INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_sessions (
@@ -46,6 +48,16 @@ async function initializeSchema() {
       last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS user_sessions_user_expiry_idx ON user_sessions(user_id, expires_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS device_account_links (
+      device_hash TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS device_account_links_device_user_uq
+      ON device_account_links(device_hash, user_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS device_account_links_user_device_idx
+      ON device_account_links(user_id, device_hash)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_usage (
       user_id TEXT NOT NULL,
       date_key TEXT NOT NULL,
@@ -54,6 +66,14 @@ async function initializeSchema() {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_daily_usage_user_date_uq ON user_daily_usage(user_id, date_key)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_audio_access (
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      asset_id TEXT NOT NULL,
+      granted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS user_daily_audio_access_user_date_uq ON user_daily_audio_access(user_id, date_key)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS user_daily_audio_access_asset_idx ON user_daily_audio_access(asset_id, date_key)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS daily_checkins (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -214,8 +234,14 @@ async function initializeSchema() {
       content_key TEXT NOT NULL UNIQUE,
       title TEXT NOT NULL,
       payload_json TEXT NOT NULL,
+      access_level TEXT NOT NULL DEFAULT 'member',
       status TEXT NOT NULL DEFAULT 'draft',
       publish_at TEXT,
+      review_note TEXT NOT NULL DEFAULT '',
+      submitted_by INTEGER,
+      submitted_at TEXT,
+      reviewed_by INTEGER,
+      reviewed_at TEXT,
       version INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -231,6 +257,7 @@ async function initializeSchema() {
       content_key TEXT NOT NULL,
       title TEXT NOT NULL,
       payload_json TEXT NOT NULL,
+      access_level TEXT NOT NULL DEFAULT 'member',
       status TEXT NOT NULL,
       publish_at TEXT,
       change_type TEXT NOT NULL DEFAULT 'update',
@@ -238,6 +265,104 @@ async function initializeSchema() {
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_item_versions_content_version_uq ON content_item_versions(content_id, version)"),
     db.prepare("CREATE INDEX IF NOT EXISTS content_item_versions_content_idx ON content_item_versions(content_id, created_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_imports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      file_hash TEXT NOT NULL,
+      source_name TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      source_published_at TEXT,
+      data_version TEXT NOT NULL DEFAULT '',
+      duplicate_strategy TEXT NOT NULL DEFAULT 'reject',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      uploaded_rows INTEGER NOT NULL DEFAULT 0,
+      processed_rows INTEGER NOT NULL DEFAULT 0,
+      imported_rows INTEGER NOT NULL DEFAULT 0,
+      failed_rows INTEGER NOT NULL DEFAULT 0,
+      duplicate_rows INTEGER NOT NULL DEFAULT 0,
+      total_chunks INTEGER NOT NULL DEFAULT 0,
+      uploaded_chunks INTEGER NOT NULL DEFAULT 0,
+      processed_chunks INTEGER NOT NULL DEFAULT 0,
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'uploading',
+      error_summary TEXT NOT NULL DEFAULT '',
+      dispatch_attempts INTEGER NOT NULL DEFAULT 0,
+      next_retry_at TEXT,
+      review_status TEXT NOT NULL DEFAULT 'draft',
+      created_by INTEGER,
+      submitted_by INTEGER,
+      submitted_at TEXT,
+      reviewed_by INTEGER,
+      reviewed_at TEXT,
+      review_note TEXT NOT NULL DEFAULT '',
+      published_at TEXT,
+      rolled_back_at TEXT,
+      sealed_at TEXT,
+      started_at TEXT,
+      last_heartbeat_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_imports_status_idx ON content_imports(status, updated_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_imports_hash_idx ON content_imports(file_hash, created_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_import_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      import_id INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      row_offset INTEGER NOT NULL,
+      row_count INTEGER NOT NULL,
+      payload_hash TEXT NOT NULL,
+      rows_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      imported_rows INTEGER NOT NULL DEFAULT 0,
+      failed_rows INTEGER NOT NULL DEFAULT 0,
+      duplicate_rows INTEGER NOT NULL DEFAULT 0,
+      error_summary TEXT NOT NULL DEFAULT '',
+      lease_token TEXT,
+      lease_until TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_import_chunks_import_index_uq ON content_import_chunks(import_id, chunk_index)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_import_chunks_status_idx ON content_import_chunks(import_id, status, chunk_index)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_import_row_results (
+      import_id INTEGER NOT NULL,
+      row_index INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      content_key TEXT NOT NULL DEFAULT '',
+      content_version INTEGER,
+      message TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_import_row_results_import_row_uq ON content_import_row_results(import_id, row_index)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_import_row_results_status_idx ON content_import_row_results(import_id, status)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_import_keys (
+      import_id INTEGER NOT NULL,
+      row_index INTEGER NOT NULL,
+      content_key TEXT NOT NULL
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_import_keys_import_row_uq ON content_import_keys(import_id, row_index)"),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_import_keys_import_key_uq ON content_import_keys(import_id, content_key)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS content_import_errors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      import_id INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      row_index INTEGER NOT NULL,
+      content_key TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS content_import_errors_import_row_kind_uq ON content_import_errors(import_id, row_index, kind)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_import_errors_import_idx ON content_import_errors(import_id, row_index)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS content_reports (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -267,6 +392,7 @@ async function initializeSchema() {
       checksum TEXT NOT NULL,
       storage TEXT NOT NULL DEFAULT 'r2',
       fallback_data TEXT,
+      access_level TEXT NOT NULL DEFAULT 'member',
       status TEXT NOT NULL DEFAULT 'active',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -361,6 +487,7 @@ async function initializeSchema() {
       file_name TEXT NOT NULL,
       file_size INTEGER NOT NULL DEFAULT 0,
       file_hash TEXT NOT NULL DEFAULT '',
+      duplicate_strategy TEXT NOT NULL DEFAULT 'reject',
       total_rows INTEGER NOT NULL DEFAULT 0,
       uploaded_rows INTEGER NOT NULL DEFAULT 0,
       processed_rows INTEGER NOT NULL DEFAULT 0,
@@ -407,7 +534,8 @@ async function initializeSchema() {
       import_id INTEGER NOT NULL,
       chunk_index INTEGER NOT NULL,
       row_number INTEGER NOT NULL,
-      question_code TEXT NOT NULL
+      question_code TEXT NOT NULL,
+      base_version INTEGER NOT NULL DEFAULT 0
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS question_import_codes_import_row_uq ON question_import_codes(import_id, row_number)"),
     db.prepare("CREATE INDEX IF NOT EXISTS question_import_codes_code_idx ON question_import_codes(import_id, question_code)"),
@@ -580,6 +708,7 @@ async function initializeSchema() {
   await ensureColumns(db, "users", [
     { name: "membership_type", definition: "TEXT NOT NULL DEFAULT 'duration'" },
     { name: "verified_at", definition: "TEXT" },
+    { name: "analytics_eligible", definition: "INTEGER NOT NULL DEFAULT 1" },
   ]);
   await ensureColumns(db, "redemption_codes", [
     { name: "grant_type", definition: "TEXT NOT NULL DEFAULT 'duration'" },
@@ -601,6 +730,50 @@ async function initializeSchema() {
   ]);
   await ensureColumns(db, "content_items", [
     { name: "version", definition: "INTEGER NOT NULL DEFAULT 1" },
+    { name: "access_level", definition: "TEXT NOT NULL DEFAULT 'member'" },
+    { name: "review_note", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "submitted_by", definition: "INTEGER" },
+    { name: "submitted_at", definition: "TEXT" },
+    { name: "reviewed_by", definition: "INTEGER" },
+    { name: "reviewed_at", definition: "TEXT" },
+  ]);
+  await ensureColumns(db, "content_item_versions", [
+    { name: "access_level", definition: "TEXT NOT NULL DEFAULT 'member'" },
+  ]);
+  await ensureColumns(db, "media_assets", [
+    { name: "access_level", definition: "TEXT NOT NULL DEFAULT 'member'" },
+  ]);
+  await ensureColumns(db, "content_imports", [
+    { name: "duplicate_strategy", definition: "TEXT NOT NULL DEFAULT 'reject'" },
+    { name: "dispatch_attempts", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "next_retry_at", definition: "TEXT" },
+    { name: "review_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
+    { name: "submitted_by", definition: "INTEGER" },
+    { name: "submitted_at", definition: "TEXT" },
+    { name: "reviewed_by", definition: "INTEGER" },
+    { name: "reviewed_at", definition: "TEXT" },
+    { name: "review_note", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "published_at", definition: "TEXT" },
+    { name: "rolled_back_at", definition: "TEXT" },
+  ]);
+  await db.batch([
+    db.prepare(`UPDATE content_items SET status = 'draft', publish_at = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE status IN ('published','scheduled') AND (
+        (content_type IN ('morning_read','current_affairs','essay_micro','audio_track') AND (
+          COALESCE(json_extract(payload_json,'$.source'),'') = ''
+          OR COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.sourceDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'exam_notice' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.publishDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'exam_event' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.eventDate'),'') NOT GLOB '????-??-??'))
+        OR (content_type = 'job_position' AND (COALESCE(json_extract(payload_json,'$.sourceUrl'),'') NOT LIKE 'https://%'
+          OR COALESCE(json_extract(payload_json,'$.updatedAt'),'') NOT GLOB '????-??-??'
+          OR COALESCE(json_extract(payload_json,'$.dataVersion'),0) < 1))
+      )`),
+    db.prepare("UPDATE content_items SET access_level = 'member' WHERE access_level NOT IN ('free','member')"),
+    db.prepare("UPDATE content_item_versions SET access_level = 'member' WHERE access_level NOT IN ('free','member')"),
+    db.prepare("UPDATE media_assets SET access_level = 'member' WHERE access_level NOT IN ('free','member')"),
   ]);
   await ensureColumns(db, "questions", [
     { name: "source_exam_type", definition: "TEXT NOT NULL DEFAULT ''" },
@@ -635,6 +808,7 @@ async function initializeSchema() {
   ]);
   await ensureColumns(db, "question_imports", [
     { name: "file_hash", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "duplicate_strategy", definition: "TEXT NOT NULL DEFAULT 'reject'" },
     { name: "uploaded_rows", definition: "INTEGER NOT NULL DEFAULT 0" },
     { name: "processed_rows", definition: "INTEGER NOT NULL DEFAULT 0" },
     { name: "duplicate_rows", definition: "INTEGER NOT NULL DEFAULT 0" },
@@ -649,6 +823,9 @@ async function initializeSchema() {
     { name: "lease_token", definition: "TEXT" },
     { name: "lease_until", definition: "TEXT" },
     { name: "updated_at", definition: "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" },
+  ]);
+  await ensureColumns(db, "question_import_codes", [
+    { name: "base_version", definition: "INTEGER NOT NULL DEFAULT 0" },
   ]);
   // Pre-persistent imports only stored aggregate counters, not their source
   // rows. They cannot be resumed safely after a deploy, so surface them as a
@@ -685,6 +862,16 @@ async function initializeSchema() {
   // set truth_verified=1 and review_status='approved'.
   await db.prepare(`UPDATE questions SET review_status = 'pending_review', truth_verified_at = NULL
     WHERE truth_verified = 0 AND review_status = 'approved'`).run();
+  // Historical uploads pre-dating byte-signature validation may contain an
+  // active browser-executable payload (for example SVG/HTML).  Keep the row
+  // for audit purposes, but make it impossible to serve until an operator
+  // replaces it with a verified, canonical media type.
+  await db.prepare(`UPDATE media_assets SET status = 'disabled', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active' AND lower(content_type) NOT IN (
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'audio/wav', 'audio/mpeg', 'audio/aac', 'audio/mp4', 'audio/ogg',
+      'application/pdf'
+    )`).run();
   await ensureColumns(db, "practice_attempts", [
     { name: "attempt_key", definition: "TEXT" },
     { name: "practice_session_id", definition: "TEXT" },
@@ -695,29 +882,24 @@ async function initializeSchema() {
   await ensureColumns(db, "essay_attempts", [
     { name: "rewrite_draft", definition: "TEXT NOT NULL DEFAULT ''" },
   ]);
-  // daily_checkins is the only trusted source for streaks. Recover historical
-  // rows only from server-owned mixed daily sessions that reached their target.
-  // Remove earlier overly-broad backfills first so their user/date unique row
-  // cannot mask a later valid mixed session.
+  // daily_checkins is the only trusted source for streaks. Keep cleanup for
+  // legacy invalid rows, but do not infer a full-day check-in merely from the
+  // practice step: morning/essay may still be unfinished.
   await db.prepare(`DELETE FROM daily_checkins
     WHERE session_id IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM practice_sessions ps WHERE ps.id = daily_checkins.session_id
         AND ps.user_id = daily_checkins.user_id AND ps.date_key = daily_checkins.date_key
         AND ps.kind = 'daily' AND ps.mode = 'mixed' AND ps.status = 'completed'
-        AND ps.target_count > 0 AND ps.answered_count >= ps.target_count
+        AND ps.target_count >= 5 AND ps.answered_count >= ps.target_count
     )`).run();
-  await db.prepare(`INSERT OR IGNORE INTO daily_checkins
-    (user_id, date_key, session_id, source, completed_at)
-    SELECT user_id, date_key, id, 'daily_practice', COALESCE(completed_at, updated_at, created_at, CURRENT_TIMESTAMP)
-    FROM practice_sessions
-    WHERE status = 'completed' AND kind = 'daily' AND mode = 'mixed'
-      AND target_count > 0 AND answered_count >= target_count`).run();
   await db.prepare(`UPDATE admin_audit_logs
     SET details_json = '{"redacted":true,"reason":"legacy sensitive audit payload removed"}'
     WHERE lower(details_json) LIKE '%"password"%'
        OR lower(details_json) LIKE '%"admintoken"%'
        OR lower(details_json) LIKE '%"authorization"%'
        OR lower(details_json) LIKE '%"codes"%'`).run();
+  await db.prepare(`DELETE FROM user_sessions
+    WHERE revoked_at IS NOT NULL OR datetime(expires_at) <= CURRENT_TIMESTAMP`).run();
   await db.prepare(`UPDATE practice_attempts SET practice_session_id = NULL
     WHERE practice_session_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM practice_attempts newer
@@ -728,13 +910,57 @@ async function initializeSchema() {
   await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS practice_attempts_user_key_uq ON practice_attempts(user_id, attempt_key)").run();
   await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS practice_attempts_session_question_uq
     ON practice_attempts(user_id, practice_session_id, question_code) WHERE practice_session_id IS NOT NULL`).run();
+  await db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+    .bind(RUNTIME_SCHEMA_VERSION).run();
   schemaReady = true;
+}
+
+async function deployedSchemaIsCurrent() {
+  const db = getD1();
+  try {
+    const state = await db.prepare(`SELECT
+      COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+      EXISTS(SELECT 1 FROM pragma_table_info('content_items') WHERE name = 'access_level') AS content_access,
+      (SELECT COUNT(*) FROM pragma_table_info('content_items')
+        WHERE name IN ('review_note','submitted_by','submitted_at','reviewed_by','reviewed_at')) AS content_review_columns,
+      EXISTS(SELECT 1 FROM pragma_table_info('media_assets') WHERE name = 'access_level') AS media_access,
+      EXISTS(SELECT 1 FROM pragma_table_info('users') WHERE name = 'analytics_eligible') AS analytics_eligible,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_account_links') AS device_account_links,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_imports') AS content_imports,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS content_chunks`)
+      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number }>();
+    const current = Boolean(state && Number(state.content_access) === 1 && Number(state.media_access) === 1
+      && Number(state.content_review_columns) === 5 && Number(state.analytics_eligible) === 1
+      && Number(state.device_account_links) === 1
+      && Number(state.content_imports) === 1 && Number(state.content_chunks) === 1
+      && String(state.version ?? "") === RUNTIME_SCHEMA_VERSION);
+    if (!current) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function ensureSchema() {
   if (schemaReady) return;
   if (!schemaPromise) {
-    schemaPromise = initializeSchema().catch((error) => {
+    schemaPromise = (async () => {
+      if (await deployedSchemaIsCurrent()) {
+        schemaReady = true;
+        return;
+      }
+      // Production deployments must apply the tracked Drizzle migrations.
+      // The legacy bootstrap contains more statements than D1 Free permits in
+      // one Worker invocation, so it is opt-in for local recovery only instead
+      // of silently exhausting the cold-request query budget.
+      const allowLegacyBootstrap = String((env as unknown as { RUNTIME_SCHEMA_BOOTSTRAP?: string })
+        .RUNTIME_SCHEMA_BOOTSTRAP ?? "").toLowerCase() === "local-only";
+      if (!allowLegacyBootstrap) {
+        throw new Error("数据库迁移尚未应用；请先部署 drizzle 迁移，禁止在生产请求中执行超预算建表。");
+      }
+      await initializeSchema();
+    })().catch((error) => {
       schemaPromise = null;
       throw error;
     });

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import styles from "./CommercePaywall.module.css";
 
-export type PaywallReason = "daily_limit" | "second_bank" | "essay" | "value_loop";
+export type PaywallReason = "daily_limit" | "second_bank" | "essay" | "radar" | "value_loop";
 
 type CommerceProduct = {
   id: string;
@@ -78,6 +78,11 @@ const reasonCopy: Record<PaywallReason, { eyebrow: string; title: string; detail
     eyebrow: "申论真题微练",
     title: "解锁申论作答、自评与二次改写",
     detail: "开通后继续刚才的申论真题，草稿、自评和回炉节点都会保留。",
+  },
+  radar: {
+    eyebrow: "公考雷达完整筛选",
+    title: "用真实报考条件筛职位，不再手翻整张表",
+    detail: "开通后可同时筛国考和多个省考，按学历、专业、身份等条件匹配，并收藏、横向对比职位。",
   },
   value_loop: {
     eyebrow: "公考日练终身会员",

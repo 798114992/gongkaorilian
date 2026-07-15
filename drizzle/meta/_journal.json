@@ -134,6 +134,13 @@
       "when": 1784123151671,
       "tag": "0018_hot_blazing_skull",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1784141288434,
+      "tag": "0019_great_rage",
+      "breakpoints": true
     }
   ]
 }

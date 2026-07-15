@@ -579,6 +579,118 @@ export const analyticsEvents = sqliteTable(
   ],
 );
 
+export const quizTests = sqliteTable(
+  "quiz_tests",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    questionCount: integer("question_count").notNull().default(10),
+    status: text("status").notNull().default("draft"),
+    shareTitle: text("share_title").notNull().default(""),
+    disclaimer: text("disclaimer").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("quiz_tests_slug_uq").on(table.slug),
+    index("quiz_tests_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+export const quizQuestions = sqliteTable(
+  "quiz_questions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    quizId: text("quiz_id").notNull(),
+    questionCode: text("question_code").notNull(),
+    stem: text("stem").notNull(),
+    optionsJson: text("options_json").notNull().default("[]"),
+    correctIndex: integer("correct_index").notNull().default(0),
+    explanation: text("explanation").notNull().default(""),
+    category: text("category").notNull().default("办公室语言"),
+    difficulty: text("difficulty").notNull().default("medium"),
+    weight: integer("weight").notNull().default(10),
+    status: text("status").notNull().default("draft"),
+    reviewStatus: text("review_status").notNull().default("pending_review"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("quiz_questions_code_uq").on(table.questionCode),
+    index("quiz_questions_quiz_status_idx").on(table.quizId, table.status, table.reviewStatus),
+    index("quiz_questions_category_idx").on(table.quizId, table.category),
+  ],
+);
+
+export const quizResultLevels = sqliteTable(
+  "quiz_result_levels",
+  {
+    id: text("id").primaryKey(),
+    quizId: text("quiz_id").notNull(),
+    levelKey: text("level_key").notNull(),
+    title: text("title").notNull(),
+    minScore: integer("min_score").notNull(),
+    maxScore: integer("max_score").notNull(),
+    theme: text("theme").notNull().default("blue"),
+    description: text("description").notNull().default(""),
+    shareText: text("share_text").notNull().default(""),
+    badgeLabel: text("badge_label").notNull().default(""),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status").notNull().default("active"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("quiz_result_levels_quiz_key_uq").on(table.quizId, table.levelKey),
+    index("quiz_result_levels_quiz_score_idx").on(table.quizId, table.minScore, table.maxScore),
+  ],
+);
+
+export const quizAttempts = sqliteTable(
+  "quiz_attempts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    quizId: text("quiz_id").notNull(),
+    challengeId: text("challenge_id").notNull().default(""),
+    sourceAttemptId: text("source_attempt_id").notNull().default(""),
+    questionIdsJson: text("question_ids_json").notNull().default("[]"),
+    optionOrdersJson: text("option_orders_json").notNull().default("[]"),
+    answersJson: text("answers_json").notNull().default("{}"),
+    correctCount: integer("correct_count"),
+    resultKey: text("result_key").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    startedAt: text("started_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+    shareCount: integer("share_count").notNull().default(0),
+  },
+  (table) => [
+    index("quiz_attempts_user_time_idx").on(table.userId, table.startedAt),
+    index("quiz_attempts_quiz_status_idx").on(table.quizId, table.status, table.completedAt),
+    index("quiz_attempts_source_idx").on(table.sourceAttemptId),
+  ],
+);
+
+export const quizShareEvents = sqliteTable(
+  "quiz_share_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").notNull(),
+    quizId: text("quiz_id").notNull(),
+    attemptId: text("attempt_id").notNull().default(""),
+    challengeId: text("challenge_id").notNull().default(""),
+    eventName: text("event_name").notNull(),
+    eventData: text("event_data").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("quiz_share_events_quiz_time_idx").on(table.quizId, table.createdAt),
+    index("quiz_share_events_attempt_idx").on(table.attemptId, table.eventName),
+  ],
+);
+
 export const questionBanks = sqliteTable("question_banks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   bankCode: text("bank_code").notNull().unique(),

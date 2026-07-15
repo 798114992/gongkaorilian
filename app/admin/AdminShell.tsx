@@ -16,6 +16,7 @@ import {
   SafetyCertificateOutlined,
   SearchOutlined,
   SettingOutlined,
+  SmileOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import {
@@ -114,6 +115,15 @@ const NAVIGATION: NavigationItem[] = [
     icon: <FileTextOutlined />,
     section: "内容运营",
     keywords: "晨读 时政 申论 电台 发布 审核",
+  },
+  {
+    key: "quizzes",
+    label: "趣味测试",
+    path: "/admin/quizzes",
+    permission: "content.read",
+    icon: <SmileOutlined />,
+    section: "内容运营",
+    keywords: "局长思维 测试 分享 裂变 题目 段位",
   },
   {
     key: "question-banks",

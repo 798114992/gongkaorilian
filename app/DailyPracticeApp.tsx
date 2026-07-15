@@ -8,6 +8,7 @@ import type { PracticeDay, Question } from "./data/content";
 import type { AudioTrack } from "./data/audio";
 import AudioHub from "./AudioHub";
 import CommercePaywall, { type PaywallReason } from "./CommercePaywall";
+import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 
 type Tab = "today" | "banks" | "audio" | "review" | "report" | "calendar" | "me";
@@ -3386,7 +3387,10 @@ export default function DailyPracticeApp() {
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>}{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}{quickBank && <button onClick={() => void startPractice("mixed", [quickBank.code], { kind: "bank" })}>单本加练</button>}</div>
             </section>
 
+            <QuizFeature notify={notify} trackEvent={trackEvent} />
+
             {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天可练5题，完整体验学习闭环</h3></div><button onClick={() => setTab("me")}>去激活</button></section>}
+
 
             <section className="daily-timeline-card"><div className="compact-section-heading"><div><span>今日{dailyStepItems.length}项安排</span><h2>{dailyConfigurationBlocking ? "题库补全后自动生成行测" : allDailyDone ? "已完成，明天继续" : "按顺序做，不用自己想"}</h2></div><em>{dailyConfigurationBlocking ? "待配置" : allDailyDone ? "收工" : `还剩${enabledDailySteps.length - doneCount}项`}</em></div>
               <div className="daily-timeline">{dailyStepItems.map((item, index) => {

@@ -41,6 +41,7 @@ test("all migrations build a fresh database with the current durable schema", ()
     "question_import_chunks", "question_import_codes", "question_import_row_results",
     "question_import_errors", "question_versions", "products", "orders",
     "payment_transactions", "refunds", "entitlement_grants", "content_reports", "device_account_links",
+    "quiz_tests", "quiz_questions", "quiz_result_levels", "quiz_attempts", "quiz_share_events",
   ]) assert.ok(tables.has(table), `missing migrated table ${table}`);
 
   for (const column of ["attempt_key", "practice_session_id", "selected_answer", "was_due", "apply_status"])
@@ -58,10 +59,14 @@ test("all migrations build a fresh database with the current durable schema", ()
   for (const table of ["content_items", "content_item_versions", "media_assets"])
     assert.ok(tableColumns(db, table).includes("access_level"), `missing ${table}.access_level`);
 
-  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "17");
-  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_system_seed_version'").get().value, "2026-07-15-v1");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "19");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_system_seed_version'").get().value, "2026-07-15-v2");
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_content_seed_version'").get().value, "1");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_quiz_seed_version'").get().value, "1");
   assert.equal(db.prepare("SELECT price_cents FROM products WHERE id='gkrl-lifetime-2980'").get().price_cents, 2980);
+  assert.equal(db.prepare("SELECT question_count FROM quiz_tests WHERE id='quiz-juzhang-thinking'").get().question_count, 10);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id='quiz-juzhang-thinking' AND status='published' AND review_status='approved'").get().n, 12);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM quiz_result_levels WHERE quiz_id='quiz-juzhang-thinking' AND status='active'").get().n, 4);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM question_banks WHERE status='draft'").get().n, 8);
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM question_banks qb WHERE qb.status='published' AND NOT EXISTS (
     SELECT 1 FROM question_bank_items qbi JOIN questions q ON q.id=qbi.question_id
@@ -428,7 +433,8 @@ test("migration journal, SQL files and snapshots form one continuous chain", asy
   ));
   for (const table of ["question_import_chunks", "question_versions", "content_imports", "content_import_chunks",
     "content_import_row_results", "content_import_keys", "content_import_errors", "products", "orders",
-    "entitlement_grants", "content_reports", "device_account_links"])
+    "entitlement_grants", "content_reports", "device_account_links", "quiz_tests", "quiz_questions",
+    "quiz_result_levels", "quiz_attempts", "quiz_share_events"])
     assert.ok(finalSnapshot.tables[table], `final snapshot is missing ${table}`);
 });
 

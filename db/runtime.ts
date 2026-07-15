@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
-const RUNTIME_SCHEMA_VERSION = "18";
+const RUNTIME_SCHEMA_VERSION = "19";
 
 export function getD1() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -24,6 +24,93 @@ async function ensureColumns(
       await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column.name} ${column.definition}`).run();
     }
   }
+}
+
+function quizSchemaStatements(db: D1Database) {
+  return [
+    db.prepare(`CREATE TABLE IF NOT EXISTS quiz_tests (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      question_count INTEGER NOT NULL DEFAULT 10,
+      status TEXT NOT NULL DEFAULT 'draft',
+      share_title TEXT NOT NULL DEFAULT '',
+      disclaimer TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS quiz_tests_slug_uq ON quiz_tests(slug)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_tests_status_idx ON quiz_tests(status, updated_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS quiz_questions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quiz_id TEXT NOT NULL,
+      question_code TEXT NOT NULL UNIQUE,
+      stem TEXT NOT NULL,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      correct_index INTEGER NOT NULL DEFAULT 0,
+      explanation TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT '办公室语言',
+      difficulty TEXT NOT NULL DEFAULT 'medium',
+      weight INTEGER NOT NULL DEFAULT 10,
+      status TEXT NOT NULL DEFAULT 'draft',
+      review_status TEXT NOT NULL DEFAULT 'pending_review',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS quiz_questions_code_uq ON quiz_questions(question_code)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_questions_quiz_status_idx ON quiz_questions(quiz_id, status, review_status)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_questions_category_idx ON quiz_questions(quiz_id, category)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS quiz_result_levels (
+      id TEXT PRIMARY KEY,
+      quiz_id TEXT NOT NULL,
+      level_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      min_score INTEGER NOT NULL,
+      max_score INTEGER NOT NULL,
+      theme TEXT NOT NULL DEFAULT 'blue',
+      description TEXT NOT NULL DEFAULT '',
+      share_text TEXT NOT NULL DEFAULT '',
+      badge_label TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS quiz_result_levels_quiz_key_uq ON quiz_result_levels(quiz_id, level_key)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_result_levels_quiz_score_idx ON quiz_result_levels(quiz_id, min_score, max_score)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS quiz_attempts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      quiz_id TEXT NOT NULL,
+      challenge_id TEXT NOT NULL DEFAULT '',
+      source_attempt_id TEXT NOT NULL DEFAULT '',
+      question_ids_json TEXT NOT NULL DEFAULT '[]',
+      option_orders_json TEXT NOT NULL DEFAULT '[]',
+      answers_json TEXT NOT NULL DEFAULT '{}',
+      correct_count INTEGER,
+      result_key TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT,
+      share_count INTEGER NOT NULL DEFAULT 0
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_attempts_user_time_idx ON quiz_attempts(user_id, started_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_attempts_quiz_status_idx ON quiz_attempts(quiz_id, status, completed_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_attempts_source_idx ON quiz_attempts(source_attempt_id)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS quiz_share_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      quiz_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL DEFAULT '',
+      challenge_id TEXT NOT NULL DEFAULT '',
+      event_name TEXT NOT NULL,
+      event_data TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_share_events_quiz_time_idx ON quiz_share_events(quiz_id, created_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS quiz_share_events_attempt_idx ON quiz_share_events(attempt_id, event_name)"),
+  ];
 }
 
 async function initializeSchema() {
@@ -419,6 +506,7 @@ async function initializeSchema() {
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS analytics_events_name_time_idx ON analytics_events(event_name, created_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS analytics_events_user_time_idx ON analytics_events(user_id, created_at)"),
+    ...quizSchemaStatements(db),
     db.prepare(`CREATE TABLE IF NOT EXISTS question_banks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       bank_code TEXT NOT NULL UNIQUE,
@@ -941,13 +1029,17 @@ async function deployedSchemaIsCurrent() {
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_account_links') AS device_account_links,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_imports') AS content_imports,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS content_chunks,
-      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS daily_steps`)
-      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number; daily_steps: number }>();
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS daily_steps,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS quiz_tests,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_questions') AS quiz_questions,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_attempts') AS quiz_attempts`)
+      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number; daily_steps: number; quiz_tests: number; quiz_questions: number; quiz_attempts: number }>();
     const current = Boolean(state && Number(state.content_access) === 1 && Number(state.media_access) === 1
       && Number(state.content_review_columns) === 5 && Number(state.analytics_eligible) === 1
       && Number(state.device_account_links) === 1
       && Number(state.content_imports) === 1 && Number(state.content_chunks) === 1
       && Number(state.daily_steps) === 1
+      && Number(state.quiz_tests) === 1 && Number(state.quiz_questions) === 1 && Number(state.quiz_attempts) === 1
       && String(state.version ?? "") === RUNTIME_SCHEMA_VERSION);
     if (!current) return false;
     return true;
@@ -976,6 +1068,23 @@ async function upgradeRuntimeSchemaFrom17() {
       ON daily_step_completions(user_id, date_key, step)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS daily_step_completions_user_completed_idx
       ON daily_step_completions(user_id, completed_at)`),
+    ...quizSchemaStatements(db),
+    db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
+  ]);
+  return true;
+}
+
+async function upgradeRuntimeSchemaFrom18() {
+  const db = getD1();
+  const state = await db.prepare(`SELECT
+    COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS prior_schema_ready,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS quiz_ready`)
+    .first<{ version: string; prior_schema_ready: number; quiz_ready: number }>();
+  if (String(state?.version ?? "") !== "18" || Number(state?.prior_schema_ready ?? 0) !== 1 || Number(state?.quiz_ready ?? 0) !== 0) return false;
+  await db.batch([
+    ...quizSchemaStatements(db),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -993,7 +1102,7 @@ export async function ensureSchema() {
       // Sites deployments do not execute Drizzle SQL automatically. Keep each
       // production upgrade bounded and explicit so a cold request can advance
       // one known schema version without invoking the legacy full bootstrap.
-      if (await upgradeRuntimeSchemaFrom17()) {
+      if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18()) {
         schemaReady = true;
         return;
       }

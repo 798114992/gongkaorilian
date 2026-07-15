@@ -50,7 +50,7 @@ const LEGACY_DEVICE_SESSION_PREFIX = "device1";
 let processAnonymousSecret: Uint8Array | null = null;
 let defaultsReady = false;
 let defaultsPromise: Promise<void> | null = null;
-const DEFAULT_SEED_VERSION = "2026-07-15-v1";
+const DEFAULT_SEED_VERSION = "2026-07-15-v2";
 const passiveBootstrapWindows = new Map<string, { startedAt: number; count: number }>();
 const publicWriteWindows = new Map<string, { startedAt: number; count: number }>();
 const PUBLIC_ACTIONS = new Set([
@@ -58,6 +58,7 @@ const PUBLIC_ACTIONS = new Set([
   "getEssayPracticeBatch", "saveEssayAttempt", "submitPracticeAnswer", "updateQuestionMeta",
   "submitContentReport", "getPracticeSessionSummary", "recordDailyStep", "recordDailyCheckin", "authorizeAudioPlayback", "bindInvite", "redeem",
   "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
+  "getQuiz", "startQuizAttempt", "submitQuizAnswer", "completeQuizAttempt", "recordQuizShare",
 ]);
 const PASSIVE_PUBLIC_ACTIONS = new Set([
   "searchJobPositions", "getEssayPracticeBatch", "getPracticeSessionSummary", "getCommerceProducts",
@@ -68,6 +69,12 @@ const EVENT_NAMES = new Set([
   "app_open",
   "module_open",
   "quiz_submit",
+  "quiz_view",
+  "quiz_start",
+  "quiz_answer",
+  "quiz_complete",
+  "quiz_share",
+  "quiz_challenge_open",
   "redeem_success",
   "invite_copy",
   "audio_play",
@@ -107,6 +114,9 @@ const EVENT_NAMES = new Set([
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
+const DEFAULT_QUIZ_ID = "quiz-juzhang-thinking";
+const DEFAULT_QUIZ_SLUG = "juzhang-thinking";
+const DEFAULT_QUIZ_QUESTION_COUNT = 10;
 const SELECTABLE_PROVINCES = new Set([
   "北京", "天津", "上海", "重庆", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
   "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东",
@@ -137,6 +147,158 @@ const DEFAULT_STRATEGY = {
   dueShare: 0.6,
   urgentDays: 30,
 };
+const DEFAULT_QUIZ_RESULTS = [
+  {
+    key: "free_soul",
+    title: "体制外自由灵魂",
+    minScore: 0,
+    maxScore: 0,
+    theme: "neon",
+    badgeLabel: "隐藏结果",
+    description: "恭喜你，精准避开了全部正确答案。你不是听不懂，只是每次都坚定地选择了更快乐的答案。办公室暂时装不下你。",
+    shareText: "我精准避开了10道正确答案，这种成绩你很难复制。",
+  },
+  {
+    key: "staff",
+    title: "科员你肯定稳了",
+    minScore: 1,
+    maxScore: 4,
+    theme: "blue",
+    badgeLabel: "稳住基本盘",
+    description: "已经能听懂一部分要求，剩下的主要依靠会议纪要和热心同事。",
+    shareText: "我先把科员稳住了，你能混到哪一级？",
+  },
+  {
+    key: "section_chief",
+    title: "科长你肯定稳了",
+    minScore: 5,
+    maxScore: 7,
+    theme: "orange",
+    badgeLabel: "会听话也会办事",
+    description: "能听懂话，也知道什么时候应该假装没听懂。距离局长思维，只差两道题和一个保温杯。",
+    shareText: "我差一点就局长了，你来试试？",
+  },
+  {
+    key: "director",
+    title: "局长你肯定稳了",
+    minScore: 8,
+    maxScore: 10,
+    theme: "gold",
+    badgeLabel: "统筹能力暴露",
+    description: "领导刚说完上半句，你已经开始统筹下半年的工作了。建议低调，不要过早暴露统筹能力。",
+    shareText: "我测出了局长思维，你敢用同一套题挑战吗？",
+  },
+];
+const DEFAULT_QUIZ_QUESTIONS = [
+  {
+    code: "jz-001",
+    stem: "领导说“这个事原则上是不可以的”，你最应该理解为？",
+    options: ["可以，但需要补齐条件和流程", "绝对不可以，马上撤退", "可以，且最好现在就发朋友圈庆祝"],
+    correctIndex: 0,
+    explanation: "“原则上”通常意味着存在边界和例外，关键是把依据、流程、风险说清楚。",
+    category: "体制内语言",
+    difficulty: "easy",
+  },
+  {
+    code: "jz-002",
+    stem: "领导说“我不想再说第二遍”，此时最稳的动作是？",
+    options: ["记录要点并复述确认", "点头如捣蒜但什么都不记", "认真回答：那我申请听第三遍"],
+    correctIndex: 0,
+    explanation: "高压表达背后是对执行确定性的要求，记录和复述能降低误解。",
+    category: "执行沟通",
+    difficulty: "easy",
+  },
+  {
+    code: "jz-003",
+    stem: "会上有人说“这个问题历史原因比较复杂”，你应该优先想到？",
+    options: ["先梳理现状、历史沿革和责任边界", "复杂就别碰，自动进入玄学领域", "建议把历史原因交给历史老师"],
+    correctIndex: 0,
+    explanation: "复杂问题不能先站队，先把事实链、时间线和责任边界拆开。",
+    category: "问题拆解",
+    difficulty: "medium",
+  },
+  {
+    code: "jz-004",
+    stem: "领导说“你先拿个初稿出来”，初稿最好是什么状态？",
+    options: ["结构完整、关键数据留痕、可继续修改", "随便写三行，突出一个初", "用空白文档表达无限可能"],
+    correctIndex: 0,
+    explanation: "初稿不是草率稿，而是让讨论有抓手的版本。",
+    category: "材料写作",
+    difficulty: "easy",
+  },
+  {
+    code: "jz-005",
+    stem: "同事说“这个事以前一直这么干”，你最该补一句？",
+    options: ["现在的依据、风险和口径是否仍然一致", "以前这么干，那以后也永远这么干", "那就把以前请回来继续干"],
+    correctIndex: 0,
+    explanation: "惯例不能代替依据，尤其政策、权限、流程变化后要重新核对。",
+    category: "风险意识",
+    difficulty: "medium",
+  },
+  {
+    code: "jz-006",
+    stem: "领导让你“再完善一下”，最应该先完善哪类内容？",
+    options: ["目标、依据、措施、责任人和时间节点", "字体颜色，先把文档打扮得很努力", "增加十页空话，让厚度战胜质疑"],
+    correctIndex: 0,
+    explanation: "完善通常不是加字数，而是让方案更能落地、更可追踪。",
+    category: "方案意识",
+    difficulty: "medium",
+  },
+  {
+    code: "jz-007",
+    stem: "有人在群里问一个敏感事项，你还不确定口径，最稳的是？",
+    options: ["先不公开表态，核对依据后统一回复", "凭感觉秒回，主打一个热情", "发一个表情包让问题自然消失"],
+    correctIndex: 0,
+    explanation: "不确定口径时，快不如准；统一回复能避免信息不一致。",
+    category: "口径管理",
+    difficulty: "medium",
+  },
+  {
+    code: "jz-008",
+    stem: "领导说“你们研究一下”，真实含义更接近？",
+    options: ["形成可选方案、利弊和建议结论", "大家围坐一起认真沉默", "研究一下今天吃什么"],
+    correctIndex: 0,
+    explanation: "“研究”不是泛泛讨论，而是给决策者可判断的方案。",
+    category: "决策支持",
+    difficulty: "easy",
+  },
+  {
+    code: "jz-009",
+    stem: "材料里出现“持续推进、稳步提升、闭环管理”，你应避免什么？",
+    options: ["只堆词不落到具体动作和指标", "把这些词都背下来，考试和人生都稳了", "每个词后面加感叹号增强气势"],
+    correctIndex: 0,
+    explanation: "规范表达要服务于动作和指标，不然就是空转。",
+    category: "规范表达",
+    difficulty: "hard",
+  },
+  {
+    code: "jz-010",
+    stem: "一项工作跨多个部门，最容易出问题的是？",
+    options: ["牵头单位、配合单位、完成时限和反馈机制不清", "部门太多，会议室椅子不够", "大家都很忙，所以自动变成没人忙"],
+    correctIndex: 0,
+    explanation: "跨部门事项必须先明确牵头、配合、时限和反馈。",
+    category: "统筹协调",
+    difficulty: "hard",
+  },
+  {
+    code: "jz-011",
+    stem: "群众反映问题情绪很急，你第一步更应该做什么？",
+    options: ["先接住诉求，核实事实，再按权限流转", "立刻开始讲大道理", "告诉对方你也很急，双方达成情绪共鸣"],
+    correctIndex: 0,
+    explanation: "先稳定沟通、核实事实，再依法依规处理。",
+    category: "群众工作",
+    difficulty: "medium",
+  },
+  {
+    code: "jz-012",
+    stem: "上级临时要数据，手头数据还没完全校验，你应该？",
+    options: ["注明口径、时间点和待核部分，先报可确认数据", "为了显得完整，先补几个看起来圆润的数", "把表格做成彩色，转移注意力"],
+    correctIndex: 0,
+    explanation: "数据可以分阶段报，但口径、时间点和不确定部分必须说清楚。",
+    category: "数据意识",
+    difficulty: "hard",
+  },
+];
 const allowedWrongReasons = new Set(["知识点不会", "方法没想到", "计算失误", "审题错误", "时间不足", "蒙对了"]);
 const allowedConfidence = new Set(["confident", "hesitant", "guessed"]);
 const CONTENT_REPORT_REASONS = new Set([
@@ -462,6 +624,66 @@ type PublishedJobPosition = {
   sourceUrl: string;
   dataVersion: number;
   updatedAt: string;
+};
+
+type QuizTestRow = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  question_count: number;
+  status: string;
+  share_title: string;
+  disclaimer: string;
+};
+
+type QuizQuestionRow = {
+  id: number;
+  quiz_id: string;
+  question_code: string;
+  stem: string;
+  options_json: string;
+  correct_index: number;
+  explanation: string;
+  category: string;
+  difficulty: string;
+  weight: number;
+  status: string;
+  review_status: string;
+  sort_order: number;
+  updated_at?: string;
+};
+
+type QuizResultLevelRow = {
+  id: string;
+  quiz_id: string;
+  level_key: string;
+  title: string;
+  min_score: number;
+  max_score: number;
+  theme: string;
+  description: string;
+  share_text: string;
+  badge_label: string;
+  sort_order: number;
+  status: string;
+};
+
+type QuizAttemptRow = {
+  id: string;
+  user_id: string;
+  quiz_id: string;
+  challenge_id: string;
+  source_attempt_id: string;
+  question_ids_json: string;
+  option_orders_json: string;
+  answers_json: string;
+  correct_count: number | null;
+  result_key: string;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  share_count: number;
 };
 
 type LoadedExamProfile = {
@@ -1159,6 +1381,7 @@ async function seedDefaults() {
       VALUES ('public-institution', '事业单位职测', 'special', '全国', NULL, '综合', '事业单位职测与综合应用能力日练入口。', 'blue', 'draft')`),
   ]);
   await seedDefaultContentOnce();
+  await seedDefaultQuizOnce();
   await db.prepare(`INSERT INTO configs (key, value, updated_at)
     VALUES ('default_system_seed_version', ?, CURRENT_TIMESTAMP)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
@@ -1219,6 +1442,35 @@ async function seedDefaultContentOnce() {
     VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'free', 'published', 1)`)
     .bind(JSON.stringify(DEFAULT_STRATEGY)));
   statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_content_seed_version', '1')"));
+  await db.batch(statements);
+}
+
+async function seedDefaultQuizOnce() {
+  const db = getD1();
+  const marker = await db.prepare("SELECT value FROM configs WHERE key = 'default_quiz_seed_version'").first<{ value: string }>();
+  if (marker) return;
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`INSERT OR IGNORE INTO quiz_tests
+      (id, slug, title, description, question_count, status, share_title, disclaimer)
+      VALUES (?, ?, '测测你有没有“局长”思维？', '随机10道办公室语境判断题，测一测你的体制内语感。', ?, 'published',
+        '我测了测自己的局长思维，你也来试试？', '纯属趣味测试，不构成公务员录用、任职或晋升预测。')`)
+      .bind(DEFAULT_QUIZ_ID, DEFAULT_QUIZ_SLUG, DEFAULT_QUIZ_QUESTION_COUNT),
+  ];
+  DEFAULT_QUIZ_RESULTS.forEach((level, index) => {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO quiz_result_levels
+      (id, quiz_id, level_key, title, min_score, max_score, theme, description, share_text, badge_label, sort_order, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
+      .bind(`${DEFAULT_QUIZ_ID}-${level.key}`, DEFAULT_QUIZ_ID, level.key, level.title,
+        level.minScore, level.maxScore, level.theme, level.description, level.shareText, level.badgeLabel, index * 10));
+  });
+  DEFAULT_QUIZ_QUESTIONS.forEach((question, index) => {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO quiz_questions
+      (quiz_id, question_code, stem, options_json, correct_index, explanation, category, difficulty, weight, status, review_status, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 10, 'published', 'approved', ?)`)
+      .bind(DEFAULT_QUIZ_ID, question.code, question.stem, JSON.stringify(question.options), question.correctIndex,
+        question.explanation, question.category, question.difficulty, index * 10));
+  });
+  statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_quiz_seed_version', '1')"));
   await db.batch(statements);
 }
 
@@ -4884,6 +5136,496 @@ async function trackEvent(userId: string, payload: Record<string, unknown>) {
   if (eventData.length > 2_000) return json({ error: "事件数据过大" }, 400);
   await getD1().prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, ?, ?)").bind(userId, eventName, eventData).run();
   return json({ ok: true }, 201);
+}
+
+function parseStringArrayJson(value: unknown, fallback: string[] = []) {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseNumberArray(value: unknown, fallback: number[] = []) {
+  try {
+    const parsed = Array.isArray(value) ? value : JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? parsed.map(Number).filter((item) => Number.isInteger(item)) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseJsonObject(value: unknown) {
+  try {
+    const parsed = JSON.parse(String(value ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function publicQuiz(quiz: QuizTestRow, questionCount: number) {
+  return {
+    id: quiz.id,
+    slug: quiz.slug,
+    title: quiz.title,
+    description: quiz.description,
+    questionCount: Number(quiz.question_count || questionCount || DEFAULT_QUIZ_QUESTION_COUNT),
+    availableQuestionCount: questionCount,
+    shareTitle: quiz.share_title || "我测了测自己的局长思维，你也来试试？",
+    disclaimer: quiz.disclaimer || "纯属趣味测试，不构成公务员录用、任职或晋升预测。",
+  };
+}
+
+function quizOptionList(row: Pick<QuizQuestionRow, "options_json">) {
+  const options = parseStringArrayJson(row.options_json).slice(0, 6);
+  return options.length >= 2 ? options : ["认真处理", "先放一放", "假装没看见"];
+}
+
+function randomInt(max: number) {
+  if (max <= 1) return 0;
+  const bucket = new Uint32Array(1);
+  crypto.getRandomValues(bucket);
+  return bucket[0] % max;
+}
+
+function shuffledIndexes(length: number) {
+  const items = Array.from({ length }, (_, index) => index);
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const target = randomInt(index + 1);
+    [items[index], items[target]] = [items[target], items[index]];
+  }
+  return items;
+}
+
+function chooseQuizQuestions(rows: QuizQuestionRow[], count: number) {
+  const picked: QuizQuestionRow[] = [];
+  const byDifficulty = new Map<string, QuizQuestionRow[]>();
+  for (const row of rows) {
+    const key = String(row.difficulty || "medium").toLowerCase();
+    const list = byDifficulty.get(key) ?? [];
+    list.push(row);
+    byDifficulty.set(key, list);
+  }
+  const take = (difficulty: string, amount: number) => {
+    const pool = [...(byDifficulty.get(difficulty) ?? [])].sort(() => randomInt(3) - 1);
+    for (const item of pool) {
+      if (picked.length >= count || picked.filter((row) => row.category === item.category).length >= 2) continue;
+      if (!picked.some((row) => row.question_code === item.question_code)) picked.push(item);
+      if (picked.length >= amount) break;
+    }
+  };
+  take("easy", Math.min(3, count));
+  take("medium", Math.min(7, count));
+  take("hard", count);
+  const rest = [...rows].sort(() => randomInt(3) - 1);
+  for (const item of rest) {
+    if (picked.length >= count) break;
+    if (!picked.some((row) => row.question_code === item.question_code)) picked.push(item);
+  }
+  return picked.slice(0, count);
+}
+
+function publicQuizQuestion(row: QuizQuestionRow, optionOrder: number[], selectedIndex?: number) {
+  const options = quizOptionList(row);
+  const order = optionOrder.length === options.length ? optionOrder : options.map((_, index) => index);
+  return {
+    id: row.question_code,
+    stem: row.stem,
+    category: row.category,
+    difficulty: row.difficulty,
+    options: order.map((index) => options[index] ?? ""),
+    selectedIndex: Number.isInteger(selectedIndex) ? selectedIndex : null,
+  };
+}
+
+async function activeQuiz(slugValue: unknown = DEFAULT_QUIZ_SLUG) {
+  const slug = trimmed(slugValue, 80) || DEFAULT_QUIZ_SLUG;
+  const db = getD1();
+  const quiz = await db.prepare(`SELECT id, slug, title, description, question_count, status, share_title, disclaimer
+    FROM quiz_tests WHERE slug = ? AND status = 'published' LIMIT 1`).bind(slug).first<QuizTestRow>()
+    ?? await db.prepare(`SELECT id, slug, title, description, question_count, status, share_title, disclaimer
+      FROM quiz_tests WHERE id = ? AND status = 'published' LIMIT 1`).bind(DEFAULT_QUIZ_ID).first<QuizTestRow>();
+  if (!quiz) return null;
+  const count = await db.prepare(`SELECT COUNT(*) AS count FROM quiz_questions
+    WHERE quiz_id = ? AND status = 'published' AND review_status = 'approved'`)
+    .bind(quiz.id).first<{ count: number }>();
+  return { quiz, questionCount: Number(count?.count ?? 0) };
+}
+
+function publicQuizResult(level: QuizResultLevelRow | null, correctCount: number) {
+  const fallback = DEFAULT_QUIZ_RESULTS.find((item) => correctCount >= item.minScore && correctCount <= item.maxScore)
+    ?? DEFAULT_QUIZ_RESULTS.at(-1)!;
+  return {
+    key: level?.level_key ?? fallback.key,
+    title: level?.title ?? fallback.title,
+    theme: level?.theme ?? fallback.theme,
+    badgeLabel: level?.badge_label ?? fallback.badgeLabel,
+    description: level?.description ?? fallback.description,
+    shareText: level?.share_text ?? fallback.shareText,
+    minScore: Number(level?.min_score ?? fallback.minScore),
+    maxScore: Number(level?.max_score ?? fallback.maxScore),
+  };
+}
+
+async function getQuiz(userId: string, payload: Record<string, unknown>) {
+  const active = await activeQuiz(payload.slug);
+  if (!active) return json({ error: "趣味测试暂未发布" }, 404);
+  let challenge: Record<string, unknown> | null = null;
+  const challengeId = trimmed(payload.challengeId, 80);
+  if (challengeId) {
+    const source = await getD1().prepare(`SELECT qa.id, qa.correct_count, qa.result_key, qa.completed_at, qa.quiz_id,
+      COALESCE(qrl.title, '') AS result_title, COALESCE(qrl.theme, '') AS result_theme
+      FROM quiz_attempts qa
+      LEFT JOIN quiz_result_levels qrl ON qrl.quiz_id = qa.quiz_id AND qrl.level_key = qa.result_key
+      WHERE qa.id = ? AND qa.quiz_id = ? AND qa.status = 'completed' LIMIT 1`)
+      .bind(challengeId, active.quiz.id).first<Record<string, unknown>>();
+    if (source) {
+      challenge = {
+        attemptId: source.id,
+        correctCount: Number(source.correct_count ?? 0),
+        resultTitle: String(source.result_title || "好友的测试结果"),
+        resultTheme: String(source.result_theme || "blue"),
+        completedAt: source.completed_at,
+      };
+      await getD1().prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_challenge_open', ?)")
+        .bind(userId, JSON.stringify({ quizId: active.quiz.id, challengeId })).run().catch(() => undefined);
+    }
+  }
+  return json({ quiz: publicQuiz(active.quiz, active.questionCount), challenge });
+}
+
+async function startQuizAttempt(userId: string, payload: Record<string, unknown>) {
+  const active = await activeQuiz(payload.slug);
+  if (!active) return json({ error: "趣味测试暂未发布" }, 404);
+  const quiz = active.quiz;
+  const count = Math.max(1, Math.min(20, Number(quiz.question_count || DEFAULT_QUIZ_QUESTION_COUNT)));
+  if (active.questionCount < Math.min(count, DEFAULT_QUIZ_QUESTION_COUNT)) {
+    return json({ error: "已发布题目不足10道，请先在后台补齐并审核题目", code: "QUIZ_NOT_READY" }, 409);
+  }
+  const db = getD1();
+  const sourceAttemptId = trimmed(payload.challengeId, 80);
+  let questionIds: string[] = [];
+  let optionOrders: Record<string, number[]> = {};
+  if (sourceAttemptId) {
+    const source = await db.prepare(`SELECT question_ids_json, option_orders_json FROM quiz_attempts
+      WHERE id = ? AND quiz_id = ? AND status = 'completed' LIMIT 1`).bind(sourceAttemptId, quiz.id).first<QuizAttemptRow>();
+    if (source) {
+      questionIds = parseStringArrayJson(source.question_ids_json).slice(0, count);
+      optionOrders = parseJsonObject(source.option_orders_json) as Record<string, number[]>;
+    }
+  }
+  if (!questionIds.length) {
+    const rows = await db.prepare(`SELECT id, quiz_id, question_code, stem, options_json, correct_index, explanation,
+      category, difficulty, weight, status, review_status, sort_order, updated_at
+      FROM quiz_questions WHERE quiz_id = ? AND status = 'published' AND review_status = 'approved'
+      ORDER BY sort_order, id LIMIT 300`).bind(quiz.id).all<QuizQuestionRow>();
+    const picked = chooseQuizQuestions(rows.results, count);
+    questionIds = picked.map((row) => row.question_code);
+    optionOrders = Object.fromEntries(picked.map((row) => [row.question_code, shuffledIndexes(quizOptionList(row).length)]));
+  }
+  if (questionIds.length < count) return json({ error: "可用题目不足，暂时无法开始测试" }, 409);
+  const placeholders = questionIds.map(() => "?").join(",");
+  const questions = await db.prepare(`SELECT id, quiz_id, question_code, stem, options_json, correct_index, explanation,
+    category, difficulty, weight, status, review_status, sort_order, updated_at
+    FROM quiz_questions WHERE quiz_id = ? AND question_code IN (${placeholders})`)
+    .bind(quiz.id, ...questionIds).all<QuizQuestionRow>();
+  const byCode = new Map(questions.results.map((row) => [row.question_code, row]));
+  const orderedQuestions = questionIds.map((id) => byCode.get(id)).filter((row): row is QuizQuestionRow => Boolean(row));
+  if (orderedQuestions.length < count) return json({ error: "测试题目已更新，请重新开始" }, 409);
+  const attemptId = `quiz_${crypto.randomUUID()}`;
+  await db.prepare(`INSERT INTO quiz_attempts
+    (id, user_id, quiz_id, challenge_id, source_attempt_id, question_ids_json, option_orders_json, answers_json, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '{}', 'active')`)
+    .bind(attemptId, userId, quiz.id, sourceAttemptId, sourceAttemptId, JSON.stringify(questionIds),
+      JSON.stringify(optionOrders)).run();
+  await db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_start', ?)")
+    .bind(userId, JSON.stringify({ quizId: quiz.id, attemptId, challengeId: sourceAttemptId || "" })).run().catch(() => undefined);
+  return json({
+    attempt: {
+      id: attemptId,
+      quiz: publicQuiz(quiz, active.questionCount),
+      challengeId: sourceAttemptId || "",
+      questions: orderedQuestions.map((row) => publicQuizQuestion(row, parseNumberArray(optionOrders[row.question_code]))),
+      answered: {},
+    },
+  }, 201);
+}
+
+async function submitQuizAnswer(userId: string, payload: Record<string, unknown>) {
+  const attemptId = trimmed(payload.attemptId, 80);
+  const questionCode = trimmed(payload.questionId, 80);
+  const selectedIndex = Math.floor(Number(payload.selectedIndex));
+  if (!attemptId || !questionCode || !Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex > 5) {
+    return json({ error: "测试答案参数无效" }, 400);
+  }
+  const db = getD1();
+  const attempt = await db.prepare("SELECT * FROM quiz_attempts WHERE id = ? AND user_id = ? LIMIT 1")
+    .bind(attemptId, userId).first<QuizAttemptRow>();
+  if (!attempt) return json({ error: "测试记录不存在" }, 404);
+  if (attempt.status === "completed") return json({ error: "本次测试已结算，不能继续改答案" }, 409);
+  const questionIds = parseStringArrayJson(attempt.question_ids_json);
+  if (!questionIds.includes(questionCode)) return json({ error: "题目不属于本次测试" }, 400);
+  const optionOrders = parseJsonObject(attempt.option_orders_json) as Record<string, number[]>;
+  const order = parseNumberArray(optionOrders[questionCode]);
+  if (!order.length || selectedIndex >= order.length) return json({ error: "选项不属于本题" }, 400);
+  const answers = parseJsonObject(attempt.answers_json);
+  answers[questionCode] = selectedIndex;
+  await db.prepare("UPDATE quiz_attempts SET answers_json = ? WHERE id = ? AND user_id = ? AND status = 'active'")
+    .bind(JSON.stringify(answers), attemptId, userId).run();
+  await db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_answer', ?)")
+    .bind(userId, JSON.stringify({ quizId: attempt.quiz_id, attemptId, questionId: questionCode, answeredCount: Object.keys(answers).length })).run().catch(() => undefined);
+  return json({ ok: true, answeredCount: Object.keys(answers).length });
+}
+
+async function completeQuizAttempt(userId: string, payload: Record<string, unknown>) {
+  const attemptId = trimmed(payload.attemptId, 80);
+  if (!attemptId) return json({ error: "测试记录无效" }, 400);
+  const db = getD1();
+  const attempt = await db.prepare("SELECT * FROM quiz_attempts WHERE id = ? AND user_id = ? LIMIT 1")
+    .bind(attemptId, userId).first<QuizAttemptRow>();
+  if (!attempt) return json({ error: "测试记录不存在" }, 404);
+  const questionIds = parseStringArrayJson(attempt.question_ids_json);
+  const optionOrders = parseJsonObject(attempt.option_orders_json) as Record<string, number[]>;
+  const answers = parseJsonObject(attempt.answers_json);
+  if (questionIds.length === 0) return json({ error: "本次测试没有题目" }, 409);
+  if (Object.keys(answers).length < questionIds.length) return json({ error: "请先完成全部题目" }, 409);
+  const placeholders = questionIds.map(() => "?").join(",");
+  const rows = await db.prepare(`SELECT id, quiz_id, question_code, stem, options_json, correct_index, explanation,
+    category, difficulty, weight, status, review_status, sort_order, updated_at
+    FROM quiz_questions WHERE quiz_id = ? AND question_code IN (${placeholders})`)
+    .bind(attempt.quiz_id, ...questionIds).all<QuizQuestionRow>();
+  const byCode = new Map(rows.results.map((row) => [row.question_code, row]));
+  let correctCount = 0;
+  const review = questionIds.map((questionId, index) => {
+    const row = byCode.get(questionId);
+    if (!row) return null;
+    const options = quizOptionList(row);
+    const order = parseNumberArray(optionOrders[questionId]);
+    const selectedDisplayIndex = Math.floor(Number(answers[questionId]));
+    const selectedOriginalIndex = order[selectedDisplayIndex] ?? -1;
+    const correct = selectedOriginalIndex === Number(row.correct_index);
+    if (correct) correctCount += 1;
+    return {
+      number: index + 1,
+      id: row.question_code,
+      stem: row.stem,
+      selectedIndex: selectedDisplayIndex,
+      selectedOption: options[selectedOriginalIndex] ?? "",
+      correctIndex: order.indexOf(Number(row.correct_index)),
+      correctOption: options[Number(row.correct_index)] ?? "",
+      correct,
+      explanation: row.explanation,
+      category: row.category,
+    };
+  }).filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const level = await db.prepare(`SELECT id, quiz_id, level_key, title, min_score, max_score, theme, description,
+    share_text, badge_label, sort_order, status FROM quiz_result_levels
+    WHERE quiz_id = ? AND status = 'active' AND ? BETWEEN min_score AND max_score
+    ORDER BY sort_order LIMIT 1`).bind(attempt.quiz_id, correctCount).first<QuizResultLevelRow>();
+  const result = publicQuizResult(level, correctCount);
+  if (attempt.status !== "completed") {
+    await db.prepare(`UPDATE quiz_attempts SET correct_count = ?, result_key = ?, status = 'completed',
+      completed_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = 'active'`)
+      .bind(correctCount, result.key, attemptId, userId).run();
+  }
+  const quiz = await db.prepare("SELECT id, slug, title, description, question_count, status, share_title, disclaimer FROM quiz_tests WHERE id = ?")
+    .bind(attempt.quiz_id).first<QuizTestRow>();
+  await db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_complete', ?)")
+    .bind(userId, JSON.stringify({ quizId: attempt.quiz_id, attemptId, correctCount, resultKey: result.key })).run().catch(() => undefined);
+  const notableWrong = review.find((item) => !item.correct && item.selectedOption);
+  return json({
+    attemptId,
+    quiz: quiz ? publicQuiz(quiz, questionIds.length) : null,
+    correctCount,
+    total: questionIds.length,
+    scorePercent: Math.round((correctCount / Math.max(1, questionIds.length)) * 100),
+    result,
+    notableChoice: notableWrong ? `本次最离谱选择：${notableWrong.selectedOption}` : "本次高光：10道离谱选项，没有一个能动摇你。",
+    review,
+  });
+}
+
+async function recordQuizShare(userId: string, payload: Record<string, unknown>) {
+  const attemptId = trimmed(payload.attemptId, 80);
+  const eventName = new Set(["share_panel", "native_share", "copy_link", "poster_view"]).has(String(payload.eventName))
+    ? String(payload.eventName)
+    : "share_panel";
+  const eventData = JSON.stringify(payload.eventData ?? {});
+  const db = getD1();
+  const attempt = attemptId ? await db.prepare("SELECT id, quiz_id FROM quiz_attempts WHERE id = ? LIMIT 1")
+    .bind(attemptId).first<{ id: string; quiz_id: string }>() : null;
+  const quizId = attempt?.quiz_id ?? DEFAULT_QUIZ_ID;
+  await db.batch([
+    db.prepare(`INSERT INTO quiz_share_events (user_id, quiz_id, attempt_id, challenge_id, event_name, event_data)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(userId, quizId, attemptId, attemptId, eventName, eventData.length > 2000 ? "{}" : eventData),
+    db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_share', ?)")
+      .bind(userId, JSON.stringify({ quizId, attemptId, eventName })),
+    ...(attempt ? [db.prepare("UPDATE quiz_attempts SET share_count = share_count + 1 WHERE id = ?").bind(attemptId)] : []),
+  ]);
+  return json({ ok: true });
+}
+
+function normalizeQuizQuestionInput(raw: Record<string, unknown>, index = 0) {
+  const code = trimmed(raw.questionCode ?? raw.code ?? raw["题目编码"], 80) || `jz-custom-${crypto.randomUUID().slice(0, 8)}`;
+  const stem = trimmed(raw.stem ?? raw.question ?? raw["题干"], 500);
+  const options = Array.isArray(raw.options)
+    ? raw.options.map((item) => trimmed(item, 160)).filter(Boolean).slice(0, 6)
+    : [
+      trimmed(raw.optionA ?? raw.A ?? raw["A"], 160),
+      trimmed(raw.optionB ?? raw.B ?? raw["B"], 160),
+      trimmed(raw.optionC ?? raw.C ?? raw["C"], 160),
+      trimmed(raw.optionD ?? raw.D ?? raw["D"], 160),
+    ].filter(Boolean);
+  const answerRaw = String(raw.correctAnswer ?? raw.answer ?? raw["正确答案"] ?? raw.correctIndex ?? "A").trim().toUpperCase();
+  const correctIndex = /^[A-F]$/.test(answerRaw) ? answerRaw.charCodeAt(0) - 65 : Math.floor(Number(answerRaw));
+  const status = String(raw.status ?? raw["状态"] ?? "draft") === "published" ? "published" : "draft";
+  const reviewStatus = String(raw.reviewStatus ?? raw["审核状态"] ?? "pending_review") === "approved" ? "approved" : "pending_review";
+  return {
+    code,
+    stem,
+    options,
+    correctIndex: Number.isInteger(correctIndex) && correctIndex >= 0 && correctIndex < options.length ? correctIndex : 0,
+    explanation: trimmed(raw.explanation ?? raw["解析"], 800),
+    category: trimmed(raw.category ?? raw["分类"], 40) || "办公室语言",
+    difficulty: new Set(["easy", "medium", "hard"]).has(String(raw.difficulty ?? raw["难度"])) ? String(raw.difficulty ?? raw["难度"]) : "medium",
+    weight: Math.max(1, Math.min(100, Math.floor(Number(raw.weight ?? raw["权重"] ?? 10)) || 10)),
+    status,
+    reviewStatus,
+    sortOrder: Math.max(0, Math.floor(Number(raw.sortOrder ?? raw["排序"] ?? index * 10)) || 0),
+  };
+}
+
+async function adminListQuizzes(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.read")) return adminForbidden("content.read");
+  const db = getD1();
+  const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
+  const [tests, questions, levels, stats, shares] = await Promise.all([
+    db.prepare("SELECT * FROM quiz_tests ORDER BY updated_at DESC LIMIT 20").all<Record<string, unknown>>(),
+    db.prepare(`SELECT * FROM quiz_questions WHERE quiz_id = ?
+      ORDER BY CASE review_status WHEN 'pending_review' THEN 0 WHEN 'rejected' THEN 1 ELSE 2 END, sort_order, id LIMIT 500`)
+      .bind(quizId).all<Record<string, unknown>>(),
+    db.prepare("SELECT * FROM quiz_result_levels WHERE quiz_id = ? ORDER BY min_score, sort_order").bind(quizId).all<Record<string, unknown>>(),
+    db.prepare(`SELECT
+      COUNT(*) AS attempts,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      AVG(CASE WHEN status = 'completed' THEN correct_count ELSE NULL END) AS avg_score,
+      SUM(CASE WHEN result_key = 'director' THEN 1 ELSE 0 END) AS director_count
+      FROM quiz_attempts WHERE quiz_id = ?`).bind(quizId).first<Record<string, unknown>>(),
+    db.prepare("SELECT COUNT(*) AS shares FROM quiz_share_events WHERE quiz_id = ?").bind(quizId).first<Record<string, unknown>>(),
+  ]);
+  return json({
+    tests: tests.results,
+    questions: questions.results.map((row) => ({ ...row, options: parseStringArrayJson(row.options_json) })),
+    levels: levels.results,
+    summary: {
+      totalQuestions: questions.results.length,
+      publishedQuestions: questions.results.filter((row) => row.status === "published" && row.review_status === "approved").length,
+      attempts: Number(stats?.attempts ?? 0),
+      completed: Number(stats?.completed ?? 0),
+      avgScore: Number(stats?.avg_score ?? 0).toFixed(1),
+      directorCount: Number(stats?.director_count ?? 0),
+      shares: Number(shares?.shares ?? 0),
+    },
+  });
+}
+
+async function adminUpdateQuiz(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
+  const title = trimmed(payload.title, 80);
+  const description = trimmed(payload.description, 240);
+  const questionCount = Math.max(5, Math.min(20, Math.floor(Number(payload.questionCount ?? DEFAULT_QUIZ_QUESTION_COUNT)) || DEFAULT_QUIZ_QUESTION_COUNT));
+  const status = payload.status === "published" ? "published" : "draft";
+  const shareTitle = trimmed(payload.shareTitle, 120);
+  const disclaimer = trimmed(payload.disclaimer, 160);
+  if (!title) return json({ error: "测试标题不能为空" }, 400);
+  await getD1().prepare(`UPDATE quiz_tests SET title = ?, description = ?, question_count = ?, status = ?,
+    share_title = ?, disclaimer = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(title, description, questionCount, status, shareTitle, disclaimer, quizId).run();
+  return json({ ok: true, id: quizId });
+}
+
+async function adminUpsertQuizQuestion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
+  const question = normalizeQuizQuestionInput(payload);
+  if (!question.stem || question.options.length < 2) return json({ error: "题干和至少2个选项必填" }, 400);
+  await getD1().prepare(`INSERT INTO quiz_questions
+    (quiz_id, question_code, stem, options_json, correct_index, explanation, category, difficulty, weight, status, review_status, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(question_code) DO UPDATE SET
+      quiz_id = excluded.quiz_id, stem = excluded.stem, options_json = excluded.options_json,
+      correct_index = excluded.correct_index, explanation = excluded.explanation, category = excluded.category,
+      difficulty = excluded.difficulty, weight = excluded.weight, status = excluded.status,
+      review_status = excluded.review_status, sort_order = excluded.sort_order, updated_at = CURRENT_TIMESTAMP`)
+    .bind(quizId, question.code, question.stem, JSON.stringify(question.options), question.correctIndex,
+      question.explanation, question.category, question.difficulty, question.weight, question.status,
+      question.reviewStatus, question.sortOrder).run();
+  return json({ ok: true, id: question.code });
+}
+
+async function adminBulkUpsertQuizQuestions(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
+  const rows = Array.isArray(payload.rows) ? payload.rows.slice(0, 200) : [];
+  if (!rows.length) return json({ error: "没有可导入的题目行" }, 400);
+  const statements: D1PreparedStatement[] = [];
+  const errors: Array<{ row: number; message: string }> = [];
+  rows.forEach((raw, index) => {
+    const question = normalizeQuizQuestionInput(raw && typeof raw === "object" ? raw as Record<string, unknown> : {}, index);
+    if (!question.stem || question.options.length < 2) {
+      errors.push({ row: index + 2, message: "题干和至少2个选项必填" });
+      return;
+    }
+    statements.push(getD1().prepare(`INSERT INTO quiz_questions
+      (quiz_id, question_code, stem, options_json, correct_index, explanation, category, difficulty, weight, status, review_status, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(question_code) DO UPDATE SET
+        quiz_id = excluded.quiz_id, stem = excluded.stem, options_json = excluded.options_json,
+        correct_index = excluded.correct_index, explanation = excluded.explanation, category = excluded.category,
+        difficulty = excluded.difficulty, weight = excluded.weight, status = excluded.status,
+        review_status = excluded.review_status, sort_order = excluded.sort_order, updated_at = CURRENT_TIMESTAMP`)
+      .bind(quizId, question.code, question.stem, JSON.stringify(question.options), question.correctIndex,
+        question.explanation, question.category, question.difficulty, question.weight, question.status,
+        question.reviewStatus, question.sortOrder));
+  });
+  if (statements.length) await getD1().batch(statements);
+  return json({ ok: true, importedRows: statements.length, failedRows: errors.length, errors: errors.slice(0, 20) });
+}
+
+async function adminSetQuizQuestionStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const questionCode = trimmed(payload.questionCode, 80);
+  const status = payload.status === "published" ? "published" : payload.status === "archived" ? "archived" : "draft";
+  const reviewStatus = payload.reviewStatus === "approved" ? "approved" : payload.reviewStatus === "rejected" ? "rejected" : "pending_review";
+  if (!questionCode) return json({ error: "题目编码无效" }, 400);
+  await getD1().prepare("UPDATE quiz_questions SET status = ?, review_status = ?, updated_at = CURRENT_TIMESTAMP WHERE question_code = ?")
+    .bind(status, reviewStatus, questionCode).run();
+  return json({ ok: true, id: questionCode });
+}
+
+async function adminUpsertQuizResult(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
+  const levelKey = trimmed(payload.levelKey, 40);
+  const title = trimmed(payload.title, 60);
+  const minScore = Math.max(0, Math.min(20, Math.floor(Number(payload.minScore))));
+  const maxScore = Math.max(minScore, Math.min(20, Math.floor(Number(payload.maxScore))));
+  if (!levelKey || !title) return json({ error: "结果标识和标题不能为空" }, 400);
+  await getD1().prepare(`INSERT INTO quiz_result_levels
+    (id, quiz_id, level_key, title, min_score, max_score, theme, description, share_text, badge_label, sort_order, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(quiz_id, level_key) DO UPDATE SET title = excluded.title, min_score = excluded.min_score,
+      max_score = excluded.max_score, theme = excluded.theme, description = excluded.description,
+      share_text = excluded.share_text, badge_label = excluded.badge_label, sort_order = excluded.sort_order,
+      status = excluded.status, updated_at = CURRENT_TIMESTAMP`)
+    .bind(`${quizId}-${levelKey}`, quizId, levelKey, title, minScore, maxScore,
+      trimmed(payload.theme, 24) || "blue", trimmed(payload.description, 500), trimmed(payload.shareText, 160),
+      trimmed(payload.badgeLabel, 60), Math.floor(Number(payload.sortOrder ?? minScore * 10)) || 0,
+      payload.status === "disabled" ? "disabled" : "active").run();
+  return json({ ok: true, id: `${quizId}-${levelKey}` });
 }
 
 function getAdminSecret() {
@@ -9289,6 +10031,7 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminDashboard: ["dashboard.read"],
   adminList: ["system.read"],
   adminListQuestions: ["question.read"],
+  adminListQuizzes: ["content.read"],
   adminSearchQuestions: ["question.read"],
   adminListContent: ["content.read"],
   adminListRadar: ["radar.read"],
@@ -9340,6 +10083,11 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminResolveContentReport: ["content.write", "content.review"],
   adminReviewContent: ["content.review"],
   adminSubmitContentReview: ["content.write", "radar.write"],
+  adminUpdateQuiz: ["content.write"],
+  adminUpsertQuizQuestion: ["content.write"],
+  adminBulkUpsertQuizQuestions: ["content.write"],
+  adminSetQuizQuestionStatus: ["content.write"],
+  adminUpsertQuizResult: ["content.write"],
 };
 
 const ADMIN_WRITE_ACTIONS = new Set([
@@ -9352,11 +10100,13 @@ const ADMIN_WRITE_ACTIONS = new Set([
   "adminReviewContentImport", "adminRollbackContentImport",
   "adminRollbackQuestionVersion", "adminCreateUser", "adminSetUserStatus",
   "adminUpdateUser", "adminSetAnalyticsEligibility", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
+  "adminUpdateQuiz", "adminUpsertQuizQuestion", "adminBulkUpsertQuizQuestions", "adminSetQuizQuestionStatus", "adminUpsertQuizResult",
 ]);
 
 function resourceTypeForAdminAction(action: string) {
   if (action.includes("ContentReport")) return "content_report";
   if (action.includes("Media")) return "media";
+  if (action.includes("Quiz")) return "quiz";
   if (action.includes("QuestionImport")) return "question_import";
   if (action.includes("ContentImport")) return "content_import";
   if (action.includes("QuestionBank")) return "question_bank";
@@ -9428,6 +10178,7 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   if (action === "adminDashboard") response = await adminDashboard(payload);
   else if (action === "adminList") response = await adminList(payload);
   else if (action === "adminListQuestions") response = await adminListQuestions(payload);
+  else if (action === "adminListQuizzes") response = await adminListQuizzes(payload);
   else if (action === "adminListContent") response = await adminListContent(payload);
   else if (action === "adminListRadar") response = await adminListRadar(payload);
   else if (action === "adminListGrowth") response = await adminListGrowth(payload);
@@ -9479,6 +10230,11 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminResolveContentReport") response = await adminResolveContentReport(payload);
   else if (action === "adminSubmitContentReview") response = await adminSubmitContentReview(payload);
   else if (action === "adminReviewContent") response = await adminReviewContent(payload);
+  else if (action === "adminUpdateQuiz") response = await adminUpdateQuiz(payload);
+  else if (action === "adminUpsertQuizQuestion") response = await adminUpsertQuizQuestion(payload);
+  else if (action === "adminBulkUpsertQuizQuestions") response = await adminBulkUpsertQuizQuestions(payload);
+  else if (action === "adminSetQuizQuestionStatus") response = await adminSetQuizQuestionStatus(payload);
+  else if (action === "adminUpsertQuizResult") response = await adminUpsertQuizResult(payload);
   else return json({ error: "未知管理操作" }, 400);
   await auditAdminResponse(request, admin, action, payload, response);
   return response;
@@ -9647,6 +10403,11 @@ export async function POST(request: Request) {
     else if (action === "createTestOrder") response = await createTestOrder(request, identity.userId, payload);
     else if (action === "completeTestPayment") response = await completeTestPayment(request, identity.userId, payload);
     else if (action === "trackEvent") response = await trackEvent(identity.userId, payload);
+    else if (action === "getQuiz") response = await getQuiz(identity.userId, payload);
+    else if (action === "startQuizAttempt") response = await startQuizAttempt(identity.userId, payload);
+    else if (action === "submitQuizAnswer") response = await submitQuizAnswer(identity.userId, payload);
+    else if (action === "completeQuizAttempt") response = await completeQuizAttempt(identity.userId, payload);
+    else if (action === "recordQuizShare") response = await recordQuizShare(identity.userId, payload);
     else response = json({ error: "未知操作" }, 400);
     appendCookies(response.headers, identity.setCookie);
     return response;

@@ -81,6 +81,22 @@ export const dailyCheckins = sqliteTable(
   ],
 );
 
+export const dailyStepCompletions = sqliteTable(
+  "daily_step_completions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").notNull(),
+    dateKey: text("date_key").notNull(),
+    step: text("step").notNull(),
+    sourceRef: text("source_ref").notNull().default(""),
+    completedAt: text("completed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("daily_step_completions_user_date_step_uq").on(table.userId, table.dateKey, table.step),
+    index("daily_step_completions_user_completed_idx").on(table.userId, table.completedAt),
+  ],
+);
+
 export const userStates = sqliteTable("user_states", {
   userId: text("user_id").primaryKey(),
   progressJson: text("progress_json").notNull().default("{}"),

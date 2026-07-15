@@ -16,7 +16,7 @@ type PracticeMode = "mixed" | "review";
 type PlanMinutes = 10 | 30 | 45 | 60;
 type PracticeKind = "daily" | "review" | "bank" | "bonus" | "diagnostic";
 type PracticeStartOptions = { kind?: PracticeKind; limit?: number; forceNew?: boolean; focusModule?: string; focusSubTypes?: string[]; strictFocus?: boolean; focusLabel?: string; frequency?: string; importanceStars?: number; scoreRateMin?: number; scoreRateMax?: number };
-type EssayStartOptions = { bankCodes?: string[]; daily?: boolean; focusModule?: string; focusSubTypes?: string[]; questionCode?: string };
+type EssayStartOptions = { bankCodes?: string[]; daily?: boolean; focusModule?: string; focusSubTypes?: string[]; questionCode?: string; attemptDateKey?: string };
 type AnswerConfidence = "" | "confident" | "hesitant" | "guessed";
 type ContentReportReason = "stem_or_option" | "answer" | "explanation" | "asset" | "source_label" | "other";
 type ContentReportDraft = { questionId: string; reasonCode: ContentReportReason | ""; detail: string; submitted: boolean };
@@ -193,6 +193,21 @@ type EssayPracticeQuestion = {
   imageUrl: string;
   resourceUrl: string;
   truthLabel: string;
+  serverAttempt?: EssayAttemptSnapshot | null;
+};
+
+type EssayAttemptSnapshot = {
+  id: string;
+  dateKey: string;
+  stage: EssayStage;
+  firstDraft: string;
+  selfChecks: string[];
+  selfScore: number | null;
+  lossReasons: string[];
+  revisedDraft: string;
+  rewriteDraft: string;
+  elapsedSeconds: number;
+  rewriteDueAt: string;
 };
 
 type ExamEvent = {
@@ -335,6 +350,7 @@ type QuestionBank = {
   description: string;
   coverColor: string;
   questionCount: number;
+  availableEssayCount?: number;
   studiedCount: number;
   masteredCount: number;
   weakCount: number;
@@ -702,7 +718,7 @@ function mergeProgress(input?: Partial<Progress>): Progress {
   const validSession = activePractice?.version === 1
     && Array.isArray(activePractice.questionIds)
     && activePractice.questionIds.length <= 20
-    && ["daily", "review", "bank", "bonus"].includes(activePractice.kind)
+    && ["daily", "review", "bank", "bonus", "diagnostic"].includes(activePractice.kind)
     ? activePractice
     : null;
   return {
@@ -870,6 +886,46 @@ function bankTruthLabel(bank: QuestionBank) {
   return normalizeTruthLabel(region, bank.examYear, bank.scopeLabel || bank.name);
 }
 
+function normalizeEssayAttempt(raw: unknown): EssayAttemptSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const stage = String(item.stage ?? "draft") as EssayStage;
+  if (!Object.prototype.hasOwnProperty.call(essayStageOrder, stage)) return null;
+  const dateKey = safeText(item.dateKey, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null;
+  const selfScoreValue = item.selfScore === null || item.selfScore === undefined ? null : Number(item.selfScore);
+  return {
+    id: safeText(item.id, 80),
+    dateKey,
+    stage,
+    firstDraft: safeText(item.firstDraft, 8_000),
+    selfChecks: safeStringList(item.selfChecks, 20),
+    selfScore: selfScoreValue !== null && Number.isFinite(selfScoreValue) ? selfScoreValue : null,
+    lossReasons: safeStringList(item.lossReasons, 20),
+    revisedDraft: safeText(item.revisedDraft, 8_000),
+    rewriteDraft: safeText(item.rewriteDraft, 8_000),
+    elapsedSeconds: boundedNumber(item.elapsedSeconds, 0, 0, 4 * 3600),
+    rewriteDueAt: /^\d{4}-\d{2}-\d{2}$/.test(String(item.rewriteDueAt ?? "")) ? String(item.rewriteDueAt) : "",
+  };
+}
+
+function applyEssayAttemptSnapshot(progress: Progress, questionId: string, attempt: EssayAttemptSnapshot): Progress {
+  const key = `essay:${questionId}`;
+  return {
+    ...progress,
+    essayDrafts: { ...progress.essayDrafts, [key]: attempt.firstDraft },
+    essayChecks: { ...progress.essayChecks, [key]: attempt.selfChecks },
+    essayStages: { ...progress.essayStages, [key]: attempt.stage },
+    essaySelfScores: attempt.selfScore === null
+      ? Object.fromEntries(Object.entries(progress.essaySelfScores).filter(([entryKey]) => entryKey !== key))
+      : { ...progress.essaySelfScores, [key]: attempt.selfScore },
+    essayLossReasons: { ...progress.essayLossReasons, [key]: attempt.lossReasons },
+    essaySecondDrafts: { ...progress.essaySecondDrafts, [key]: attempt.revisedDraft },
+    essayRewriteDrafts: { ...progress.essayRewriteDrafts, [key]: attempt.rewriteDraft },
+    essayRewriteDue: { ...progress.essayRewriteDue, [key]: attempt.rewriteDueAt },
+  };
+}
+
 function normalizeEssayQuestion(raw: unknown, index: number): EssayPracticeQuestion | null {
   if (!raw || typeof raw !== "object") return null;
   const item = raw as Record<string, unknown>;
@@ -925,6 +981,7 @@ function normalizeEssayQuestion(raw: unknown, index: number): EssayPracticeQuest
     imageUrl: safeText(item.imageUrl, 500),
     resourceUrl: safeText(item.resourceUrl, 500),
     truthLabel: normalizeTruthLabel(region, examYear, safeText(item.truthLabel ?? item.source, 100)),
+    serverAttempt: normalizeEssayAttempt(item.serverAttempt),
   };
 }
 
@@ -1256,6 +1313,8 @@ export default function DailyPracticeApp() {
   const [activeModule, setActiveModule] = useState<Module>(null);
   const [progress, setProgress] = useState<Progress>(emptyProgress);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [bootstrapLoadState, setBootstrapLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [bootstrapError, setBootstrapError] = useState("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [redeemCode, setRedeemCode] = useState("");
@@ -1308,6 +1367,7 @@ export default function DailyPracticeApp() {
   const [essayPracticeIndex, setEssayPracticeIndex] = useState(0);
   const [essayPracticeLoading, setEssayPracticeLoading] = useState(false);
   const [essayCompletesDaily, setEssayCompletesDaily] = useState(true);
+  const [essayElapsedSeconds, setEssayElapsedSeconds] = useState(0);
   const [signInHref, setSignInHref] = useState(() => signInHrefFor("/"));
   const trackedUserRef = useRef("");
   const reportViewTrackedRef = useRef("");
@@ -1322,6 +1382,9 @@ export default function DailyPracticeApp() {
   const pendingPracticeAttemptsRef = useRef<QueuedPracticeAttempt[]>([]);
   const radarRequestSequenceRef = useRef(0);
   const inviteBindingRef = useRef("");
+  const bootstrapRetryAttemptRef = useRef(0);
+  const bootstrapRetryTimerRef = useRef<number | null>(null);
+  const loadBootstrapRef = useRef<() => Promise<void>>(async () => undefined);
 
   const practiceDays = bootstrap?.content.practiceDays ?? [];
   const dayKey = bootstrap?.todayKey ?? localChinaDateKey();
@@ -1353,13 +1416,14 @@ export default function DailyPracticeApp() {
   const addedBanks = bootstrap?.questionBanks.filter((bank) => bank.added) ?? [];
   const availableProvinces = Array.from(new Set([
     ...defaultProvinces,
-    ...(bootstrap?.questionBanks ?? []).map((bank) => bank.province).filter(Boolean),
-    ...profile.targets.map((target) => target.province).filter(Boolean),
+    ...(bootstrap?.questionBanks ?? []).map((bank) => bank.province).filter((province) => defaultProvinces.includes(province)),
+    ...profile.targets.map((target) => target.province).filter((province) => defaultProvinces.includes(province)),
   ]));
   const activeLearningBanks = addedBanks.filter((bank) => bank.subject !== "申论" && bank.practiceAvailable !== false);
   const activeEssayBanks = addedBanks.filter((bank) => bank.subject === "申论" && bank.practiceAvailable !== false);
   const hasMorningContent = day.morning.paragraphs.length > 0 || Boolean(day.morning.lead.trim());
-  const hasEssayContent = activeEssayBanks.some((bank) => bank.questionCount > 0);
+  const hasEssayContent = activeEssayBanks.some((bank) => (bank.availableEssayCount ?? bank.questionCount) > 0)
+    || Boolean(bootstrap?.dueEssayRewrites?.length);
   const primaryTarget = profile.targets[0] ?? null;
   const validLearningBanks = activeLearningBanks.filter((bank) => profile.targets.some((target) => bankCanPowerDailyPractice(target, bank)));
   const savedPrimaryBank = validLearningBanks.find((bank) => bank.code === progress.primaryBankCode);
@@ -1392,14 +1456,17 @@ export default function DailyPracticeApp() {
     essay: Boolean(progress.completed[`${dayKey}-essay`]),
   };
   const doneCount = enabledDailySteps.filter((step) => stepDone[step]).length;
-  const allDailyDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && doneCount === enabledDailySteps.length;
+  const dailyTasksDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && doneCount === enabledDailySteps.length;
+  const dailyCheckinDone = progress.checkins.includes(dayKey);
+  const dailyCheckinPending = dailyTasksDone && !dailyCheckinDone;
+  const allDailyDone = dailyTasksDone && dailyCheckinDone;
   const nextDailyStep = enabledDailySteps.find((step) => !stepDone[step]) ?? null;
   const essayQuestion = essayPracticeQuestions[essayPracticeIndex] ?? null;
   const essayDraftKey = essayQuestion ? `essay:${essayQuestion.id}` : dayKey;
   const currentDueEssayRewrite = essayQuestion
     ? bootstrap?.dueEssayRewrites?.find((item) => item.questionCode === essayQuestion.id)
     : null;
-  const essayAttemptDateKey = currentDueEssayRewrite?.originalDateKey ?? dayKey;
+  const essayAttemptDateKey = essayQuestion?.serverAttempt?.dateKey ?? currentDueEssayRewrite?.originalDateKey ?? dayKey;
   const essayStage = progress.essayStages[essayDraftKey]
     ?? (essayCompletesDaily && progress.completed[`${dayKey}-essay`] ? "completed" : "draft");
   const essayStageIndex = essayStageOrder[essayStage];
@@ -1558,6 +1625,8 @@ export default function DailyPracticeApp() {
   }, [bootstrap?.studyInsights, notify, trackEvent]);
 
   const loadBootstrap = useCallback(async () => {
+    setBootstrapLoadState("loading");
+    setBootstrapError("");
     try {
       let response: Response | undefined;
       let data: (Bootstrap & { error?: string; retryBootstrap?: boolean; bootstrapStage?: string }) | undefined;
@@ -1574,9 +1643,18 @@ export default function DailyPracticeApp() {
       if (!response || !data) throw new Error("加载失败");
       if (!response.ok) throw new Error(data.error || "加载失败");
       if (data.retryBootstrap) throw new Error("账号初始化未完成，请稍后刷新");
+      if (bootstrapRetryTimerRef.current) window.clearTimeout(bootstrapRetryTimerRef.current);
+      bootstrapRetryTimerRef.current = null;
+      bootstrapRetryAttemptRef.current = 0;
+      setBootstrapLoadState("ready");
       setBootstrap(data);
       progressVersionRef.current = Number(data.progressVersion ?? 0);
-      const nextProgress = mergeProgress(data.progress);
+      const mergedProgress = mergeProgress(data.progress);
+      const nextProgress = data.dailyPracticeCompleted
+        && mergedProgress.activePractice?.kind === "daily"
+        && mergedProgress.activePractice.dateKey === data.todayKey
+        ? { ...mergedProgress, activePractice: null }
+        : mergedProgress;
       progressRef.current = nextProgress;
       setProgress(nextProgress);
       setServerDailyPracticeCompleted(Boolean(data.dailyPracticeCompleted));
@@ -1621,9 +1699,17 @@ export default function DailyPracticeApp() {
         }
       }
     } catch (error) {
-      notify(error instanceof Error ? error.message : "学习记录暂时无法加载");
+      const message = error instanceof Error ? error.message : "学习记录暂时无法加载";
+      setBootstrapLoadState("error");
+      setBootstrapError(message);
+      notify(message);
+      bootstrapRetryAttemptRef.current += 1;
+      const delay = Math.min(30_000, 2_000 * (2 ** Math.min(4, bootstrapRetryAttemptRef.current - 1)));
+      if (bootstrapRetryTimerRef.current) window.clearTimeout(bootstrapRetryTimerRef.current);
+      bootstrapRetryTimerRef.current = window.setTimeout(() => void loadBootstrapRef.current(), delay);
     }
   }, [api, notify]);
+  loadBootstrapRef.current = loadBootstrap;
 
   const openPaywall = useCallback((
     reason: PaywallReason,
@@ -1638,6 +1724,19 @@ export default function DailyPracticeApp() {
     resumeAfterPaywallRef.current = null;
     setPaywall(null);
   }, []);
+
+  const authorizeAudioPlayback = useCallback(async (track: AudioTrack) => {
+    try {
+      await api({ action: "authorizeAudioPlayback", trackId: track.id });
+      return true;
+    } catch (error) {
+      if (apiErrorCode(error) === "PAYWALL_AUDIO") {
+        openPaywall("value_loop", undefined, { tab: "audio", trackId: track.id, resumeAction: "play_audio" });
+      }
+      notify(error instanceof Error ? error.message : "节目暂时无法播放");
+      return false;
+    }
+  }, [api, notify, openPaywall]);
 
   const preparePaywallLogin = useCallback(() => {
     if (!paywall || typeof window === "undefined") return;
@@ -1661,7 +1760,10 @@ export default function DailyPracticeApp() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadBootstrap(), 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (bootstrapRetryTimerRef.current) window.clearTimeout(bootstrapRetryTimerRef.current);
+    };
   }, [loadBootstrap]);
 
   useEffect(() => {
@@ -1778,6 +1880,12 @@ export default function DailyPracticeApp() {
   }, [activeModule, feedback, practiceIndex]);
 
   useEffect(() => {
+    if (activeModule !== "essay" || essayPracticeLoading || !essayQuestion) return;
+    const timer = window.setInterval(() => setEssayElapsedSeconds((value) => Math.min(4 * 3600, value + 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [activeModule, essayPracticeLoading, essayQuestion]);
+
+  useEffect(() => {
     if (!bootstrap?.user.id || progress.reminderMode !== "browser" || typeof window === "undefined" || !("Notification" in window)) return;
     if (window.Notification.permission !== "granted" || !dueReminder) return;
     const reminderKey = `${dayKey}:${dueReminder.id}`;
@@ -1828,15 +1936,43 @@ export default function DailyPracticeApp() {
     }
   }, [api, dayKey, notify, trackEvent]);
 
+  const recordDailyStep = useCallback(async (step: "morning" | "essay") => {
+    try {
+      await api({ action: "recordDailyStep", dateKey: dayKey, step });
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "学习步骤暂未同步，请重试");
+      return false;
+    }
+  }, [api, dayKey, notify]);
+
+  const syncDailyCheckin = useCallback(async () => {
+    if (!dailyTasksDone) return false;
+    if (progressRef.current.completed[`${dayKey}-morning`] && !await recordDailyStep("morning")) return false;
+    if (progressRef.current.completed[`${dayKey}-essay`] && !await recordDailyStep("essay")) return false;
+    const checked = await recordValidDailyCheckin();
+    if (!checked) return false;
+    const current = progressRef.current;
+    if (!current.checkins.includes(dayKey)) await persist({ ...current, checkins: [...current.checkins, dayKey] });
+    notify("今日任务和服务端打卡均已确认");
+    return true;
+  }, [dailyTasksDone, dayKey, notify, persist, recordDailyStep, recordValidDailyCheckin]);
+
   const complete = async (key: string) => {
     const current = progressRef.current;
+    const serverStep = key === `${dayKey}-morning` ? "morning" : key === `${dayKey}-essay` ? "essay" : null;
+    if (serverStep && !await recordDailyStep(serverStep)) return current;
     const next = { ...current, completed: { ...current.completed, [key]: true } };
     const allDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && enabledDailySteps.every((step) => step === "practice"
       ? serverDailyPracticeCompleted
       : Boolean(next.completed[`${dayKey}-${step}`]));
-    if (allDone && !next.checkins.includes(dayKey) && await recordValidDailyCheckin()) next.checkins = [...next.checkins, dayKey];
+    let checkinSynced = next.checkins.includes(dayKey);
+    if (allDone && !checkinSynced && await recordValidDailyCheckin()) {
+      next.checkins = [...next.checkins, dayKey];
+      checkinSynced = true;
+    }
     await persist(next);
-    notify("完成已记录，继续保持");
+    notify(allDone && !checkinSynced ? "任务已完成，打卡尚未同步；首页可一键重试" : "完成已记录，继续保持");
     return next;
   };
 
@@ -1900,7 +2036,14 @@ export default function DailyPracticeApp() {
     setBusy(true);
     setRadarPage(1);
     try {
-      await api({ action: "saveExamProfile", targets: profileDraft.targets, dailyMinutes: normalizePlanMinutes(profileDraft.dailyMinutes), initialBankCode: firstSetup ? onboardingBankCode : "" });
+      const result = await api<{ abandonedSessionIds?: string[] }>({ action: "saveExamProfile", targets: profileDraft.targets, dailyMinutes: normalizePlanMinutes(profileDraft.dailyMinutes), initialBankCode: firstSetup ? onboardingBankCode : "" });
+      const activePractice = progressRef.current.activePractice;
+      if (activePractice?.kind === "daily" && (result.abandonedSessionIds ?? []).includes(activePractice.serverSessionId ?? "")) {
+        await persist({ ...progressRef.current, activePractice: null });
+        setPracticeQuestions([]);
+        setPracticeSummary(null);
+        setActiveModule(null);
+      }
       trackEvent("profile_save", { targetCount: profileDraft.targets.length, targets: profileDraft.targets.map((target) => target.code), dailyMinutes: profileDraft.dailyMinutes });
       setOnboardingOpen(false);
       if (firstSetup && onboardingBankCode) setDiagnosticPromptOpen(true);
@@ -2288,19 +2431,31 @@ export default function DailyPracticeApp() {
     setEssayPracticeIndex(0);
     setEssayReference(false);
     setEssayCompletesDaily(options.daily !== false);
+    setEssayElapsedSeconds(0);
     setActiveModule("essay");
     try {
-      const bankCodes = options.bankCodes?.length ? options.bankCodes : activeEssayBanks.map((bank) => bank.code);
+      const dueRewrite = options.daily !== false && !options.questionCode ? bootstrap?.dueEssayRewrites?.[0] : null;
+      const bankCodes = options.bankCodes?.length
+        ? options.bankCodes
+        : dueRewrite?.bankCode ? [dueRewrite.bankCode] : activeEssayBanks.map((bank) => bank.code);
       const result = await api<{ questions?: unknown[] }>({
         action: "getEssayPracticeBatch",
         bankCodes,
         limit: 1,
         focusModule: options.focusModule ?? "",
         focusSubTypes: options.focusSubTypes ?? [],
-        questionCode: options.questionCode ?? "",
+        questionCode: options.questionCode ?? dueRewrite?.questionCode ?? "",
+        attemptDateKey: options.attemptDateKey ?? dueRewrite?.originalDateKey ?? "",
       });
       const questions = (result.questions ?? []).map(normalizeEssayQuestion).filter((item): item is EssayPracticeQuestion => Boolean(item));
       if (questions.length) {
+        const serverAttempt = questions[0].serverAttempt;
+        if (serverAttempt) {
+          const hydrated = applyEssayAttemptSnapshot(progressRef.current, questions[0].id, serverAttempt);
+          progressRef.current = hydrated;
+          setProgress(hydrated);
+          setEssayElapsedSeconds(serverAttempt.elapsedSeconds);
+        }
         setEssayPracticeQuestions(questions);
         trackEvent("essay_practice_open", { bankCodes, questionId: questions[0].id, daily: options.daily !== false });
       } else {
@@ -2675,7 +2830,7 @@ export default function DailyPracticeApp() {
       return false;
     }
     try {
-      const result = await api<{ scoringPoints?: string[]; reference?: string }>({
+      const result = await api<{ scoringPoints?: string[]; reference?: string; attempt?: EssayAttemptSnapshot }>({
         action: "saveEssayAttempt",
         questionCode: essayQuestion.id,
         dateKey: essayAttemptDateKey,
@@ -2687,6 +2842,7 @@ export default function DailyPracticeApp() {
         revisedDraft: current.essaySecondDrafts[essayDraftKey] ?? "",
         rewriteDraft: current.essayRewriteDrafts[essayDraftKey] ?? "",
         rewriteDueAt: rewriteDueAt ?? current.essayRewriteDue[essayDraftKey] ?? "",
+        elapsedSeconds: essayElapsedSeconds,
       });
       if (result.scoringPoints || result.reference !== undefined) {
         setEssayPracticeQuestions((questions) => questions.map((question) => question.id === essayQuestion.id ? {
@@ -2694,6 +2850,18 @@ export default function DailyPracticeApp() {
           scoringPoints: result.scoringPoints ?? question.scoringPoints,
           reference: result.reference ?? question.reference,
         } : question));
+      }
+      if (result.attempt) {
+        const snapshot = normalizeEssayAttempt(result.attempt);
+        if (snapshot) {
+          const hydrated = applyEssayAttemptSnapshot(progressRef.current, essayQuestion.id, snapshot);
+          progressRef.current = hydrated;
+          setProgress(hydrated);
+          setEssayPracticeQuestions((questions) => questions.map((question) => question.id === essayQuestion.id
+            ? { ...question, serverAttempt: snapshot }
+            : question));
+          await persist(hydrated);
+        }
       }
       return true;
     } catch (error) {
@@ -2706,7 +2874,6 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     if ((current.essayDrafts[essayDraftKey] ?? "").trim().length < 10) return notify("先独立完成至少10个字的作答");
     if (!(await saveEssayStage("self_check", current))) return;
-    await persist({ ...current, essayStages: { ...current.essayStages, [essayDraftKey]: "self_check" } });
     trackEvent("essay_draft_submit", { questionId: essayQuestion?.id, stage: "self_check" });
     notify("独立作答已锁定，现在只按标准自查，不会提前看到答案");
   };
@@ -2715,7 +2882,6 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     if ((current.essayChecks[essayDraftKey] ?? []).length < 2) return notify("请按标准完成至少两项自查");
     if (!(await saveEssayStage("self_score", current))) return;
-    await persist({ ...current, essayStages: { ...current.essayStages, [essayDraftKey]: "self_score" } });
     notify("已解锁采分点，请先自评得分，再看参考表达");
   };
 
@@ -2736,7 +2902,6 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     if (!Number.isFinite(current.essaySelfScores[essayDraftKey])) return notify("请先按采分点选择自评得分");
     if (!(await saveEssayStage("revision", current))) return;
-    await persist({ ...current, essayStages: { ...current.essayStages, [essayDraftKey]: "revision" } });
     setEssayReference(true);
     notify("参考表达已解锁，请对照后完成第二版作答");
   };
@@ -2754,11 +2919,6 @@ export default function DailyPracticeApp() {
     if ((current.essaySecondDrafts[essayDraftKey] ?? "").trim().length < 10) return notify("请完成至少10个字的第二版作答");
     const rewriteDue = shiftDateKey(dayKey, 3);
     if (!(await saveEssayStage("scheduled", current, rewriteDue))) return;
-    await persist({
-      ...current,
-      essayStages: { ...current.essayStages, [essayDraftKey]: "scheduled" },
-      essayRewriteDue: { ...current.essayRewriteDue, [essayDraftKey]: rewriteDue },
-    });
     if (essayCompletesDaily) await complete(`${dayKey}-essay`);
     trackEvent("essay_revision_submit", { questionId: essayQuestion?.id, rewriteDue });
     notify(`二改已保存，${shortDate(rewriteDue)}安排一次脱稿重写`);
@@ -2777,7 +2937,7 @@ export default function DailyPracticeApp() {
     const current = progressRef.current;
     if ((current.essayRewriteDrafts[essayDraftKey] ?? "").trim().length < 10) return notify("请先完成脱稿重写");
     if (!(await saveEssayStage("completed", current))) return;
-    await persist({ ...current, essayStages: { ...current.essayStages, [essayDraftKey]: "completed" } });
+    if (essayCompletesDaily) await complete(`${dayKey}-essay`);
     notify("3天重写已完成，这道题形成了完整学习闭环");
     setActiveModule(null);
   };
@@ -2877,6 +3037,8 @@ export default function DailyPracticeApp() {
       : `继续今日日练 · 还剩${dailyRemaining}题`
     : dailyConfigurationBlocking
       ? "先补全可练题库"
+    : dailyCheckinPending
+      ? "同步今日打卡"
     : nextDailyStep === "morning"
       ? `开始今日${dailyPlan.minutes}分钟训练`
       : nextDailyStep === "practice"
@@ -2892,6 +3054,7 @@ export default function DailyPracticeApp() {
       setTab("banks");
       return;
     }
+    if (dailyCheckinPending) return void syncDailyCheckin();
     if (nextDailyStep === "morning") return setActiveModule("morning");
     if (nextDailyStep === "practice") return void startPractice("mixed", undefined, { kind: "daily" });
     if (nextDailyStep === "essay") return void startEssayPractice({ daily: true });
@@ -3119,11 +3282,13 @@ export default function DailyPracticeApp() {
 
   const weakestModule = insights.modules.length ? [...insights.modules].sort((a, b) => a.accuracy - b.accuracy)[0] : null;
   const tomorrowPlan = insights.tomorrowPlan;
-  const nextStepText = dailyConfigurationBlocking ? "备考组合待补全" : nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
+  const nextStepText = dailyConfigurationBlocking ? "备考组合待补全" : dailyCheckinPending ? "任务已完成，打卡待同步" : nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
   const primaryTaskTitle = dailyConfigurationBlocking
     ? bootstrap?.dailyReadiness
       ? `不重复真题仅${dailyReadinessCount}/${dailyReadinessRequired}道，先补足题量`
       : `先为${bankConfigGaps[0]?.label ?? primaryTarget?.label ?? "报考目标"}加入可练题库`
+    : dailyCheckinPending
+    ? "今日任务已完成，同步最后一步"
     : allDailyDone
     ? "今日已完成，可以安心收工"
     : activeDailySession
@@ -3139,6 +3304,8 @@ export default function DailyPracticeApp() {
     ? bootstrap?.dailyReadiness
       ? `只统计当前权益可用、已发布且审核通过的行测真题；跨题库重复题只算1道，还需${Math.max(0, dailyReadinessRequired - dailyReadinessCount)}道。`
       : "需同时满足：已加入、地区匹配、年份适用、已发布且至少有5道不重复真题。配置完成后才会生成今日行测。"
+    : dailyCheckinPending
+    ? "学习步骤已完成；服务端确认成功后才计入连续打卡。"
     : allDailyDone
     ? `已完成${doneCount}/${enabledDailySteps.length}个有效动作，明日建议：${tomorrowPlan.taskText}`
     : nextDailyStep === "morning"
@@ -3159,7 +3326,7 @@ export default function DailyPracticeApp() {
       label: "申论重写",
       title: `${item.truthLabel} · ${item.module}`,
       detail: "3天重写已到期，重新作答才能真正检验掌握",
-      action: () => void startEssayPractice({ bankCodes: [item.bankCode], daily: false, questionCode: item.questionCode }),
+      action: () => void startEssayPractice({ bankCodes: [item.bankCode], daily: false, questionCode: item.questionCode, attemptDateKey: item.originalDateKey }),
     }))),
     ...(dueReminder ? [{ id: "radar", label: "报名提醒", title: `${dueReminder.targetLabel} · ${dueReminder.title}`, detail: dueReminder.days === 0 ? "今天处理" : `还有${dueReminder.days}天 · ${shortDate(dueReminder.eventDate)}`, action: () => setTab("calendar") }] : []),
     ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", label: "复习积压", title: `${insights.dueCount}道到期题等待回炉`, detail: `今日先按价值清理${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余自动顺延`, action: () => setTab("review") }] : []),
@@ -3176,6 +3343,10 @@ export default function DailyPracticeApp() {
   const threeDayReportReady = weeklyMetrics.activeDays >= 3;
   const threeDayReportProgress = Math.min(3, weeklyMetrics.activeDays);
   const threeDayNextIssues = weeklyMetrics.nextIssues.slice(0, 3);
+
+  if (!bootstrap) {
+    return <main className="app-shell"><div className="app-frame"><header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，高效完成今日训练</span></div></header><section className="empty-state bootstrap-state" role={bootstrapLoadState === "error" ? "alert" : "status"}><span>{bootstrapLoadState === "error" ? "!" : "…"}</span><h3>{bootstrapLoadState === "error" ? "学习数据暂时没有加载成功" : "正在核对题库、权益与今日进度"}</h3><p>{bootstrapLoadState === "error" ? `${bootstrapError || "网络暂时不可用"}。页面不会用空数据冒充正常状态。` : "首次进入会完成安全会话和真实学习状态校验。"}</p>{bootstrapLoadState === "error" && <button className="primary-button" onClick={() => void loadBootstrap()}>立即重试</button>}</section>{toast && <div className="toast" role="status">{toast}</div>}</div></main>;
+  }
 
   return (
     <main className="app-shell">
@@ -3211,7 +3382,7 @@ export default function DailyPracticeApp() {
                 <div><p>{nextStepText}</p><h1>{primaryTaskTitle}</h1><small>{primaryTaskDetail}</small></div>
                 <div className="today-progress-orb" style={{ "--progress": `${doneCount * (360 / Math.max(1, enabledDailySteps.length))}deg` } as React.CSSProperties}><strong>{dailyConfigurationBlocking ? "—" : `${doneCount}/${enabledDailySteps.length}`}</strong><span>{dailyConfigurationBlocking ? "待配置" : "完成"}</span></div>
               </div>
-              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道，补足后才生成真实日练` : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
+              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道，补足后才生成真实日练` : dailyCheckinPending ? "学习步骤已完成 · 点击重新同步" : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>}{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}{quickBank && <button onClick={() => void startPractice("mixed", [quickBank.code], { kind: "bank" })}>单本加练</button>}</div>
             </section>
 
@@ -3229,7 +3400,7 @@ export default function DailyPracticeApp() {
               })}</div>
             </section>
 
-            <section className="today-gain-card"><div className="compact-section-heading"><div><span>今日收益</span><h2>{allDailyDone ? "今日已完成，可以收工" : todayAnswered || doneCount ? "每一步都有可核对的结果" : "开始后实时记录，不预填成果"}</h2></div><em>{allDailyDone ? "已自动打卡" : `连续${streak}天`}</em></div>
+            <section className="today-gain-card"><div className="compact-section-heading"><div><span>今日收益</span><h2>{allDailyDone ? "今日已完成，可以收工" : dailyCheckinPending ? "任务完成，打卡待同步" : todayAnswered || doneCount ? "每一步都有可核对的结果" : "开始后实时记录，不预填成果"}</h2></div><em>{allDailyDone ? "已服务端打卡" : dailyCheckinPending ? "待同步" : `连续${streak}天`}</em></div>
               <div className="today-gain-grid"><div><b>{todayAnswered}</b><span>已完成真题</span></div><div><b>{todayAnswered ? `${todayAccuracy}%` : "—"}</b><span>今日正确率</span></div><div><b>{todayMetrics.repairedDue}</b><span>修复到期题</span></div><div><b>{todayMetrics.wrong}</b><span>发现错题</span></div></div>
               <details className="today-gain-detail" open={allDailyDone && todayAnswered > 0}><summary>查看完整收益单</summary><div className="today-gain-detail-grid"><div><b>{todayMetrics.guessed}</b><span>蒙对</span></div><div><b>{todayMetrics.hesitant}</b><span>犹豫</span></div><div><b>{todayMetrics.overtime}</b><span>超时</span></div><div><b>{todayMetrics.accuracyDelta === null ? "—" : `${todayMetrics.accuracyDelta >= 0 ? "+" : ""}${todayMetrics.accuracyDelta}pp`}</b><span>较前7日正确率</span></div><div><b>{todayMetrics.avgSecondsDelta === null ? "—" : `${todayMetrics.avgSecondsDelta >= 0 ? "+" : ""}${todayMetrics.avgSecondsDelta}秒`}</b><span>较前7日均时</span></div><div><b>{tomorrowPlan.dueCount}</b><span>明日到期复习</span></div></div><p><b>本次高频考点：</b>{todayMetrics.highFrequencyPoints.length ? todayMetrics.highFrequencyPoints.join("、") : "暂无达到可靠样本门槛的考点"}</p></details>
               <p className="today-gain-review-note">本轮新增回炉 {todayReviewAdded} 道 · 完成 {doneCount}/{enabledDailySteps.length} 个有效动作</p>
@@ -3444,7 +3615,7 @@ export default function DailyPracticeApp() {
           </div>}
         </>}
 
-        <AudioHub active={!activeModule && tab === "audio"} tracks={bootstrap?.content.audioTracks ?? []} wrongQuestions={audioWrongQuestions} notify={notify} trackEvent={trackEvent} />
+        <AudioHub active={!activeModule && tab === "audio"} tracks={bootstrap?.content.audioTracks ?? []} wrongQuestions={audioWrongQuestions} notify={notify} trackEvent={trackEvent} authorizePlayback={authorizeAudioPlayback} />
 
         {paywall && bootstrap && <CommercePaywall
           reason={paywall.reason}

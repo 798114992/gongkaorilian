@@ -127,6 +127,13 @@
       "when": 1784120068975,
       "tag": "0017_modern_northstar",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1784123151671,
+      "tag": "0018_hot_blazing_skull",
+      "breakpoints": true
     }
   ]
 }

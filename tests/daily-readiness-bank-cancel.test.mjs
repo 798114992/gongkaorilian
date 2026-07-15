@@ -47,8 +47,10 @@ test("daily readiness uses effective reviewed banks and content fingerprints ins
   assert.match(readiness, /q\.subject = '行测'/);
   assert.match(readiness, /q\.truth_verified = 1/);
   assert.match(readiness, /q\.review_status = 'approved'/);
-  assert.match(readiness, /targetBanks = banks\.results\.filter\(\(bank\) => bankMatchesDailyTarget/);
-  assert.match(readiness, /membershipActive \? \[\.\.\.targetBanks, \.\.\.auxiliaryBanks\] : targetBanks\.slice\(0, 1\)/);
+  assert.match(readiness, /entitledBankCodes = new Set\(await/);
+  assert.match(readiness, /entitledRows = banks\.results\.filter\(\(bank\) => entitledBankCodes\.has/);
+  assert.match(readiness, /targetBanks = entitledRows\.filter\(\(bank\) => bankMatchesDailyTarget/);
+  assert.match(readiness, /effectiveRows = \[\.\.\.targetBanks, \.\.\.auxiliaryBanks\]/);
   assert.match(readiness, /GROUP BY q\.stem, q\.options_json/);
   assert.match(readiness, /LIMIT \$\{DAILY_READINESS_SCAN_LIMIT\}/);
   assert.match(readiness, /questionFingerprint\(/);

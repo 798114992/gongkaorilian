@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
-const RUNTIME_SCHEMA_VERSION = "17";
+const RUNTIME_SCHEMA_VERSION = "18";
 
 export function getD1() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -84,6 +84,18 @@ async function initializeSchema() {
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS daily_checkins_user_date_uq ON daily_checkins(user_id, date_key)"),
     db.prepare("CREATE INDEX IF NOT EXISTS daily_checkins_user_completed_idx ON daily_checkins(user_id, completed_at)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS daily_step_completions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      step TEXT NOT NULL,
+      source_ref TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS daily_step_completions_user_date_step_uq
+      ON daily_step_completions(user_id, date_key, step)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS daily_step_completions_user_completed_idx
+      ON daily_step_completions(user_id, completed_at)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_states (
       user_id TEXT PRIMARY KEY,
       progress_json TEXT NOT NULL DEFAULT '{}',

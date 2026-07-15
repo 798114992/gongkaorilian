@@ -304,7 +304,8 @@ test("expired trials cannot retain multi-bank practice access and code dates inc
   assert.match(loadContent, /questions: \[\][\s\S]*?essay: \{ \.\.\.day\.essay, material: "", prompt: "", reference: "", scoringPoints: \[\] \}/);
   assert.match(loadContent, /const previewDays = practiceDays\.map[\s\S]*?essay: \{ expressions: \[\], material: "", prompt: "", reference: "", scoringPoints: \[\], wordLimit: 0 \}/);
   assert.match(daily, /activeLearningBanks = addedBanks\.filter\(\(bank\) => bank\.subject !== "申论" && bank\.practiceAvailable !== false\)/);
-  assert.match(daily, /const hasEssayContent = activeEssayBanks\.some\(\(bank\) => bank\.questionCount > 0\);/);
+  assert.match(daily, /const hasEssayContent = activeEssayBanks\.some\(\(bank\) => \(bank\.availableEssayCount \?\? bank\.questionCount\) > 0\)/);
+  assert.match(daily, /bootstrap\?\.dueEssayRewrites\?\.length/);
   assert.doesNotMatch(daily, /hasEssayContent = [^;]*day\.essay\.prompt/);
   assert.match(createCodes, /T23:59:59\.999\+08:00/);
 });

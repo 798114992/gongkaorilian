@@ -30,6 +30,7 @@ type AudioHubProps = {
   wrongQuestions: Question[];
   notify: (message: string) => void;
   trackEvent: (eventName: string, eventData?: Record<string, unknown>) => void;
+  authorizePlayback: (track: AudioTrack) => Promise<boolean>;
 };
 
 const builtInCategoryMeta: Record<string, { label: string; title: string; empty: string; color: string }> = {
@@ -141,7 +142,7 @@ function readServerOnlineStatus() {
   return true;
 }
 
-export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions, notify, trackEvent }: AudioHubProps) {
+export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions, notify, trackEvent, authorizePlayback }: AudioHubProps) {
   const wrongTracks = useMemo<AudioTrack[]>(() => {
     const now = audioReviewReferenceTime;
     const prioritized = wrongQuestions
@@ -585,11 +586,22 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   }, [markSpeechFallback, notify, startSpeech, updateMediaSession]);
 
   const start = useCallback(async (track: AudioTrack) => {
+    const session = sessionRef.current + 1;
+    sessionRef.current = session;
+    const cachedFreePlayback = !online && canCacheOffline(track) && cachedIds.includes(track.id);
+    const authorized = cachedFreePlayback || await authorizePlayback(track);
+    if (sessionRef.current !== session) return;
+    if (!authorized) {
+      setPlaying(false);
+      setPaused(false);
+      setBuffering(false);
+      engineRef.current = null;
+      setPlaybackEngine(null);
+      return;
+    }
     if (activeTrackRef.current && activeTrackRef.current.id !== track.id && engineRef.current) {
       emitPlaybackLifecycle("audio_close", activeTrackRef.current, "switch", { engine: engineRef.current });
     }
-    const session = sessionRef.current + 1;
-    sessionRef.current = session;
     fallbackSessionRef.current = null;
     const preferSpeechFallback = Boolean(track.audioUrl && speechFallbackIdsRef.current.includes(track.id));
     window.speechSynthesis?.cancel();
@@ -659,7 +671,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       if (sessionRef.current !== session) return;
       fallbackToSpeech(track, session, error instanceof Error && error.message === "audio-start-timeout" ? "timeout" : "load");
     }
-  }, [cachedAudioSource, cachedIds, clearSpeechFallback, emitAudioBehavior, emitPlaybackLifecycle, fallbackToSpeech, notify, online, revokeObjectUrl, startSpeech, updateMediaSession]);
+  }, [authorizePlayback, cachedAudioSource, cachedIds, clearSpeechFallback, emitAudioBehavior, emitPlaybackLifecycle, fallbackToSpeech, notify, online, revokeObjectUrl, startSpeech, updateMediaSession]);
 
   const togglePlayback = () => {
     if (!selectedTrack) return;

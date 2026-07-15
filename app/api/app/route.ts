@@ -56,7 +56,7 @@ const publicWriteWindows = new Map<string, { startedAt: number; count: number }>
 const PUBLIC_ACTIONS = new Set([
   "saveProgress", "saveExamProfile", "searchJobPositions", "toggleQuestionBank", "getPracticeBatch",
   "getEssayPracticeBatch", "saveEssayAttempt", "submitPracticeAnswer", "updateQuestionMeta",
-  "submitContentReport", "getPracticeSessionSummary", "recordDailyCheckin", "bindInvite", "redeem",
+  "submitContentReport", "getPracticeSessionSummary", "recordDailyStep", "recordDailyCheckin", "authorizeAudioPlayback", "bindInvite", "redeem",
   "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
 ]);
 const PASSIVE_PUBLIC_ACTIONS = new Set([
@@ -107,6 +107,11 @@ const EVENT_NAMES = new Set([
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
+const SELECTABLE_PROVINCES = new Set([
+  "北京", "天津", "上海", "重庆", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+  "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东",
+  "广西", "海南", "四川", "贵州", "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆",
+]);
 const CONTENT_TYPES = new Set([
   "practice_day",
   "morning_read",
@@ -1223,6 +1228,19 @@ async function getConfigNumber(key: string, fallback: number) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+async function loadInviteConfig() {
+  const rows = await getD1().prepare(`SELECT key, value FROM configs
+    WHERE key IN ('invite_reward_days', 'invitee_reward_days', 'invite_monthly_cap')`)
+    .all<{ key: string; value: string }>();
+  const values = new Map(rows.results.map((row) => [row.key, Number(row.value)]));
+  const numberOr = (key: string, fallback: number) => Number.isFinite(values.get(key)) ? Number(values.get(key)) : fallback;
+  return {
+    rewardDays: numberOr("invite_reward_days", 7),
+    inviteeRewardDays: numberOr("invitee_reward_days", 3),
+    monthlyCap: numberOr("invite_monthly_cap", 30),
+  };
+}
+
 function mergeStrategyConfig(base: Record<string, unknown>, incoming: Record<string, unknown>) {
   const basePlans = base.timePlans && typeof base.timePlans === "object" ? base.timePlans as Record<string, unknown> : {};
   const incomingPlans = incoming.timePlans && typeof incoming.timePlans === "object" ? incoming.timePlans as Record<string, unknown> : {};
@@ -1556,11 +1574,19 @@ type DailyReadiness = {
   planMinutes: number;
 };
 
-async function loadDailyReadiness(userId: string, membershipActive: boolean, requestedPlanMinutes?: unknown): Promise<DailyReadiness> {
+type DailyReadinessOverrides = {
+  profile?: LoadedExamProfile | Promise<LoadedExamProfile>;
+  selected?: string[] | Promise<string[]>;
+  strategy?: Record<string, unknown> | null | Promise<Record<string, unknown> | null>;
+  entitledBankCodes?: string[] | Promise<string[]>;
+};
+
+async function loadDailyReadiness(userId: string, membershipActive: boolean, requestedPlanMinutes?: unknown, overrides?: DailyReadinessOverrides): Promise<DailyReadiness> {
   const db = getD1();
-  const [profile, strategy] = await Promise.all([
-    loadExamProfile(userId),
-    membershipActive ? loadStrategyConfig() : Promise.resolve(null),
+  const [profile, strategy, selected] = await Promise.all([
+    overrides?.profile ? Promise.resolve(overrides.profile) : loadExamProfile(userId),
+    overrides?.strategy !== undefined ? Promise.resolve(overrides.strategy) : membershipActive ? loadStrategyConfig() : Promise.resolve(null),
+    overrides?.selected ? Promise.resolve(overrides.selected) : selectedBankCodes(userId),
   ]);
   const planMinutes = effectiveDailyPlanMinutes(profile.dailyMinutes, requestedPlanMinutes, membershipActive);
   const requiredQuestionCount = requiredDailyQuestionCount(strategy, planMinutes, membershipActive);
@@ -1571,6 +1597,9 @@ async function loadDailyReadiness(userId: string, membershipActive: boolean, req
   // targets and recent exam years. Special banks are auxiliary only: they can
   // enrich a valid target prescription, but can never make an unrelated or
   // special-only shelf appear ready.
+  const entitledBankCodes = new Set(await (overrides?.entitledBankCodes
+    ? Promise.resolve(overrides.entitledBankCodes)
+    : effectivePracticeBankCodes(userId, selected, membershipActive)));
   const banks = await db.prepare(`SELECT qb.bank_code, qb.exam_type, qb.province, qb.exam_year, qb.subject
     FROM user_question_banks uqb
     JOIN question_banks qb ON qb.bank_code = uqb.bank_code
@@ -1583,11 +1612,12 @@ async function loadDailyReadiness(userId: string, membershipActive: boolean, req
       )
     ORDER BY uqb.added_at, uqb.bank_code LIMIT 64`)
     .bind(userId).all<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string }>();
-  const targetBanks = banks.results.filter((bank) => bankMatchesDailyTarget(bank, profile));
+  const entitledRows = banks.results.filter((bank) => entitledBankCodes.has(String(bank.bank_code)));
+  const targetBanks = entitledRows.filter((bank) => bankMatchesDailyTarget(bank, profile));
   const auxiliaryBanks = targetBanks.length
-    ? banks.results.filter((bank) => bank.exam_type === "special")
+    ? entitledRows.filter((bank) => bank.exam_type === "special")
     : [];
-  const effectiveRows = membershipActive ? [...targetBanks, ...auxiliaryBanks] : targetBanks.slice(0, 1);
+  const effectiveRows = [...targetBanks, ...auxiliaryBanks];
   const effectiveBankCodes = Array.from(new Set(effectiveRows.map((row) => String(row.bank_code))));
   if (!effectiveBankCodes.length) {
     return { ready: false, distinctQuestionCount: 0, requiredQuestionCount, effectiveBankCodes, planMinutes };
@@ -1643,6 +1673,46 @@ async function grantDailyFreeAudio(userId: string, assetId: string, dateKey = ch
   return granted?.asset_id === assetId;
 }
 
+async function authorizeAudioPlayback(userId: string, payload: Record<string, unknown>) {
+  const trackId = trimmed(payload.trackId, 120);
+  if (!trackId) return json({ error: "节目编号不能为空", code: "AUDIO_TRACK_INVALID" }, 400);
+  const membership = await userMembership(userId);
+  if (membershipIsActive(membership)) return json({ ok: true, access: "premium" });
+
+  let claimKey = "";
+  if (trackId.startsWith("wrong-")) {
+    const questionCode = trackId.slice("wrong-".length);
+    const available = await getD1().prepare(`SELECT 1 AS available FROM user_question_progress uqp
+      JOIN questions q ON q.question_code = uqp.question_code
+      WHERE uqp.user_id = ? AND uqp.question_code = ? AND uqp.wrong_count > 0
+        AND q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
+      LIMIT 1`).bind(userId, questionCode).first<{ available: number }>();
+    if (!available) return json({ error: "这道错题不在当前可朗读范围内", code: "AUDIO_TRACK_INVALID" }, 404);
+    claimKey = `wrong:${questionCode}`;
+  } else {
+    const row = await getD1().prepare(`SELECT payload_json, access_level FROM content_items
+      WHERE content_type = 'audio_track' AND content_key = ?
+        AND status IN ('published', 'scheduled')
+        AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
+      LIMIT 1`).bind(trackId).first<{ payload_json: string; access_level: string }>();
+    if (!row) return json({ error: "节目不存在或尚未发布", code: "AUDIO_TRACK_INVALID" }, 404);
+    if (row.access_level !== "free") {
+      return json({ error: "该节目为会员内容，开通后可继续收听", code: "PAYWALL_AUDIO" }, 403);
+    }
+    let managedAsset = "";
+    try {
+      const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+      managedAsset = managedMediaAssetId(typeof parsed.audioUrl === "string" ? parsed.audioUrl : "") ?? "";
+    } catch { managedAsset = ""; }
+    claimKey = managedAsset || `content:${trackId}`;
+  }
+
+  if (!await grantDailyFreeAudio(userId, claimKey)) {
+    return json({ error: "今日免费电台额度已使用，开通后可继续听时政、申论和错题朗读", code: "PAYWALL_AUDIO" }, 403);
+  }
+  return json({ ok: true, access: "daily_free", claimKey });
+}
+
 type PracticeSessionRow = {
   id: string;
   status: string;
@@ -1694,32 +1764,37 @@ async function loadExamProfile(userId: string): Promise<LoadedExamProfile> {
         target_code: string; exam_type: string; province: string; exam_year: number; exam_date: string | null;
       }>(),
   ]);
-  const targets = Array.from(new Map(targetRows.results.map((target) => {
-    const province = target.exam_type === "national" ? "" : normalizeProvince(target.province);
+  const normalizedTargetEntries: Array<readonly [string, ExamTargetProfile]> = targetRows.results.flatMap((target): Array<readonly [string, ExamTargetProfile]> => {
+    const province = target.exam_type === "national" ? "" : normalizeSelectableProvince(target.province);
+    if (target.exam_type !== "national" && !province) return [];
     const code = target.exam_type === "national" ? "national" : `province:${province}`;
-    return [code, {
+    const normalized: ExamTargetProfile = {
     code,
     label: target.exam_type === "national" ? "国考" : `${province}省考`,
     examType: target.exam_type === "national" ? "国考" as const : "省考" as const,
     province,
     examYear: target.exam_year,
     examDate: target.exam_date,
-  } satisfies ExamTargetProfile] as const;
-  })).values());
+    };
+    return [[code, normalized] as const];
+  });
+  const targets: ExamTargetProfile[] = Array.from(new Map(normalizedTargetEntries).values());
   if (row) {
     const isProvincial = row.exam_type === "省考";
-    const province = isProvincial ? normalizeProvince(row.province) : "";
-    const legacyTarget = {
+    const province = isProvincial ? normalizeSelectableProvince(row.province) : "";
+    const legacyTarget = (!isProvincial || province) ? {
       code: isProvincial ? `province:${province}` : "national",
       label: isProvincial ? `${province}省考` : "国考",
       examType: isProvincial ? "省考" : "国考",
       province,
       examYear: row.exam_year,
       examDate: row.exam_date,
-    } satisfies ExamTargetProfile;
-    const primaryIndex = targets.findIndex((target) => target.code === legacyTarget.code);
-    if (primaryIndex === -1) targets.unshift(legacyTarget);
-    else if (primaryIndex > 0) targets.unshift(...targets.splice(primaryIndex, 1));
+    } satisfies ExamTargetProfile : null;
+    if (legacyTarget) {
+      const primaryIndex = targets.findIndex((target) => target.code === legacyTarget.code);
+      if (primaryIndex === -1) targets.unshift(legacyTarget);
+      else if (primaryIndex > 0) targets.unshift(...targets.splice(primaryIndex, 1));
+    }
   }
   const primary = targets[0];
   return {
@@ -1772,14 +1847,35 @@ function normalizeProvince(value: unknown) {
     .replace(/省$|市$/, "");
 }
 
-async function loadQuestionBanks(userId: string, membershipActiveOverride?: boolean) {
+function normalizeSelectableProvince(value: unknown) {
+  const province = normalizeProvince(value);
+  return SELECTABLE_PROVINCES.has(province) ? province : "";
+}
+
+function inferredTargetYear(sourceYear: unknown, currentYear = new Date().getFullYear()) {
+  const parsed = Math.floor(Number(sourceYear));
+  const preferred = Number.isInteger(parsed) ? parsed : currentYear + 1;
+  return Math.max(currentYear + 1, Math.min(currentYear + 3, preferred));
+}
+
+async function loadQuestionBanks(
+  userId: string,
+  membershipActiveOverride?: boolean,
+  profileOverride?: LoadedExamProfile | Promise<LoadedExamProfile>,
+  selectedOverride?: string[] | Promise<string[]>,
+) {
   const db = getD1();
   const [selected, rows, profile, membership] = await Promise.all([
-    selectedBankCodes(userId),
+    selectedOverride ? Promise.resolve(selectedOverride) : selectedBankCodes(userId),
     db.prepare(`SELECT qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year, qb.subject,
       qb.description, qb.cover_color,
       COUNT(DISTINCT CASE WHEN q.subject = '行测' THEN q.question_code END) AS practice_question_count,
       COUNT(DISTINCT CASE WHEN q.subject = '申论' THEN q.question_code END) AS essay_question_count,
+      COUNT(DISTINCT CASE WHEN q.subject = '申论' AND NOT EXISTS (
+        SELECT 1 FROM essay_attempts ea_block
+        WHERE ea_block.user_id = ? AND ea_block.question_code = q.question_code
+          AND ea_block.stage IN ('scheduled', 'completed')
+      ) THEN q.question_code END) AS available_essay_count,
       COUNT(DISTINCT CASE WHEN uqp.last_answered_at IS NOT NULL THEN q.question_code END) AS studied_count,
       COUNT(DISTINCT CASE WHEN uqp.state = 'mastered' THEN q.question_code END) AS mastered_count,
       COUNT(DISTINCT CASE WHEN uqp.state = 'weak' THEN q.question_code END) AS weak_count,
@@ -1791,12 +1887,12 @@ async function loadQuestionBanks(userId: string, membershipActiveOverride?: bool
       LEFT JOIN user_question_progress uqp ON uqp.question_code = q.question_code AND uqp.user_id = ?
       WHERE qb.status = 'published'
       GROUP BY qb.id HAVING COUNT(DISTINCT q.id) > 0
-      ORDER BY qb.updated_at DESC`).bind(userId).all<{
+      ORDER BY qb.updated_at DESC`).bind(userId, userId).all<{
         bank_code: string; name: string; exam_type: string; province: string | null; exam_year: number | null;
-        subject: string; description: string; cover_color: string; practice_question_count: number; essay_question_count: number; studied_count: number; mastered_count: number;
+        subject: string; description: string; cover_color: string; practice_question_count: number; essay_question_count: number; available_essay_count: number; studied_count: number; mastered_count: number;
         weak_count: number; due_count: number;
       }>(),
-    loadExamProfile(userId),
+    profileOverride ? Promise.resolve(profileOverride) : loadExamProfile(userId),
     membershipActiveOverride === undefined ? userMembership(userId) : Promise.resolve(null),
   ]);
   const membershipActive = membershipActiveOverride ?? membershipIsActive(membership);
@@ -1827,6 +1923,7 @@ async function loadQuestionBanks(userId: string, membershipActiveOverride?: bool
     description: row.description,
     coverColor: row.cover_color,
     questionCount: Number(row.subject === "申论" ? row.essay_question_count : row.practice_question_count),
+    availableEssayCount: Number(row.available_essay_count ?? 0),
     studiedCount: Number(row.studied_count),
     masteredCount: Number(row.mastered_count),
     weakCount: Number(row.weak_count),
@@ -1841,11 +1938,11 @@ async function loadQuestionBanks(userId: string, membershipActiveOverride?: bool
   }; });
 }
 
-async function loadStudyInsights(userId: string) {
+async function loadStudyInsights(userId: string, selectedOverride?: string[] | Promise<string[]>) {
   const db = getD1();
-  const selectedBanks = (await selectedBankCodes(userId)).slice(0, 32);
+  const selectedBanksPromise = selectedOverride ? Promise.resolve(selectedOverride) : selectedBankCodes(userId);
   const appliedAttempt = "apply_status = 'applied'";
-  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek] = await Promise.all([
+  const statsPromise = Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(AVG(duration_ms), 0) AS avg_duration,
       COALESCE(SUM(CASE WHEN confidence IN ('hesitant', 'guessed') OR uncertain = 1 THEN 1 ELSE 0 END), 0) AS uncertain_total,
@@ -1922,6 +2019,9 @@ async function loadStudyInsights(userId: string) {
         AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
       ORDER BY knowledge_point LIMIT 5`).bind(userId).all<{ knowledge_point: string }>(),
   ]);
+  const [selectedBankRows, stats] = await Promise.all([selectedBanksPromise, statsPromise]);
+  const selectedBanks = selectedBankRows.slice(0, 32);
+  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek] = stats;
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
   const correct = Number(summary?.correct ?? 0);
@@ -1944,17 +2044,15 @@ async function loadStudyInsights(userId: string) {
     )`);
     dueBindings.push(...publishedBanks);
   }
-  const dueCount = dueScopes.length
-    ? await db.prepare(`SELECT COUNT(*) AS total FROM user_question_progress uqp
-      WHERE uqp.user_id = ? AND datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP
-        AND (${dueScopes.join(" OR ")})`).bind(...dueBindings).first<{ total: number }>().then((row) => Number(row?.total ?? 0))
-    : 0;
-  const tomorrowDueCount = dueScopes.length
-    ? await db.prepare(`SELECT COUNT(*) AS total FROM user_question_progress uqp
-      WHERE uqp.user_id = ?
-        AND datetime(uqp.next_review_at) <= datetime('now', '+8 hours', 'start of day', '+2 days', '-8 hours')
-        AND (${dueScopes.join(" OR ")})`).bind(...dueBindings).first<{ total: number }>().then((row) => Number(row?.total ?? 0))
-    : 0;
+  const dueWindow = dueScopes.length
+    ? await db.prepare(`SELECT
+        COALESCE(SUM(CASE WHEN datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END), 0) AS due_total,
+        COALESCE(SUM(CASE WHEN datetime(uqp.next_review_at) <= datetime('now', '+8 hours', 'start of day', '+2 days', '-8 hours') THEN 1 ELSE 0 END), 0) AS tomorrow_total
+      FROM user_question_progress uqp WHERE uqp.user_id = ? AND (${dueScopes.join(" OR ")})`)
+      .bind(...dueBindings).first<{ due_total: number; tomorrow_total: number }>()
+    : null;
+  const dueCount = Number(dueWindow?.due_total ?? 0);
+  const tomorrowDueCount = Number(dueWindow?.tomorrow_total ?? 0);
   const moduleInsights = modules.results.map((row) => ({
     module: row.module,
     total: Number(row.total),
@@ -2525,22 +2623,49 @@ async function bootstrap(request: Request) {
   // Practice completion and the full-day check-in are intentionally separate.
   // A completed server session advances the learner to the next step, while a
   // check-in is written only when the client finishes every enabled daily step.
-  const [user, state, ledger, inviteStats, inviteDays, inviteeInviteDays, inviteCap, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice] = await Promise.all([
-    db.prepare("SELECT id, invite_code, invited_by, membership_type, membership_end FROM users WHERE id = ?").bind(identity.userId).first<UserRow>(),
-    db.prepare("SELECT progress_json, version FROM user_states WHERE user_id = ?").bind(identity.userId)
-      .first<{ progress_json: string; version: number }>(),
+  const userPromise = db.prepare("SELECT id, invite_code, invited_by, membership_type, membership_end FROM users WHERE id = ?")
+    .bind(identity.userId).first<UserRow>();
+  const statePromise = db.prepare("SELECT progress_json, version FROM user_states WHERE user_id = ?").bind(identity.userId)
+    .first<{ progress_json: string; version: number }>();
+  const examProfilePromise = loadExamProfile(identity.userId);
+  const selectedBanksPromise = selectedBankCodes(identity.userId);
+  const membershipActivePromise = userPromise.then((row) => membershipIsActive(row));
+  const effectiveBankCodesPromise = Promise.all([selectedBanksPromise, membershipActivePromise])
+    .then(([selected, active]) => effectivePracticeBankCodes(identity.userId, selected, active));
+  const contentPromise = Promise.all([membershipActivePromise, examProfilePromise])
+    .then(([active, profile]) => loadContent(active, profile));
+  const questionBanksPromise = Promise.all([membershipActivePromise, examProfilePromise, selectedBanksPromise])
+    .then(([active, profile, selected]) => loadQuestionBanks(identity.userId, active, profile, selected));
+  const studyInsightsPromise = loadStudyInsights(identity.userId, selectedBanksPromise);
+  const dailyReadinessPromise = Promise.all([
+    membershipActivePromise, statePromise, examProfilePromise, selectedBanksPromise,
+    effectiveBankCodesPromise, contentPromise,
+  ]).then(([active, stateRow, profile, selected, entitledBankCodes, contentValue]) => {
+    let storedProgress: Record<string, unknown> = {};
+    try { storedProgress = JSON.parse(stateRow?.progress_json ?? "{}"); } catch { storedProgress = {}; }
+    const overrides = storedProgress.planOverrides && typeof storedProgress.planOverrides === "object"
+      ? storedProgress.planOverrides as Record<string, unknown>
+      : {};
+    return loadDailyReadiness(identity.userId, active, overrides[todayKey], {
+      profile,
+      selected,
+      entitledBankCodes,
+      strategy: contentValue.strategyConfig ?? null,
+    });
+  });
+  const [user, state, ledger, inviteStats, inviteConfig, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice, content, dailyReadiness] = await Promise.all([
+    userPromise,
+    statePromise,
     db.prepare(`SELECT delta_days, source_type, note, created_at
       FROM membership_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20`).bind(identity.userId).all(),
     db.prepare(`SELECT COUNT(*) AS total,
       SUM(CASE WHEN status = 'rewarded' THEN 1 ELSE 0 END) AS rewarded,
       SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
       FROM invite_relations WHERE inviter_id = ?`).bind(identity.userId).first<{ total: number; rewarded: number; pending: number }>(),
-    getConfigNumber("invite_reward_days", 7),
-    getConfigNumber("invitee_reward_days", 3),
-    getConfigNumber("invite_monthly_cap", 30),
-    loadExamProfile(identity.userId),
-    loadQuestionBanks(identity.userId),
-    loadStudyInsights(identity.userId),
+    loadInviteConfig(),
+    examProfilePromise,
+    questionBanksPromise,
+    studyInsightsPromise,
     loadWrongAudioQuestions(identity.userId),
     loadDueEssayRewrites(identity.userId),
     db.prepare("SELECT date_key FROM daily_checkins WHERE user_id = ? ORDER BY date_key")
@@ -2549,6 +2674,8 @@ async function bootstrap(request: Request) {
       WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
         AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
       LIMIT 1`).bind(identity.userId, todayKey).first<{ completed: number }>(),
+    contentPromise,
+    dailyReadinessPromise,
   ]);
   if (!user) return json({ error: "用户初始化失败" }, 500, identity.setCookie);
   let progress: Record<string, unknown> = {};
@@ -2557,14 +2684,6 @@ async function bootstrap(request: Request) {
   // “真实完成”的证据；历史有效日练由 runtime/migration 按完成会话幂等回填。
   progress = { ...progress, checkins: dailyCheckins.results.map((row) => row.date_key) };
   const membershipActive = membershipIsActive(user);
-  const rawPlanOverrides = progress.planOverrides && typeof progress.planOverrides === "object"
-    ? progress.planOverrides as Record<string, unknown>
-    : {};
-  const requestedPlanMinutes = rawPlanOverrides[todayKey];
-  const [content, dailyReadiness] = await Promise.all([
-    loadContent(membershipActive, examProfile),
-    loadDailyReadiness(identity.userId, membershipActive, requestedPlanMinutes),
-  ]);
   return json({
     user: {
       id: user.id,
@@ -2589,7 +2708,7 @@ async function bootstrap(request: Request) {
     todayKey,
     ledger: ledger.results,
     inviteStats: inviteStats ?? { total: 0, rewarded: 0, pending: 0 },
-    inviteConfig: { rewardDays: inviteDays, inviteeRewardDays: inviteeInviteDays, monthlyCap: inviteCap },
+    inviteConfig,
   }, 200, identity.setCookie);
 }
 
@@ -2641,7 +2760,7 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
   for (const raw of rawTargets) {
     const item = raw as Record<string, unknown>;
     const examType = item.examType === "省考" ? "省考" : "国考";
-    const province = examType === "省考" ? normalizeProvince(item.province) : "";
+    const province = examType === "省考" ? normalizeSelectableProvince(item.province) : "";
     if (examType === "省考" && !province) continue;
     const examYear = Math.max(currentYear, Math.min(currentYear + 3, Math.floor(Number(item.examYear)) || currentYear + 1));
     const dateValue = trimmed(item.examDate, 10);
@@ -2690,7 +2809,7 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
   })));
   const prescriptionChanged = dailyMinutes !== currentProfile.dailyMinutes
     || targetSignature(targets) !== targetSignature(currentProfile.targets);
-  await db.batch([
+  const profileWriteResults = await db.batch([
     db.prepare(`INSERT INTO user_exam_profiles (user_id, exam_type, province, exam_year, exam_date, daily_minutes, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(user_id) DO UPDATE SET exam_type = excluded.exam_type, province = excluded.province,
@@ -2702,10 +2821,13 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`).bind(userId, target.code, target.examType === "国考" ? "national" : "provincial", target.province, target.examYear, target.examDate)),
     ...(initialBank ? [db.prepare("INSERT OR IGNORE INTO user_question_banks (user_id, bank_code) VALUES (?, ?)").bind(userId, initialBank.bank_code)] : []),
     ...(prescriptionChanged ? [db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed' AND status = 'active'`)
+      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed' AND status = 'active'
+      RETURNING id`)
       .bind(userId, chinaDateKey())] : []),
   ]);
-  return json({ ok: true, profile: targetProfile, selectedBanks: await selectedBankCodes(userId) });
+  const abandonedResult = prescriptionChanged ? profileWriteResults.at(-1) as { results?: Array<{ id?: unknown }> } : null;
+  const abandonedSessionIds = (abandonedResult?.results ?? []).map((item) => String(item.id ?? "")).filter(Boolean);
+  return json({ ok: true, profile: targetProfile, selectedBanks: await selectedBankCodes(userId), abandonedSessionIds });
 }
 
 async function toggleQuestionBank(userId: string, payload: Record<string, unknown>) {
@@ -2740,11 +2862,19 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
     ];
     if (bank && (bank.exam_type === "national" || bank.exam_type === "provincial")) {
       const profile = await loadExamProfile(userId);
-      const province = bank.exam_type === "provincial" ? normalizeProvince(bank.province) : "";
+      const province = bank.exam_type === "provincial" ? normalizeSelectableProvince(bank.province) : "";
+      // “多省/全国/专项”等运营范围不是一个可报名省份，不能被题库动作
+      // 推导成“多省考”或“全国省考”这样的伪目标。
+      if (bank.exam_type === "provincial" && !province) {
+        await db.batch(statements);
+        const membership = await userMembership(userId);
+        return json({ ok: true, banks: await loadQuestionBanks(userId), profile: await loadExamProfile(userId),
+          dailyReadiness: await loadDailyReadiness(userId, membershipIsActive(membership), payload.planMinutes), abandonedSessionIds: [] });
+      }
       const targetCode = bank.exam_type === "national" ? "national" : `province:${province}`;
       const targetExists = profile.targets.some((target) => target.code === targetCode);
       if (!targetExists) {
-        const examYear = bank.exam_year ?? new Date().getFullYear() + 1;
+        const examYear = inferredTargetYear(bank.exam_year);
         // Existing targets are already durable rows (or the legacy primary row
         // in user_exam_profiles). Re-inserting the full collection makes this
         // POST grow linearly and can exceed D1 Free's 50-query ceiling. Only the
@@ -2881,6 +3011,29 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
   const requestedKind = trimmed(payload.sessionKind, 40).toLowerCase().replace(/[^a-z0-9:_-]/g, "");
   const dailyRequest = requestedKind === "daily";
+  const dateKey = chinaDateKey();
+  if (dailyRequest) {
+    const completed = await db.prepare(`SELECT id, status, target_count, answered_count,
+      correct_count, review_added, elapsed_seconds FROM practice_sessions
+      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
+        AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
+      ORDER BY completed_at DESC LIMIT 1`).bind(userId, dateKey).first<{
+        id: string; status: string; target_count: number; answered_count: number;
+        correct_count: number; review_added: number; elapsed_seconds: number;
+      }>();
+    if (completed) {
+      return json({
+        questions: [], mode: "mixed", limit: 0, sessionId: completed.id, dailyCompleted: true,
+        session: {
+          targetCount: Number(completed.target_count), answeredCount: Number(completed.answered_count),
+          correctCount: Number(completed.correct_count), reviewAdded: Number(completed.review_added),
+          elapsedSeconds: Number(completed.elapsed_seconds), status: completed.status,
+        },
+        quotaExceeded: false,
+        composition: { due: 0, weak: 0, new: 0, primary: 0, other: 0, byBank: [] },
+      });
+    }
+  }
   const [selected, membership] = await Promise.all([selectedBankCodes(userId), userMembership(userId)]);
   const active = membershipIsActive(membership);
   // 试用期内可以体验多题库，但试用到期后服务端只放行最早加入且仍可练的一个主库。
@@ -2922,7 +3075,6 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const rawKind = requestedKind;
   const sessionKind = rawKind || `practice:${mode}:${focusModule || "mixed"}`;
   const isDiagnostic = sessionKind === "diagnostic";
-  const dateKey = chinaDateKey();
   const usage = await loadDailyUsage(userId, dateKey);
   const freeRemaining = active ? null : Math.max(0, 5 - usage.practice);
   const desiredLimit = Math.max(1, Math.min(active ? 20 : isDiagnostic ? 10 : 5, Math.floor(Number(payload.limit)) || 10));
@@ -3264,9 +3416,23 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
   const moduleClause = focusModule ? "AND (q.module LIKE ? OR q.sub_type LIKE ?)" : "";
   const requestedQuestionCode = trimmed(payload.questionCode, 80);
   const questionClause = requestedQuestionCode ? "AND q.question_code = ?" : "";
+  const requestedAttemptDateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(payload.attemptDateKey ?? ""))
+    ? String(payload.attemptDateKey)
+    : "";
+  const unfinishedClause = requestedQuestionCode ? "" : `AND NOT EXISTS (
+    SELECT 1 FROM essay_attempts ea_block
+    WHERE ea_block.user_id = ? AND ea_block.question_code = q.question_code
+      AND ea_block.stage IN ('scheduled', 'completed')
+  )`;
+  const unfinishedOrder = requestedQuestionCode ? "0" : `CASE WHEN EXISTS (
+    SELECT 1 FROM essay_attempts ea_active
+    WHERE ea_active.user_id = ? AND ea_active.question_code = q.question_code
+      AND ea_active.stage IN ('draft', 'self_check', 'self_score', 'revision')
+  ) THEN 0 ELSE 1 END`;
   const bindings: unknown[] = [...bankCodes];
   if (focusModule) bindings.push(`%${focusModule}%`, `%${focusModule}%`);
   if (requestedQuestionCode) bindings.push(requestedQuestionCode);
+  else bindings.push(userId, userId);
   const rows = await getD1().prepare(`SELECT q.question_code, q.module, q.sub_type, q.stem, q.material, q.prompt,
     q.word_limit, q.scoring_points_json, q.explanation, q.technique, q.source, q.source_region, q.source_year,
     q.truth_verified, q.frequency, q.frequency_occurrences, q.frequency_papers, q.frequency_years_json, q.frequency_updated_at,
@@ -3279,9 +3445,9 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
     JOIN question_banks qb ON qb.id = qbi.bank_id
     WHERE q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved'
       AND q.subject = '申论' AND qb.status = 'published'
-      AND qb.bank_code IN (${placeholders}) ${moduleClause} ${questionClause}
+      AND qb.bank_code IN (${placeholders}) ${moduleClause} ${questionClause} ${unfinishedClause}
     GROUP BY q.question_code
-    ORDER BY CASE WHEN q.score_rate_attempts >= 100
+    ORDER BY ${unfinishedOrder}, CASE WHEN q.score_rate_attempts >= 100
         AND (q.score_rate_correct * 100.0 / q.score_rate_attempts) BETWEEN 40 AND 80 THEN 0 ELSE 1 END,
       CASE WHEN q.frequency_papers > 0 AND (q.frequency_occurrences * 1.0 / q.frequency_papers) >= 0.55 THEN 0
         WHEN q.frequency_papers > 0 AND (q.frequency_occurrences * 1.0 / q.frequency_papers) >= 0.25 THEN 1 ELSE 2 END,
@@ -3289,16 +3455,21 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
       q.source_year DESC, q.question_code
     LIMIT ?`).bind(...bindings, limit).all<Record<string, unknown>>();
   const questionCodes = rows.results.map((row) => String(row.question_code));
-  const attemptStages = new Map<string, string>();
+  const attemptSnapshots = new Map<string, EssayAttemptRow>();
   if (questionCodes.length) {
-    const attempts = await getD1().prepare(`SELECT question_code, stage FROM essay_attempts
+    const dateClause = requestedAttemptDateKey ? "AND date_key = ?" : "";
+    const attempts = await getD1().prepare(`SELECT id, question_code, date_key, stage, first_draft,
+      self_checks_json, self_score, loss_reasons_json, revised_draft, rewrite_draft,
+      elapsed_seconds, rewrite_due_at FROM essay_attempts
       WHERE user_id = ? AND question_code IN (${questionCodes.map(() => "?").join(",")})
-      ORDER BY updated_at DESC`).bind(userId, ...questionCodes).all<{ question_code: string; stage: string }>();
-    for (const attempt of attempts.results) if (!attemptStages.has(attempt.question_code)) attemptStages.set(attempt.question_code, attempt.stage);
+        ${dateClause}
+      ORDER BY updated_at DESC`).bind(userId, ...questionCodes, ...(requestedAttemptDateKey ? [requestedAttemptDateKey] : [])).all<EssayAttemptRow>();
+    for (const attempt of attempts.results) if (!attemptSnapshots.has(attempt.question_code)) attemptSnapshots.set(attempt.question_code, attempt);
   }
   const questions = rows.results.map((row) => {
     const metrics = metricFields(row);
-    const attemptStage = attemptStages.get(String(row.question_code)) ?? "draft";
+    const attempt = attemptSnapshots.get(String(row.question_code));
+    const attemptStage = attempt?.stage ?? "draft";
     const attemptStageIndex = ESSAY_STAGE_ORDER.indexOf(attemptStage as (typeof ESSAY_STAGE_ORDER)[number]);
     const region = normalizeProvince(row.source_region) || normalizeProvince(row.province) || "全国";
     const examYear = Number.isInteger(Number(row.source_year)) ? Number(row.source_year) : null;
@@ -3322,6 +3493,7 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
       reference: attemptStageIndex >= 3 ? String(row.explanation ?? "") : "",
       technique: attemptStageIndex >= 3 ? String(row.technique ?? "") : "",
       serverStage: attemptStage,
+      serverAttempt: attempt ? publicEssayAttempt(attempt) : null,
       source: String(row.source ?? ""),
       region,
       examYear,
@@ -3361,6 +3533,37 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
 }
 
 const ESSAY_STAGE_ORDER = ["draft", "self_check", "self_score", "revision", "scheduled", "completed"] as const;
+
+type EssayAttemptRow = {
+  id: string;
+  question_code: string;
+  date_key: string;
+  stage: string;
+  first_draft: string;
+  self_checks_json: string;
+  self_score: number | null;
+  loss_reasons_json: string;
+  revised_draft: string;
+  rewrite_draft: string;
+  elapsed_seconds: number;
+  rewrite_due_at: string | null;
+};
+
+function publicEssayAttempt(attempt: EssayAttemptRow) {
+  return {
+    id: attempt.id,
+    dateKey: attempt.date_key,
+    stage: ESSAY_STAGE_ORDER.includes(attempt.stage as (typeof ESSAY_STAGE_ORDER)[number]) ? attempt.stage : "draft",
+    firstDraft: String(attempt.first_draft ?? ""),
+    selfChecks: safeStringArray(attempt.self_checks_json, 20),
+    selfScore: attempt.self_score === null ? null : Number(attempt.self_score),
+    lossReasons: safeStringArray(attempt.loss_reasons_json, 20),
+    revisedDraft: String(attempt.revised_draft ?? ""),
+    rewriteDraft: String(attempt.rewrite_draft ?? ""),
+    elapsedSeconds: Math.max(0, Number(attempt.elapsed_seconds ?? 0)),
+    rewriteDueAt: String(attempt.rewrite_due_at ?? ""),
+  };
+}
 
 async function saveEssayAttempt(userId: string, payload: Record<string, unknown>) {
   if (!membershipIsActive(await userMembership(userId))) {
@@ -3428,6 +3631,12 @@ async function saveEssayAttempt(userId: string, payload: Record<string, unknown>
       updated_at = CURRENT_TIMESTAMP`)
     .bind(id, userId, questionCode, dateKey, stage, firstDraft, JSON.stringify(checks), selfScore,
       JSON.stringify(lossReasons), revisedDraft, rewriteDraft, elapsedSeconds, serverRewriteDueAt, stage, stage).run();
+  if (stage === "scheduled" || stage === "completed") {
+    await db.prepare(`INSERT INTO daily_step_completions
+      (user_id, date_key, step, source_ref, completed_at) VALUES (?, ?, 'essay', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, date_key, step) DO UPDATE SET source_ref = excluded.source_ref`)
+      .bind(userId, chinaDateKey(), id).run();
+  }
   let scoringPoints: string[] = [];
   try {
     const parsed = JSON.parse(available.scoring_points_json ?? "[]");
@@ -3438,6 +3647,20 @@ async function saveEssayAttempt(userId: string, payload: Record<string, unknown>
     id,
     stage,
     rewriteDueAt: serverRewriteDueAt,
+    attempt: publicEssayAttempt({
+      id,
+      question_code: questionCode,
+      date_key: dateKey,
+      stage,
+      first_draft: firstDraft,
+      self_checks_json: JSON.stringify(checks),
+      self_score: selfScore,
+      loss_reasons_json: JSON.stringify(lossReasons),
+      revised_draft: revisedDraft,
+      rewrite_draft: rewriteDraft,
+      elapsed_seconds: elapsedSeconds,
+      rewrite_due_at: serverRewriteDueAt,
+    }),
     scoringPoints: stageIndex >= 2 ? scoringPoints : undefined,
     reference: stageIndex >= 3 ? available.explanation : undefined,
     technique: stageIndex >= 3 ? available.technique : undefined,
@@ -3965,6 +4188,75 @@ async function updateQuestionMeta(userId: string, payload: Record<string, unknow
   });
 }
 
+async function recordDailyStep(userId: string, payload: Record<string, unknown>) {
+  const today = chinaDateKey();
+  const requestedDate = trimmed(payload.dateKey, 10) || today;
+  const step = trimmed(payload.step, 20);
+  if (requestedDate !== today) return json({ error: "只能记录当天学习步骤", code: "DAILY_STEP_DATE_INVALID" }, 400);
+  if (!new Set(["morning", "essay"]).has(step)) return json({ error: "学习步骤无效", code: "DAILY_STEP_INVALID" }, 400);
+  const db = getD1();
+  let sourceRef = step;
+  if (step === "essay") {
+    const attempt = await db.prepare(`SELECT id FROM essay_attempts
+      WHERE user_id = ? AND (
+        (date_key = ? AND stage IN ('scheduled', 'completed'))
+        OR (stage = 'completed' AND date(updated_at, '+8 hours') = date('now', '+8 hours'))
+      ) ORDER BY updated_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
+    if (!attempt) return json({ error: "完成申论二改或到期重写后才能记录本步骤", code: "DAILY_ESSAY_INCOMPLETE" }, 409);
+    sourceRef = attempt.id;
+  }
+  await db.prepare(`INSERT INTO daily_step_completions
+    (user_id, date_key, step, source_ref, completed_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, date_key, step) DO UPDATE SET source_ref = excluded.source_ref`)
+    .bind(userId, today, step, sourceRef).run();
+  return json({ ok: true, dateKey: today, step });
+}
+
+function serverContentDayIndex(dateKey: string, count: number) {
+  if (count <= 1) return 0;
+  const dayNumber = Math.floor(new Date(`${dateKey}T00:00:00+08:00`).getTime() / 86_400_000);
+  return Math.abs(dayNumber) % count;
+}
+
+async function requiredDailyStepNames(userId: string, today: string) {
+  const [membership, profile, state] = await Promise.all([
+    userMembership(userId),
+    loadExamProfile(userId),
+    getD1().prepare("SELECT progress_json FROM user_states WHERE user_id = ?").bind(userId)
+      .first<{ progress_json: string }>(),
+  ]);
+  let progress: Record<string, unknown> = {};
+  try { progress = JSON.parse(state?.progress_json ?? "{}"); } catch { progress = {}; }
+  const overrides = progress.planOverrides && typeof progress.planOverrides === "object"
+    ? progress.planOverrides as Record<string, unknown>
+    : {};
+  const active = membershipIsActive(membership);
+  const planMinutes = effectiveDailyPlanMinutes(profile.dailyMinutes, overrides[today], active);
+  const [content, banks, dueRewrites] = await Promise.all([
+    loadContent(active, profile),
+    loadQuestionBanks(userId, active),
+    loadDueEssayRewrites(userId),
+  ]);
+  const planConfig = content.strategyConfig?.timePlans && typeof content.strategyConfig.timePlans === "object"
+    ? (content.strategyConfig.timePlans as Record<string, Record<string, unknown>>)[String(planMinutes)]
+    : null;
+  const fallback = (DEFAULT_STRATEGY.timePlans as Record<number, { morning: number; essay: number }>)[planMinutes as 10 | 30 | 45 | 60];
+  const morningMinutes = Math.max(0, Math.floor(Number(planConfig?.morning ?? fallback?.morning ?? 0)));
+  const essayMinutes = Math.max(0, Math.floor(Number(planConfig?.essay ?? fallback?.essay ?? 0)));
+  const days = content.practiceDays ?? [];
+  const selectedDay = days.find((day) => day.date === today)
+    ?? days[serverContentDayIndex(today, days.length)]
+    ?? days[0];
+  const hasMorning = Boolean(selectedDay && (selectedDay.morning.lead.trim() || selectedDay.morning.paragraphs.length));
+  const hasEssay = banks.some((bank) => bank.subject === "申论" && bank.added && bank.practiceAvailable
+    && Number(bank.availableEssayCount ?? 0) > 0) || dueRewrites.length > 0;
+  return [
+    ...(morningMinutes > 0 && hasMorning ? ["morning"] : []),
+    "practice",
+    ...(essayMinutes > 0 && hasEssay ? ["essay"] : []),
+  ];
+}
+
 async function recordDailyCheckin(userId: string, payload: Record<string, unknown>) {
   const today = chinaDateKey();
   const requestedDate = trimmed(payload.dateKey, 10) || today;
@@ -3976,6 +4268,14 @@ async function recordDailyCheckin(userId: string, payload: Record<string, unknow
     ORDER BY completed_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
   if (!session) {
     return json({ error: "完成真实日练后才能打卡，空题库或未完成任务不会计入", code: "DAILY_PRACTICE_INCOMPLETE" }, 409);
+  }
+  const requiredSteps = await requiredDailyStepNames(userId, today);
+  const completedRows = await db.prepare(`SELECT step FROM daily_step_completions
+    WHERE user_id = ? AND date_key = ?`).bind(userId, today).all<{ step: string }>();
+  const completedSteps = new Set(["practice", ...completedRows.results.map((row) => row.step)]);
+  const missingSteps = requiredSteps.filter((step) => !completedSteps.has(step));
+  if (missingSteps.length) {
+    return json({ error: `请先完成今日${missingSteps.map((step) => step === "morning" ? "晨读" : step === "essay" ? "申论" : "行测").join("、")}`, code: "DAILY_STEPS_INCOMPLETE", missingSteps }, 409);
   }
   await db.prepare(`INSERT OR IGNORE INTO daily_checkins
     (user_id, date_key, session_id, source, completed_at) VALUES (?, ?, ?, 'daily_practice', CURRENT_TIMESTAMP)`)
@@ -9338,7 +9638,9 @@ export async function POST(request: Request) {
     else if (action === "updateQuestionMeta") response = await updateQuestionMeta(identity.userId, payload, identity.signedIn);
     else if (action === "submitContentReport") response = await submitContentReport(identity.userId, payload);
     else if (action === "getPracticeSessionSummary") response = await getPracticeSessionSummary(identity.userId, payload);
+    else if (action === "recordDailyStep") response = await recordDailyStep(identity.userId, payload);
     else if (action === "recordDailyCheckin") response = await recordDailyCheckin(identity.userId, payload);
+    else if (action === "authorizeAudioPlayback") response = await authorizeAudioPlayback(identity.userId, payload);
     else if (action === "bindInvite") response = await bindInvite(identity.userId, payload);
     else if (action === "redeem") response = await redeem(identity.userId, payload);
     else if (action === "getCommerceProducts") response = await getCommerceProducts(request, identity.userId);

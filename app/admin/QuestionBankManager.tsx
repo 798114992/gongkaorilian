@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Steps } from "antd";
 
 export type QuestionBankItem = {
   id: number;
@@ -62,11 +63,13 @@ type ManagedQuestion = CanonicalQuestion & { id: number; status?: "active" | "di
 type RowIssue = { row: number; message: string };
 
 type Props = {
-  adminToken: string;
   banks: QuestionBankItem[];
   imports: QuestionImportItem[];
   onReload: () => Promise<void>;
   onMessage: (message: string) => void;
+  view?: "banks" | "imports";
+  canEdit?: boolean;
+  canPublish?: boolean;
 };
 
 // 后端单题CRUD接口接通后改为 true；默认隐藏，避免运营人员触发未实现动作。
@@ -211,7 +214,15 @@ function validateRow(row: CanonicalQuestion, index: number): RowIssue[] {
   return issues;
 }
 
-export default function QuestionBankManager({ adminToken, banks, imports, onReload, onMessage }: Props) {
+export default function QuestionBankManager({
+  banks,
+  imports,
+  onReload,
+  onMessage,
+  view = "banks",
+  canEdit = true,
+  canPublish = true,
+}: Props) {
   const [bankForm, setBankForm] = useState({ ...emptyBank });
   const [editingBankId, setEditingBankId] = useState<number | null>(null);
   const [selectedBankId, setSelectedBankId] = useState("");
@@ -221,6 +232,8 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   const [readingFile, setReadingFile] = useState(false);
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [importStage, setImportStage] = useState<0 | 1 | 2 | 3>(0);
+  const [importResult, setImportResult] = useState("");
   const [questionSearch, setQuestionSearch] = useState("");
   const [questionResults, setQuestionResults] = useState<ManagedQuestion[]>([]);
   const [searchingQuestions, setSearchingQuestions] = useState(false);
@@ -229,8 +242,9 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   const api = async (payload: Record<string, unknown>) => {
     const response = await fetch("/api/app", {
       method: "POST",
+      credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...payload, adminToken }),
+      body: JSON.stringify(payload),
     });
     const data = await response.json() as Record<string, unknown> & { error?: string };
     if (!response.ok) throw new Error(data.error || "操作失败");
@@ -238,6 +252,16 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   };
 
   const selectedBank = useMemo(() => banks.find((bank) => String(bank.id) === selectedBankId), [banks, selectedBankId]);
+
+  const retryImport = (item: QuestionImportItem) => {
+    setSelectedBankId(String(item.bank_id));
+    setSelectedFile(null);
+    setRows([]);
+    setIssues([]);
+    setProgress(0);
+    onMessage(`已选中“${item.bank_name}”，请重新选择修正后的文件`);
+    document.querySelector(".question-upload-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const searchQuestions = async () => {
     setSearchingQuestions(true);
@@ -276,6 +300,7 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   };
 
   const saveBank = async () => {
+    if (!canEdit) return onMessage("当前角色没有编辑题库的权限");
     try {
       await api({ action: "adminUpsertQuestionBank", bankId: editingBankId, ...bankForm });
       onMessage("题库配置已保存");
@@ -304,6 +329,7 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   };
 
   const toggleBankStatus = async (bank: QuestionBankItem) => {
+    if (!canPublish) return onMessage("当前角色没有发布或下线题库的权限");
     try {
       await api({ action: "adminSetQuestionBankStatus", id: bank.id, status: bank.status === "published" ? "draft" : "published" });
       onMessage(bank.status === "published" ? "题库已转为草稿" : "题库已发布");
@@ -341,11 +367,15 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
       setRows(normalized);
       setIssues(nextIssues);
       setProgress(0);
+      setImportStage(1);
+      setImportResult("");
       onMessage(`已读取 ${normalized.length} 行，发现 ${nextIssues.length} 个待处理问题`);
     } catch (error) {
       setSelectedFile(null);
       setRows([]);
       setIssues([]);
+      setImportStage(0);
+      setImportResult("");
       onMessage(error instanceof Error ? error.message : "文件读取失败");
     } finally {
       setReadingFile(false);
@@ -353,9 +383,14 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
   };
 
   const importQuestions = async () => {
+    if (!canEdit) return onMessage("当前角色没有导入题目的权限");
     if (!selectedBank || !selectedFile || !rows.length) return onMessage("请先选择题库并上传文件");
+    const invalidRows = new Set(issues.map((item) => item.row)).size;
+    if (!window.confirm(`确认将 ${rows.length - invalidRows} 行有效真题导入“${selectedBank.name}”？校验失败的 ${invalidRows} 行不会写入。`)) return;
     setImporting(true);
     setProgress(0);
+    setImportStage(2);
+    setImportResult("");
     const allErrors: RowIssue[] = [];
     let importId = 0;
     try {
@@ -375,13 +410,18 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
       }
       const summary = allErrors.slice(0, 100).map((item) => `第${item.row}行：${item.message}`).join("\n");
       await api({ action: "adminFinishQuestionImport", importId, errorSummary: summary });
-      onMessage(allErrors.length ? `导入完成，${allErrors.length} 行未通过校验` : `导入完成，共处理 ${rows.length} 道题`);
+      const resultMessage = allErrors.length ? `导入完成，${allErrors.length} 行未通过校验` : `导入完成，共处理 ${rows.length} 道题`;
+      setImportResult(resultMessage);
+      setImportStage(3);
+      onMessage(resultMessage);
       await onReload();
     } catch (error) {
       const reason = error instanceof Error ? error.message : "题库导入中断";
       if (importId) {
         try { await api({ action: "adminFinishQuestionImport", importId, aborted: true, errorSummary: reason }); } catch { /* keep original error */ }
       }
+      setImportResult(`导入中断：${reason}`);
+      setImportStage(3);
       onMessage(reason);
     } finally {
       setImporting(false);
@@ -390,7 +430,7 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
 
   return (
     <>
-      <section className="admin-panel bank-config-panel">
+      {view === "banks" && <section className="admin-panel bank-config-panel">
         <div className="admin-panel-title"><div><span>题库配置</span><h2>{editingBankId ? "编辑题库配置" : "创建国考或省考题库"}</h2><small>省考按省份独立建库；国省共通题可复用同一题目编号，系统会跨库去重。</small></div><button onClick={() => { setEditingBankId(null); setBankForm({ ...emptyBank }); }}>新建空白题库</button></div>
         <div className="form-grid bank-form-grid">
           <label>题库编码<input value={bankForm.bankCode} onChange={(event) => setBankForm({ ...bankForm, bankCode: event.target.value.toUpperCase() })} placeholder="如 GD-XC-2027" /></label>
@@ -403,11 +443,17 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
           <label>初始状态<select value={bankForm.status} onChange={(event) => setBankForm({ ...bankForm, status: event.target.value })}><option value="draft">草稿</option><option value="published">发布</option></select></label>
           <label className="wide">题库简介<textarea value={bankForm.description} onChange={(event) => setBankForm({ ...bankForm, description: event.target.value })} placeholder="适用人群、题目范围和更新说明" /></label>
         </div>
-        <button className="admin-primary" onClick={saveBank}>{editingBankId ? "保存题库修改" : "保存题库配置"}</button>
-      </section>
+        <button className="admin-primary" disabled={!canEdit} onClick={saveBank}>{editingBankId ? "保存题库修改" : "保存题库配置"}</button>
+      </section>}
 
-      <section className="admin-panel question-upload-panel">
+      {view === "imports" && <section className="admin-panel question-upload-panel">
         <div className="admin-panel-title"><div><span>文件导入</span><h2>上传Excel或CSV题库</h2></div><button onClick={() => void downloadTemplate()}>下载Excel模板</button></div>
+        <Steps
+          size="small"
+          current={importStage}
+          items={[{ title: "选择题库与文件" }, { title: "校验预览" }, { title: "确认导入" }, { title: "查看结果" }]}
+          style={{ marginBottom: 24 }}
+        />
         <div className="upload-toolbar">
           <label>导入到题库<select value={selectedBankId} onChange={(event) => setSelectedBankId(event.target.value)}><option value="">请选择目标题库</option>{banks.map((bank) => <option key={bank.id} value={bank.id}>{bank.name}（{bank.question_count}题）</option>)}</select></label>
           <label className="upload-dropzone"><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void readFile(file); }} /><span>{readingFile ? "正在读取文件…" : selectedFile ? selectedFile.name : "点击选择 XLSX / XLS / CSV 文件"}</span><small>最大20MB，首行必须是模板字段名</small></label>
@@ -419,17 +465,18 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
             <div className="admin-table-wrap"><table><thead><tr><th>题目编号</th><th>真题标签</th><th>价值标签</th><th>模块</th><th>题干/材料</th><th>答案/任务</th></tr></thead><tbody>{rows.slice(0, 6).map((row, index) => <tr key={`${row.questionCode}-${index}`}><td>{row.questionCode || "未填写"}</td><td><b>{row.region && row.examYear ? `${row.region}-${row.examYear}` : "未填写"}</b></td><td>{row.frequency || "—"} · {row.importanceStars ? `${row.importanceStars}星` : "—"} · {row.scoreRate ?? "—"}%</td><td>{row.module || "未填写"}</td><td className="preview-text">{row.stem || "未填写"}</td><td className="preview-text">{row.subject === "申论" ? row.prompt : row.answer}</td></tr>)}</tbody></table></div>
             {issues.length > 0 && <details className="issue-list"><summary>查看前20个校验问题</summary>{issues.slice(0, 20).map((issue, index) => <p key={`${issue.row}-${index}`}>第 {issue.row} 行：{issue.message}</p>)}</details>}
             {importing && <div className="import-progress"><div><i style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>}
-            <button className="admin-primary import-button" onClick={importQuestions} disabled={importing || !selectedBankId}>{importing ? "正在分批导入…" : `导入到${selectedBank?.name ?? "目标题库"}`}</button>
+            {importResult && <div className={`import-result ${importResult.startsWith("导入中断") ? "has-errors" : ""}`} role="status">{importResult}。可在下方导入记录查看详细结果；修正原文件后可直接重新选择并导入。</div>}
+            <button className="admin-primary import-button" onClick={importQuestions} disabled={!canEdit || importing || !selectedBankId}>{importing ? "正在分批导入…" : `导入到${selectedBank?.name ?? "目标题库"}`}</button>
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="admin-panel table-panel">
+      {view === "banks" && <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>题库书架</span><h2>题库整理与发布</h2></div><button onClick={() => void onReload()}>刷新</button></div>
-        <div className="admin-table-wrap"><table><thead><tr><th>题库</th><th>分类</th><th>年份</th><th>题量</th><th>状态</th><th>操作</th></tr></thead><tbody>{banks.length ? banks.map((bank) => <tr key={bank.id}><td><b>{bank.name}</b><small>{bank.bank_code}</small></td><td>{bank.exam_type === "national" ? "国考" : bank.exam_type === "provincial" ? `${bank.province}省考` : "专项"} · {bank.subject}</td><td>{bank.exam_year ?? "长期"}</td><td>{bank.question_count}</td><td><span className={`status ${bank.status}`}>{bank.status === "published" ? "已发布" : "草稿"}</span></td><td><button onClick={() => editBank(bank)}>编辑</button><button onClick={() => void toggleBankStatus(bank)}>{bank.status === "published" ? "下线" : "发布"}</button></td></tr>) : <tr><td colSpan={6}>还没有题库，请先在上方创建。</td></tr>}</tbody></table></div>
-      </section>
+        <div className="admin-table-wrap"><table><thead><tr><th>题库</th><th>分类</th><th>年份</th><th>题量</th><th>状态</th><th>操作</th></tr></thead><tbody>{banks.length ? banks.map((bank) => <tr key={bank.id}><td><b>{bank.name}</b><small>{bank.bank_code}</small></td><td>{bank.exam_type === "national" ? "国考" : bank.exam_type === "provincial" ? `${bank.province}省考` : "专项"} · {bank.subject}</td><td>{bank.exam_year ?? "长期"}</td><td>{bank.question_count}</td><td><span className={`status ${bank.status}`}>{bank.status === "published" ? "已发布" : "草稿"}</span></td><td><button disabled={!canEdit} onClick={() => editBank(bank)}>编辑</button><button disabled={!canPublish} onClick={() => void toggleBankStatus(bank)}>{bank.status === "published" ? "下线" : "发布"}</button></td></tr>) : <tr><td colSpan={6}>还没有题库，请先在上方创建。</td></tr>}</tbody></table></div>
+      </section>}
 
-      {ENABLE_SINGLE_QUESTION_ADMIN && <section className="admin-panel table-panel">
+      {view === "banks" && ENABLE_SINGLE_QUESTION_ADMIN && <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>单题管理</span><h2>搜索、编辑与停用真题</h2><small>可按题号、题干或来源搜索；标签统一显示为“地区-年份”，如广东-2024。</small></div></div>
         <div className="upload-toolbar">
           <label>目标题库<select value={selectedBankId} onChange={(event) => setSelectedBankId(event.target.value)}><option value="">全部题库</option>{banks.map((bank) => <option key={bank.id} value={bank.id}>{bank.name}</option>)}</select></label>
@@ -452,10 +499,10 @@ export default function QuestionBankManager({ adminToken, banks, imports, onRelo
         {questionResults.length > 0 && <div className="admin-table-wrap"><table><thead><tr><th>题目</th><th>真题标签</th><th>价值标签</th><th>题库</th><th>状态</th><th>操作</th></tr></thead><tbody>{questionResults.map((question) => <tr key={question.id}><td><b>{question.questionCode}</b><small>{question.module} · {question.subType}</small></td><td>{question.region}-{question.examYear}</td><td>{question.frequency} · {question.importanceStars}星 · {question.scoreRate}%</td><td>{question.bankNames ?? "—"}</td><td><span className={`status ${question.status === "disabled" ? "disabled" : "published"}`}>{question.status === "disabled" ? "已停用" : "使用中"}</span></td><td><button onClick={() => setEditingQuestion(question)}>编辑标签</button><button onClick={() => void toggleQuestionStatus(question)}>{question.status === "disabled" ? "恢复" : "停用"}</button></td></tr>)}</tbody></table></div>}
       </section>}
 
-      <section className="admin-panel table-panel">
+      {view === "imports" && <section className="admin-panel table-panel">
         <div className="admin-panel-title"><div><span>导入记录</span><h2>最近题库文件</h2></div></div>
-        <div className="admin-table-wrap"><table><thead><tr><th>时间</th><th>题库</th><th>文件</th><th>结果</th><th>状态</th></tr></thead><tbody>{imports.length ? imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString("zh-CN")}</td><td>{item.bank_name}</td><td>{item.file_name}</td><td>{item.imported_rows} 成功 / {item.failed_rows} 失败</td><td><span className={`status ${item.status}`}>{item.status === "processing" ? "导入中" : item.status === "completed" ? "已完成" : item.status === "failed" ? "已中断" : "部分失败"}</span></td></tr>) : <tr><td colSpan={5}>暂无导入记录。</td></tr>}</tbody></table></div>
-      </section>
+        <div className="admin-table-wrap"><table><thead><tr><th>时间</th><th>题库</th><th>文件</th><th>结果</th><th>状态</th><th>失败原因</th><th>操作</th></tr></thead><tbody>{imports.length ? imports.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString("zh-CN")}</td><td>{item.bank_name}</td><td>{item.file_name}</td><td>{item.imported_rows} 成功 / {item.failed_rows} 失败</td><td><span className={`status ${item.status}`}>{item.status === "processing" ? "导入中" : item.status === "completed" ? "已完成" : item.status === "failed" ? "已中断" : "部分失败"}</span></td><td className="preview-text">{item.error_summary ? <details><summary>查看原因</summary><pre style={{ whiteSpace: "pre-wrap", maxWidth: 320 }}>{item.error_summary}</pre></details> : "—"}</td><td>{item.status === "failed" || item.status === "completed_with_errors" ? <button disabled={!canEdit} onClick={() => retryImport(item)}>修正后重试</button> : "—"}</td></tr>) : <tr><td colSpan={7}>暂无导入记录。</td></tr>}</tbody></table></div>
+      </section>}
     </>
   );
 }

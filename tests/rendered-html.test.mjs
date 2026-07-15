@@ -207,33 +207,64 @@ test("account sync and redemption protections are server side", async () => {
   assert.match(route, /UPDATE OR IGNORE redemptions/);
 });
 
-test("the admin surface includes codes, content publishing and analytics", async () => {
-  const [admin, contentManager, bankManager, envExample] = await Promise.all([
-    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+test("the protected admin console includes routed operations, review, imports and analytics", async () => {
+  const [shell, login, dashboard, growth, analytics, system, contentManager, bankManager, envExample, adminAuth, route] = await Promise.all([
+    readFile(new URL("../app/admin/AdminShell.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/login/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/(secure)/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/(secure)/growth/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/(secure)/analytics/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/(secure)/system/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/AdminContentManager.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/QuestionBankManager.tsx", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/admin-auth.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
   ]);
-  const adminSurface = `${admin}\n${contentManager}`;
-  assert.match(admin, /运营管理后台/);
-  assert.match(admin, /adminCreateCodes/);
-  assert.match(admin, /adminUpdateConfig/);
+  const adminSurface = `${shell}\n${dashboard}\n${growth}\n${system}\n${contentManager}`;
+  assert.match(shell, /运营管理后台/);
+  assert.match(shell, /\/admin\/question-banks/);
+  assert.match(shell, /\/admin\/imports/);
+  assert.match(shell, /\/admin\/radar/);
+  assert.match(shell, /\/admin\/analytics/);
+  assert.match(login, /管理员登录/);
+  assert.match(login, /账号使用 admin，密码使用原管理口令/);
+  assert.match(login, /credentials: "include"/);
+  assert.match(growth, /adminCreateCodes/);
+  assert.match(growth, /adminUpdateConfig/);
   assert.match(adminSurface, /adminUpsertContentBatch/);
   assert.match(adminSurface, /adminDisableContent/);
   assert.match(adminSurface, /adminListContentVersions/);
   assert.match(adminSurface, /adminRollbackContent/);
   assert.match(adminSurface, /adminUploadMedia/);
+  assert.match(adminSurface, /adminSubmitContentReview/);
+  assert.match(adminSurface, /adminReviewContent/);
   assert.match(adminSurface, /定时发布/);
   assert.match(adminSurface, /职位表/);
-  assert.match(admin, /7日活跃用户/);
+  assert.match(dashboard, /7日活跃/);
+  assert.match(analytics, /adminListAnalytics/);
+  assert.match(analytics, /近14天/);
+  assert.match(analytics, /核心转化漏斗/);
+  assert.match(system, /操作日志/);
+  assert.match(system, /users\.manage/);
   assert.match(bankManager, /下载Excel模板/);
   assert.match(bankManager, /\.xlsx,\.xls,\.csv/);
+  assert.match(bankManager, /选择题库与文件/);
+  assert.match(bankManager, /校验预览/);
+  assert.match(bankManager, /查看结果/);
   assert.match(bankManager, /adminUpsertQuestionBank/);
   assert.match(bankManager, /adminStartQuestionImport/);
   assert.match(bankManager, /adminImportQuestionBatch/);
   assert.match(bankManager, /offset \+= 40/);
+  assert.match(adminAuth, /PBKDF2/);
+  assert.match(adminAuth, /HttpOnly; Secure; SameSite=Strict/);
+  assert.match(adminAuth, /ADMIN_SESSION_SECONDS = 60 \* 60 \* 12/);
+  assert.match(route, /admin_audit_logs/);
+  assert.match(route, /async function adminListAnalytics/);
+  assert.match(route, /pending_review/);
+  assert.doesNotMatch(adminSurface, /sessionStorage/);
   assert.match(envExample, /replace-with-a-long-random-admin-secret/);
-  assert.doesNotMatch(admin, /gkrl-admin-7pX2mQ9vL4sN8cK6/);
+  assert.doesNotMatch(adminSurface, /gkrl-admin-7pX2mQ9vL4sN8cK6/);
 });
 
 test("database migrations include durable product, content, analytics and question bank records", async () => {
@@ -269,6 +300,11 @@ test("database migrations include durable product, content, analytics and questi
   assert.match(allMigrations, /CREATE UNIQUE INDEX `user_exam_targets_user_target_uq`/);
   assert.match(allMigrations, /ADD `confidence`/);
   assert.match(allMigrations, /ADD `review_stage`/);
+  assert.match(allMigrations, /CREATE TABLE `admin_users`/);
+  assert.match(allMigrations, /CREATE TABLE `admin_sessions`/);
+  assert.match(allMigrations, /CREATE TABLE `admin_audit_logs`/);
+  assert.match(allMigrations, /ADD `submitted_at`/);
+  assert.match(allMigrations, /ADD `reviewed_at`/);
 });
 
 test("the 日练电台 supports dynamic series, fixed audio fallback and the requested controls", async () => {

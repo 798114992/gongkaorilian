@@ -2,6 +2,19 @@ import { env } from "cloudflare:workers";
 import { ensureSchema, getD1 } from "../../../db/runtime";
 import { practiceDays as defaultPracticeDays, type PracticeDay, type Question } from "../../data/content";
 import { audioTracks as defaultAudioTracks, type AudioTrack } from "../../data/audio";
+import {
+  type AdminIdentity,
+  type AdminPermission,
+  authenticateAdmin,
+  createPasswordRecord,
+  ensureAdminSchema,
+  expiredAdminCookie,
+  getAdminIdentity,
+  hasAdminPermission,
+  isAdminRole,
+  revokeAdminSession,
+  writeAdminAudit,
+} from "./admin-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +60,7 @@ const CONTENT_TYPES = new Set([
   "drill_preset",
   "strategy_config",
 ]);
-const CONTENT_STATUSES = new Set(["draft", "scheduled", "published", "archived"]);
+const CONTENT_STATUSES = new Set(["draft", "pending_review", "rejected", "scheduled", "published", "archived"]);
 const DEFAULT_STRATEGY = {
   timePlans: {
     10: { morning: 0, practice: 10, essay: 0, questionCount: 5 },
@@ -1923,10 +1936,32 @@ function getAdminSecret() {
   return (env as unknown as { ADMIN_TOKEN?: string }).ADMIN_TOKEN ?? process.env.ADMIN_TOKEN ?? "";
 }
 
+const ADMIN_CONTEXT = Symbol("admin-context");
+type AuthorizedAdminPayload = Record<string, unknown> & { [ADMIN_CONTEXT]?: AdminIdentity };
+
+function setAdminContext(payload: Record<string, unknown>, admin: AdminIdentity) {
+  Object.defineProperty(payload, ADMIN_CONTEXT, { value: admin, configurable: false, enumerable: false });
+}
+
+function adminFromPayload(payload: Record<string, unknown>) {
+  return (payload as AuthorizedAdminPayload)[ADMIN_CONTEXT] ?? null;
+}
+
 function isAdmin(payload: Record<string, unknown>) {
-  const configured = getAdminSecret();
-  const supplied = String(payload.adminToken ?? "");
-  return Boolean(configured && supplied && configured === supplied);
+  return Boolean(adminFromPayload(payload));
+}
+
+function canAdmin(payload: Record<string, unknown>, permission: AdminPermission) {
+  const admin = adminFromPayload(payload);
+  return Boolean(admin && hasAdminPermission(admin, permission));
+}
+
+function adminUnauthorized() {
+  return json({ authenticated: false, error: "管理员登录已失效，请重新登录" }, 401, expiredAdminCookie());
+}
+
+function adminForbidden(permission: AdminPermission) {
+  return json({ error: "当前管理员没有执行此操作的权限", requiredPermission: permission }, 403);
 }
 
 function getMediaBucket() {
@@ -1953,9 +1988,9 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
-async function adminUploadMedia(request: Request) {
+async function adminUploadMedia(request: Request, admin: AdminIdentity) {
   const form = await request.formData();
-  if (!isAdmin({ adminToken: form.get("adminToken") })) return json({ error: "管理员口令错误" }, 401);
+  if (!hasAdminPermission(admin, "media.upload")) return adminForbidden("media.upload");
   const value = form.get("file");
   if (!(value instanceof File)) return json({ error: "请选择要上传的文件" }, 400);
   const allowed = /^(audio\/|image\/)|^application\/(pdf|octet-stream)$/i.test(value.type);
@@ -2139,6 +2174,7 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   if (!Array.isArray(payload.items) || payload.items.length < 1 || payload.items.length > 100) return json({ error: "每次需导入 1—100 条内容" }, 400);
   const db = getD1();
+  const admin = adminFromPayload(payload)!;
   const saved: Array<{ id: number; contentKey: string; version: number }> = [];
   for (const raw of payload.items) {
     const item = raw as Record<string, unknown>;
@@ -2147,6 +2183,13 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     const title = String(item.title ?? "").trim().slice(0, 120);
     let status = CONTENT_STATUSES.has(String(item.status)) ? String(item.status) : "draft";
     if (!CONTENT_TYPES.has(contentType)) return json({ error: `不支持的内容类型：${contentType}` }, 400);
+    const radarContent = new Set(["exam_event", "exam_notice", "job_position"]).has(contentType);
+    const writePermission: AdminPermission = radarContent ? "radar.write" : "content.write";
+    if (!hasAdminPermission(admin, writePermission) && admin.role !== "super_admin") return adminForbidden(writePermission);
+    if (new Set(["published", "scheduled", "archived", "rejected"]).has(status)
+      && admin.role !== "reviewer" && admin.role !== "super_admin") {
+      return json({ error: "内容需先提交审核，只有审核员可以发布、驳回或下线" }, 403);
+    }
     if (!/^[a-z0-9][a-z0-9_-]{2,80}$/i.test(contentKey) || !title) return json({ error: "内容标识或标题无效" }, 400);
     if (!item.payload || typeof item.payload !== "object" || Array.isArray(item.payload)) return json({ error: `${contentKey} 内容必须是结构化对象` }, 400);
     const payloadJson = JSON.stringify(item.payload);
@@ -2162,6 +2205,10 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
     const existing = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
       publish_at, version FROM content_items WHERE content_key = ?`).bind(contentKey).first<Record<string, unknown>>();
     if (existing) {
+      if (new Set(["published", "scheduled"]).has(String(existing.status))
+        && admin.role !== "reviewer" && admin.role !== "super_admin") {
+        return json({ error: `${contentKey} 已发布；请复制为新草稿并提交审核，避免绕过审核直接改动线上内容` }, 409);
+      }
       const currentVersion = Math.max(1, Number(existing.version ?? 1));
       const nextVersion = currentVersion + 1;
       await db.batch([
@@ -2171,8 +2218,14 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
           .bind(Number(existing.id), currentVersion, String(existing.content_type), String(existing.content_key),
             String(existing.title), String(existing.payload_json), String(existing.status), existing.publish_at ?? null),
         db.prepare(`UPDATE content_items SET content_type = ?, title = ?, payload_json = ?, status = ?,
-          publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-          .bind(contentType, title, payloadJson, status, publishAt, nextVersion, Number(existing.id)),
+          publish_at = ?, review_note = CASE WHEN ? = 'pending_review' THEN '' ELSE review_note END,
+          submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
+          submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
+          reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
+          reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
+          version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+          .bind(contentType, title, payloadJson, status, publishAt, status, status, admin.id, status,
+            status, admin.id, status, nextVersion, Number(existing.id)),
         db.prepare(`INSERT OR REPLACE INTO content_item_versions
           (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'update')`)
@@ -2181,9 +2234,16 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
       saved.push({ id: Number(existing.id), contentKey, version: nextVersion });
     } else {
       const inserted = await db.prepare(`INSERT INTO content_items
-        (content_type, content_key, title, payload_json, status, publish_at, version, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`)
-        .bind(contentType, contentKey, title, payloadJson, status, publishAt).run();
+        (content_type, content_key, title, payload_json, status, publish_at, version,
+          submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1,
+          CASE WHEN ? = 'pending_review' THEN ? ELSE NULL END,
+          CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE NULL END,
+          CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE NULL END,
+          CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END,
+          CURRENT_TIMESTAMP)`)
+        .bind(contentType, contentKey, title, payloadJson, status, publishAt,
+          status, admin.id, status, status, admin.id, status).run();
       const id = Number(inserted.meta.last_row_id);
       await db.prepare(`INSERT INTO content_item_versions
         (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
@@ -2197,7 +2257,8 @@ async function adminUpsertContentBatch(payload: Record<string, unknown>) {
 
 async function adminDisableContent(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
-  return adminSetContentStatus({ ...payload, status: "archived" });
+  payload.status = "archived";
+  return adminSetContentStatus(payload);
 }
 
 async function adminSetContentStatus(payload: Record<string, unknown>) {
@@ -2209,8 +2270,30 @@ async function adminSetContentStatus(payload: Record<string, unknown>) {
   const current = await db.prepare(`SELECT id, content_type, content_key, title, payload_json, status,
     publish_at, version FROM content_items WHERE id = ?`).bind(id).first<Record<string, unknown>>();
   if (!current) return json({ error: "内容不存在" }, 404);
+  const admin = adminFromPayload(payload)!;
+  const radarContent = new Set(["exam_event", "exam_notice", "job_position"]).has(String(current.content_type));
+  if (new Set(["published", "scheduled"]).has(String(current.status))
+    && new Set(["draft", "pending_review"]).has(status)
+    && admin.role !== "reviewer" && admin.role !== "super_admin") {
+    return json({ error: "已发布内容不能由编辑直接撤回；请复制为新草稿后提交审核" }, 409);
+  }
+  if (new Set(["published", "scheduled", "archived", "rejected"]).has(status)) {
+    if (admin.role !== "reviewer" && admin.role !== "super_admin") return json({ error: "只有审核员可以发布、驳回或下线内容" }, 403);
+    if (admin.role === "reviewer" && new Set(["published", "scheduled", "rejected"]).has(status)
+      && String(current.status) !== "pending_review") {
+      return json({ error: "内容尚未提交审核，不能直接发布或驳回" }, 409);
+    }
+  } else {
+    const writePermission: AdminPermission = radarContent ? "radar.write" : "content.write";
+    if (!hasAdminPermission(admin, writePermission)) return adminForbidden(writePermission);
+  }
   const nextVersion = Math.max(1, Number(current.version ?? 1)) + 1;
   let publishAt = current.publish_at ? String(current.publish_at) : null;
+  if (payload.publishAt) {
+    const requestedPublishAt = Date.parse(String(payload.publishAt));
+    if (!Number.isFinite(requestedPublishAt)) return json({ error: "发布时间无效" }, 400);
+    publishAt = new Date(requestedPublishAt).toISOString();
+  }
   if (status === "published") publishAt = null;
   if (status === "scheduled" && (!publishAt || Date.parse(publishAt) <= Date.now())) return json({ error: "请先设置未来的发布时间" }, 400);
   await db.batch([
@@ -2219,8 +2302,14 @@ async function adminSetContentStatus(payload: Record<string, unknown>) {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot')`)
       .bind(id, Number(current.version ?? 1), String(current.content_type), String(current.content_key),
         String(current.title), String(current.payload_json), String(current.status), current.publish_at ?? null),
-    db.prepare("UPDATE content_items SET status = ?, publish_at = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-      .bind(status, publishAt, nextVersion, id),
+    db.prepare(`UPDATE content_items SET status = ?, publish_at = ?, review_note = ?,
+      submitted_by = CASE WHEN ? = 'pending_review' THEN ? ELSE submitted_by END,
+      submitted_at = CASE WHEN ? = 'pending_review' THEN CURRENT_TIMESTAMP ELSE submitted_at END,
+      reviewed_by = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN ? ELSE reviewed_by END,
+      reviewed_at = CASE WHEN ? IN ('published','scheduled','archived','rejected') THEN CURRENT_TIMESTAMP ELSE reviewed_at END,
+      version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(status, publishAt, trimmed(payload.reviewNote, 1000), status, admin.id, status,
+        status, admin.id, status, nextVersion, id),
     db.prepare(`INSERT OR REPLACE INTO content_item_versions
       (content_id, version, content_type, content_key, title, payload_json, status, publish_at, change_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'status')`)
@@ -2234,6 +2323,10 @@ async function adminListContentVersions(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const id = Math.floor(Number(payload.id));
   if (!Number.isFinite(id) || id < 1) return json({ error: "内容不存在" }, 400);
+  const content = await getD1().prepare("SELECT content_type FROM content_items WHERE id = ?").bind(id).first<{ content_type: string }>();
+  if (!content) return json({ error: "内容不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(content.content_type) ? "radar.read" : "content.read";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
   const rows = await getD1().prepare(`SELECT id, content_id, version, content_type, content_key, title,
     payload_json, status, publish_at, change_type, created_at
     FROM content_item_versions WHERE content_id = ? ORDER BY version DESC LIMIT 100`).bind(id).all();
@@ -2280,6 +2373,8 @@ async function adminDuplicateContent(payload: Record<string, unknown>) {
   const db = getD1();
   const source = await db.prepare("SELECT * FROM content_items WHERE id = ?").bind(id).first<Record<string, unknown>>();
   if (!source) return json({ error: "源内容不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(source.content_type)) ? "radar.write" : "content.write";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
   const result = await db.prepare(`INSERT INTO content_items
     (content_type, content_key, title, payload_json, status, publish_at, version, updated_at)
     VALUES (?, ?, ?, ?, 'draft', NULL, 1, CURRENT_TIMESTAMP)`)
@@ -2544,6 +2639,614 @@ async function adminFinishQuestionImport(payload: Record<string, unknown>) {
   return json({ ok: true });
 }
 
+function adminPublicShape(admin: AdminIdentity) {
+  return {
+    id: admin.id,
+    username: admin.username,
+    displayName: admin.displayName,
+    role: admin.role,
+    permissions: admin.permissions,
+  };
+}
+
+async function adminLogin(request: Request, payload: Record<string, unknown>) {
+  const db = getD1();
+  await ensureAdminSchema(db);
+  const username = trimmed(payload.username, 40).normalize("NFKC").toLowerCase();
+  const ipAddress = (request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for") ?? "").split(",")[0].trim().slice(0, 80);
+  const recentFailures = await db.prepare(`SELECT COUNT(*) AS count FROM admin_audit_logs
+    WHERE action = 'adminLogin' AND result IN ('failure','denied') AND created_at >= datetime('now','-15 minutes')
+      AND ((? <> '' AND ip_address = ?) OR details_json LIKE ?)`)
+    .bind(ipAddress, ipAddress, `%\"username\":\"${username.replaceAll("%", "").replaceAll("_", "")}\"%`)
+    .first<{ count: number }>();
+  if (Number(recentFailures?.count ?? 0) >= 10) {
+    await writeAdminAudit(db, request, null, {
+      action: "adminLogin", resourceType: "session", summary: `管理员登录被限流：${username || "未知账号"}`,
+      result: "denied", details: { username, reason: "rate_limit" },
+    });
+    const response = json({ authenticated: false, error: "登录尝试过于频繁，请15分钟后再试" }, 429);
+    response.headers.set("retry-after", "900");
+    return response;
+  }
+  const result = await authenticateAdmin(db, request, getAdminSecret(), username, payload.password ?? payload.adminToken);
+  if (!result) {
+    await writeAdminAudit(db, request, null, {
+      action: "adminLogin",
+      resourceType: "session",
+      summary: `管理员登录失败：${trimmed(payload.username, 40) || "未知账号"}`,
+      result: "failure",
+      details: { username: trimmed(payload.username, 40) },
+    });
+    return json({ authenticated: false, error: "账号或密码错误" }, 401);
+  }
+  await writeAdminAudit(db, request, result.admin, {
+    action: "adminLogin",
+    resourceType: "session",
+    resourceId: result.admin.sessionId,
+    summary: "管理员登录成功",
+  });
+  return json({
+    ok: true,
+    authenticated: true,
+    admin: adminPublicShape(result.admin),
+    expiresAt: result.admin.expiresAt,
+  }, 200, result.cookie);
+}
+
+async function adminSession(request: Request) {
+  const db = getD1();
+  const admin = await getAdminIdentity(db, request);
+  if (!admin) return adminUnauthorized();
+  const [review, imports, scheduled] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status = 'processing'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'scheduled' AND datetime(publish_at) <= datetime('now','+7 days')").first<{ count: number }>(),
+  ]);
+  const pendingCounts = { review: Number(review?.count ?? 0), imports: Number(imports?.count ?? 0), scheduled: Number(scheduled?.count ?? 0) };
+  return json({ authenticated: true, admin: adminPublicShape(admin), expiresAt: admin.expiresAt,
+    pendingCount: pendingCounts.review + pendingCounts.imports + pendingCounts.scheduled, pendingCounts });
+}
+
+async function adminLogout(request: Request) {
+  const db = getD1();
+  const admin = await getAdminIdentity(db, request, false);
+  await revokeAdminSession(db, request);
+  if (admin) await writeAdminAudit(db, request, admin, { action: "adminLogout", resourceType: "session", resourceId: admin.sessionId, summary: "管理员退出登录" });
+  return json({ ok: true, authenticated: false }, 200, expiredAdminCookie());
+}
+
+function listPagination(payload: Record<string, unknown>, maxPageSize = 100) {
+  const page = Math.max(1, Math.floor(Number(payload.page ?? 1)) || 1);
+  const pageSize = Math.max(1, Math.min(maxPageSize, Math.floor(Number(payload.pageSize ?? 20)) || 20));
+  return { page, pageSize, offset: (page - 1) * pageSize };
+}
+
+function parseContentRows(rows: Array<Record<string, unknown>>) {
+  return rows.map((item) => {
+    let parsed: unknown = {};
+    try { parsed = JSON.parse(String(item.payload_json ?? "{}")); } catch { parsed = {}; }
+    return { ...item, payload: parsed };
+  });
+}
+
+async function adminDashboard(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "dashboard.read")) return adminForbidden("dashboard.read");
+  const db = getD1();
+  const [users, activeUsers, publishedContent, pendingReview, banks, questionsCount, redemptions7d,
+    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, recent] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status IN ('published','scheduled')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_banks").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM questions WHERE status = 'active'").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('failed','completed_with_errors')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status = 'processing'").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM question_banks b WHERE b.status = 'published'
+      AND NOT EXISTS (SELECT 1 FROM question_bank_items i WHERE i.bank_id = b.id)`).first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review' AND submitted_at < datetime('now','-2 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'scheduled' AND datetime(publish_at) <= datetime('now','+7 days')").first<{ count: number }>(),
+    db.prepare(`SELECT id, username, role, action, resource_type, resource_id, summary, result, created_at
+      FROM admin_audit_logs ORDER BY id DESC LIMIT 12`).all(),
+  ]);
+  const number = (value: { count: number } | null) => Number(value?.count ?? 0);
+  const todos: Array<Record<string, unknown>> = [];
+  const anomalies: Array<Record<string, unknown>> = [];
+  if (number(pendingReview)) todos.push({ id: "pending-review", type: "review", title: "待审核内容", description: "内容已提交，等待审核后发布", count: number(pendingReview), href: "/admin/content?status=pending_review", priority: "high" });
+  if (number(processingImports)) todos.push({ id: "processing-imports", type: "import", title: "导入任务进行中", description: "题库文件仍在处理", count: number(processingImports), href: "/admin/imports", priority: "medium" });
+  if (number(scheduledSoon)) todos.push({ id: "scheduled-soon", type: "schedule", title: "7天内待发布", description: "检查定时内容和素材完整性", count: number(scheduledSoon), href: "/admin/content?status=scheduled", priority: "medium" });
+  if (number(failedImports)) anomalies.push({ id: "failed-imports", type: "import", title: "导入失败或有错误", description: "需要下载错误信息并修正数据", count: number(failedImports), href: "/admin/imports", severity: "error" });
+  if (number(emptyPublishedBanks)) anomalies.push({ id: "empty-banks", type: "question_bank", title: "已发布空题库", description: "用户能看到但无法开始练习", count: number(emptyPublishedBanks), href: "/admin/question-banks", severity: "warning" });
+  if (number(staleReview)) anomalies.push({ id: "stale-review", type: "review", title: "审核超过48小时", description: "待审核内容已积压", count: number(staleReview), href: "/admin/content?status=pending_review", severity: "warning" });
+  return json({
+    metrics: {
+      users: number(users), activeUsers7d: number(activeUsers), publishedContent: number(publishedContent),
+      pendingReview: number(pendingReview), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
+    },
+    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon),
+    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon) },
+    todos,
+    anomalies,
+    recentActivity: recent.results,
+  });
+}
+
+async function adminListQuestions(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.read")) return adminForbidden("question.read");
+  const db = getD1();
+  const { page, pageSize, offset } = listPagination(payload, 100);
+  const conditions = ["1=1"];
+  const binds: unknown[] = [];
+  const keyword = trimmed(payload.keyword, 100);
+  if (keyword) { conditions.push("(q.question_code LIKE ? OR q.stem LIKE ? OR q.source LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`); }
+  if (payload.status) { conditions.push("q.status = ?"); binds.push(trimmed(payload.status, 30)); }
+  if (Number(payload.bankId) > 0) { conditions.push("EXISTS (SELECT 1 FROM question_bank_items qi WHERE qi.question_id = q.id AND qi.bank_id = ?)"); binds.push(Math.floor(Number(payload.bankId))); }
+  const where = conditions.join(" AND ");
+  const [questionBanks, questionImports, questions, total, summary, bankSummary, importSummary] = await Promise.all([
+    db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
+      b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count
+      FROM question_banks b LEFT JOIN question_bank_items i ON i.bank_id = b.id GROUP BY b.id ORDER BY b.id DESC LIMIT 500`).all(),
+    db.prepare(`SELECT qi.id, qi.bank_id, qb.name AS bank_name, qi.file_name, qi.file_size, qi.total_rows,
+      qi.imported_rows, qi.failed_rows, qi.status, qi.error_summary, qi.created_at, qi.completed_at
+      FROM question_imports qi JOIN question_banks qb ON qb.id = qi.bank_id ORDER BY qi.id DESC LIMIT 200`).all(),
+    db.prepare(`SELECT q.id, q.question_code, q.subject, q.module, q.sub_type, q.stem, q.difficulty,
+      q.source, q.source_region, q.source_year, q.frequency, q.importance_stars, q.score_rate,
+      q.suggested_seconds, q.status, q.updated_at FROM questions q WHERE ${where}
+      ORDER BY q.id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all(),
+    db.prepare(`SELECT COUNT(*) AS count FROM questions q WHERE ${where}`).bind(...binds).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS question_count,
+      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
+      SUM(CASE WHEN source_year IS NULL OR source_region = '' THEN 1 ELSE 0 END) AS incomplete_count FROM questions`).first(),
+    db.prepare(`SELECT COUNT(*) AS total_banks,
+      SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published_banks,
+      SUM(CASE WHEN status = 'published' AND NOT EXISTS (
+        SELECT 1 FROM question_bank_items i WHERE i.bank_id = question_banks.id
+      ) THEN 1 ELSE 0 END) AS empty_published_banks FROM question_banks`).first(),
+    db.prepare(`SELECT COALESCE(SUM(imported_rows), 0) AS imported_rows,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_imports,
+      SUM(CASE WHEN status IN ('failed','completed_with_errors') THEN 1 ELSE 0 END) AS failed_imports
+      FROM question_imports`).first(),
+  ]);
+  const rawSummary = (summary ?? {}) as Record<string, unknown>;
+  const rawBankSummary = (bankSummary ?? {}) as Record<string, unknown>;
+  const rawImportSummary = (importSummary ?? {}) as Record<string, unknown>;
+  const importsProcessing = Number(rawImportSummary.processing_imports ?? 0);
+  const importsFailed = Number(rawImportSummary.failed_imports ?? 0);
+  const importedRows = Number(rawImportSummary.imported_rows ?? 0);
+  return json({ questionBanks: questionBanks.results, questionImports: questionImports.results, questions: questions.results,
+    pagination: { page, pageSize, total: Number(total?.count ?? 0) },
+    summary: {
+      totalQuestions: Number(rawSummary.question_count ?? 0),
+      activeQuestions: Number(rawSummary.active_count ?? 0),
+      incompleteQuestions: Number(rawSummary.incomplete_count ?? 0),
+      question_count: Number(rawSummary.question_count ?? 0),
+      active_count: Number(rawSummary.active_count ?? 0),
+      incomplete_count: Number(rawSummary.incomplete_count ?? 0),
+      totalBanks: Number(rawBankSummary.total_banks ?? 0),
+      publishedBanks: Number(rawBankSummary.published_banks ?? 0),
+      emptyPublishedBanks: Number(rawBankSummary.empty_published_banks ?? 0),
+      importsProcessing, importsFailed, processingImports: importsProcessing, failedImports: importsFailed, importedRows,
+    } });
+}
+
+async function adminListContent(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.read")) return adminForbidden("content.read");
+  const db = getD1();
+  const { page, pageSize, offset } = listPagination(payload, 100);
+  const conditions = ["content_type NOT IN ('exam_event','exam_notice','job_position')"];
+  const binds: unknown[] = [];
+  if (payload.contentType) { conditions.push("content_type = ?"); binds.push(trimmed(payload.contentType, 40)); }
+  if (payload.status) { conditions.push("status = ?"); binds.push(trimmed(payload.status, 30)); }
+  const keyword = trimmed(payload.keyword, 100);
+  if (keyword) { conditions.push("(title LIKE ? OR content_key LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`); }
+  const where = conditions.join(" AND ");
+  const [content, total, media, statusCounts] = await Promise.all([
+    db.prepare(`SELECT id, content_type, content_key, title, payload_json, status, publish_at, version,
+      review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at,
+      (SELECT COUNT(*) FROM content_item_versions v WHERE v.content_id = content_items.id) AS version_count
+      FROM content_items WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM content_items WHERE ${where}`).bind(...binds).first<{ count: number }>(),
+    db.prepare(`SELECT id, file_name, content_type, byte_size, storage, status, created_at,
+      '/api/app?media=' || id AS url FROM media_assets ORDER BY created_at DESC LIMIT 200`).all(),
+    db.prepare("SELECT status, COUNT(*) AS count FROM content_items WHERE content_type NOT IN ('exam_event','exam_notice','job_position') GROUP BY status").all(),
+  ]);
+  const contentStatusCounts = Object.fromEntries(statusCounts.results.map((item) => [String((item as Record<string, unknown>).status), Number((item as Record<string, unknown>).count ?? 0)]));
+  return json({ content: parseContentRows(content.results), mediaAssets: media.results,
+    pagination: { page, pageSize, total: Number(total?.count ?? 0) }, summary: {
+      total: Object.values(contentStatusCounts).reduce((sum, value) => sum + Number(value), 0),
+      draft: contentStatusCounts.draft ?? 0,
+      pendingReview: contentStatusCounts.pending_review ?? 0,
+      scheduled: contentStatusCounts.scheduled ?? 0,
+      published: contentStatusCounts.published ?? 0,
+      rejected: contentStatusCounts.rejected ?? 0,
+      archived: contentStatusCounts.archived ?? 0,
+      mediaAssets: media.results.length,
+      statusCounts: statusCounts.results,
+    } });
+}
+
+async function adminListRadar(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "radar.read")) return adminForbidden("radar.read");
+  const db = getD1();
+  const { page, pageSize, offset } = listPagination(payload, 100);
+  const conditions = ["content_type IN ('exam_event','exam_notice','job_position')"];
+  const binds: unknown[] = [];
+  if (payload.contentType) { conditions.push("content_type = ?"); binds.push(trimmed(payload.contentType, 40)); }
+  if (payload.status) { conditions.push("status = ?"); binds.push(trimmed(payload.status, 30)); }
+  const keyword = trimmed(payload.keyword, 100);
+  if (keyword) { conditions.push("(title LIKE ? OR content_key LIKE ?)"); binds.push(`%${keyword}%`, `%${keyword}%`); }
+  const where = conditions.join(" AND ");
+  const [rows, total, summary] = await Promise.all([
+    db.prepare(`SELECT id, content_type, content_key, title, payload_json, status, publish_at, version,
+      review_note, submitted_by, submitted_at, reviewed_by, reviewed_at, updated_at
+      FROM content_items WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM content_items WHERE ${where}`).bind(...binds).first<{ count: number }>(),
+    db.prepare("SELECT content_type, status, COUNT(*) AS count FROM content_items WHERE content_type IN ('exam_event','exam_notice','job_position') GROUP BY content_type, status").all(),
+  ]);
+  const radarSummary = summary.results as Array<Record<string, unknown>>;
+  const countType = (type: string) => radarSummary.filter((item) => String(item.content_type) === type).reduce((sum, item) => sum + Number(item.count ?? 0), 0);
+  const countStatus = (status: string) => radarSummary.filter((item) => String(item.status) === status).reduce((sum, item) => sum + Number(item.count ?? 0), 0);
+  return json({ content: parseContentRows(rows.results), pagination: { page, pageSize, total: Number(total?.count ?? 0) }, summary: radarSummary, stats: {
+    total: radarSummary.reduce((sum, item) => sum + Number(item.count ?? 0), 0),
+    notices: countType("exam_notice"), events: countType("exam_event"), positions: countType("job_position"),
+    pendingReview: countStatus("pending_review"), published: countStatus("published"),
+  } });
+}
+
+async function adminGetContent(payload: Record<string, unknown>) {
+  const id = Math.floor(Number(payload.id));
+  const contentKey = trimmed(payload.contentKey, 80);
+  if ((!Number.isFinite(id) || id < 1) && !contentKey) return json({ error: "内容不存在" }, 400);
+  const row = id > 0
+    ? await getD1().prepare(`SELECT * FROM content_items WHERE id = ?`).bind(id).first<Record<string, unknown>>()
+    : await getD1().prepare(`SELECT * FROM content_items WHERE content_key = ?`).bind(contentKey).first<Record<string, unknown>>();
+  if (!row) return json({ error: "内容不存在" }, 404);
+  const permission: AdminPermission = new Set(["exam_event", "exam_notice", "job_position"]).has(String(row.content_type)) ? "radar.read" : "content.read";
+  if (!canAdmin(payload, permission)) return adminForbidden(permission);
+  return json({ content: parseContentRows([row])[0] });
+}
+
+async function adminListGrowth(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "growth.read")) return adminForbidden("growth.read");
+  const db = getD1();
+  const [codes, redemptions, events, activeUsers, rewardDays, monthlyCap] = await Promise.all([
+    db.prepare(`SELECT id, code_preview, batch_name, duration_days, max_uses, used_count, status, valid_until, created_at
+      FROM redemption_codes ORDER BY id DESC LIMIT 300`).all(),
+    db.prepare(`SELECT r.id, r.redeemed_at, r.user_id, c.code_preview, c.duration_days
+      FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 300`).all(),
+    db.prepare("SELECT event_name, COUNT(*) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days') GROUP BY event_name ORDER BY count DESC").all(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    getConfigNumber("invite_reward_days", 3),
+    getConfigNumber("invite_monthly_cap", 30),
+  ]);
+  return json({ codes: codes.results, redemptions: redemptions.results, config: { rewardDays, monthlyCap },
+    analytics: { activeUsers: Number(activeUsers?.count ?? 0), eventCounts: events.results } });
+}
+
+async function adminListAnalytics(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "analytics.read")) return adminForbidden("analytics.read");
+  const db = getD1();
+  const days = Number(payload.days) <= 14 ? 14 : 30;
+  const windowModifier = `-${days} days`;
+  const [totalUsers, active7, active30, members, attempts30, dailyTrend, eventCounts, modules, redemptions30, invites30] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-7 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE created_at >= datetime('now','-30 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM users WHERE datetime(membership_end) > CURRENT_TIMESTAMP").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy FROM practice_attempts
+      WHERE answered_at >= datetime('now','-30 days')`).first<{ answers: number; accuracy: number }>(),
+    db.prepare(`SELECT date(created_at,'+8 hours') AS date, COUNT(DISTINCT user_id) AS active_users,
+      SUM(CASE WHEN event_name = 'app_open' THEN 1 ELSE 0 END) AS opens,
+      SUM(CASE WHEN event_name = 'practice_answer' THEN 1 ELSE 0 END) AS answers
+      FROM analytics_events WHERE created_at >= datetime('now', ?)
+      GROUP BY date(created_at,'+8 hours') ORDER BY date ASC`).bind(windowModifier).all<Record<string, unknown>>(),
+    db.prepare(`SELECT event_name, COUNT(*) AS count, COUNT(DISTINCT user_id) AS users
+      FROM analytics_events WHERE created_at >= datetime('now','-30 days') GROUP BY event_name ORDER BY count DESC`).all<Record<string, unknown>>(),
+    db.prepare(`SELECT module, COUNT(*) AS answers, COALESCE(AVG(is_correct),0) AS accuracy
+      FROM practice_attempts WHERE answered_at >= datetime('now','-30 days') GROUP BY module ORDER BY answers DESC`).all<Record<string, unknown>>(),
+    db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-30 days')").first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM invite_relations WHERE bound_at >= datetime('now','-30 days')").first<{ count: number }>(),
+  ]);
+  const events = eventCounts.results;
+  const eventUsers = (eventName: string) => Number(events.find((item) => String(item.event_name) === eventName)?.users ?? 0);
+  const funnelBase = eventUsers("app_open");
+  const funnelSteps = [
+    { key: "app_open", label: "打开应用", users: funnelBase },
+    { key: "practice_batch", label: "领取练习", users: eventUsers("practice_batch") },
+    { key: "practice_answer", label: "完成答题", users: eventUsers("practice_answer") },
+  ];
+  return json({
+    overview: {
+      totalUsers: Number(totalUsers?.count ?? 0), activeUsers7d: Number(active7?.count ?? 0), activeUsers30d: Number(active30?.count ?? 0),
+      memberUsers: Number(members?.count ?? 0), practiceAnswers30d: Number(attempts30?.answers ?? 0),
+      accuracy30d: Math.round(Number(attempts30?.accuracy ?? 0) * 10_000) / 100,
+    },
+    dailyTrend: dailyTrend.results.map((item) => ({ date: item.date, activeUsers: Number(item.active_users ?? 0), opens: Number(item.opens ?? 0), answers: Number(item.answers ?? 0) })),
+    funnel: funnelSteps.map((step) => ({ ...step, rate: funnelBase > 0 ? Math.round(step.users / funnelBase * 10_000) / 100 : 0 })),
+    eventCounts: events.map((item) => ({ eventName: item.event_name, count: Number(item.count ?? 0), users: Number(item.users ?? 0) })),
+    moduleStats: modules.results.map((item) => ({ module: item.module, answers: Number(item.answers ?? 0), accuracy: Math.round(Number(item.accuracy ?? 0) * 10_000) / 100 })),
+    growth: { redemptions30d: Number(redemptions30?.count ?? 0), invites30d: Number(invites30?.count ?? 0) },
+    days,
+  });
+}
+
+async function adminListUsers(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "system.read") && !canAdmin(payload, "users.manage")) return adminForbidden("system.read");
+  const rows = await getD1().prepare(`SELECT id, username, display_name, role, status, last_login_at, created_by, created_at, updated_at
+    FROM admin_users ORDER BY id ASC`).all();
+  return json({ admins: rows.results.map((row) => ({
+    id: row.id, username: row.username, displayName: row.display_name, role: row.role, status: row.status,
+    lastLoginAt: row.last_login_at, createdBy: row.created_by, createdAt: row.created_at, updatedAt: row.updated_at,
+  })) });
+}
+
+async function adminListAuditLogs(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "audit.read")) return adminForbidden("audit.read");
+  const { page, pageSize, offset } = listPagination(payload, 100);
+  const conditions = ["1=1"];
+  const binds: unknown[] = [];
+  if (payload.action) { conditions.push("action = ?"); binds.push(trimmed(payload.action, 100)); }
+  if (payload.username) { conditions.push("username LIKE ?"); binds.push(`%${trimmed(payload.username, 40)}%`); }
+  if (payload.result) { conditions.push("result = ?"); binds.push(trimmed(payload.result, 20)); }
+  const where = conditions.join(" AND ");
+  const db = getD1();
+  const [rows, total] = await Promise.all([
+    db.prepare(`SELECT id, admin_user_id, username, role, action, resource_type, resource_id, summary,
+      result, details_json, ip_address, created_at FROM admin_audit_logs WHERE ${where}
+      ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...binds, pageSize, offset).all<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM admin_audit_logs WHERE ${where}`).bind(...binds).first<{ count: number }>(),
+  ]);
+  const auditLogs = rows.results.map((row) => {
+    let details: unknown = {};
+    try { details = JSON.parse(String(row.details_json ?? "{}")); } catch { details = {}; }
+    return { id: row.id, adminUserId: row.admin_user_id, username: row.username, role: row.role,
+      action: row.action, resourceType: row.resource_type, resourceId: row.resource_id, summary: row.summary,
+      result: row.result, details, ipAddress: row.ip_address, createdAt: row.created_at };
+  });
+  return json({ auditLogs, pagination: { page, pageSize, total: Number(total?.count ?? 0) } });
+}
+
+async function adminListSystem(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "system.read") && !canAdmin(payload, "users.manage") && !canAdmin(payload, "audit.read")) return adminForbidden("system.read");
+  const db = getD1();
+  const { page, pageSize, offset } = listPagination(payload, 100);
+  const [admins, audit, total] = await Promise.all([
+    db.prepare(`SELECT id, username, display_name, role, status, last_login_at, created_by, created_at, updated_at
+      FROM admin_users ORDER BY id ASC`).all(),
+    db.prepare(`SELECT id, admin_user_id, username, role, action, resource_type, resource_id, summary,
+      result, details_json, ip_address, created_at FROM admin_audit_logs ORDER BY id DESC LIMIT ? OFFSET ?`).bind(pageSize, offset).all<Record<string, unknown>>(),
+    db.prepare("SELECT COUNT(*) AS count FROM admin_audit_logs").first<{ count: number }>(),
+  ]);
+  return json({
+    admins: (canAdmin(payload, "system.read") || canAdmin(payload, "users.manage") ? admins.results : []).map((row) => ({ id: row.id, username: row.username, displayName: row.display_name,
+      role: row.role, status: row.status, lastLoginAt: row.last_login_at, createdAt: row.created_at })),
+    auditLogs: audit.results.map((row) => ({ id: row.id, adminUserId: row.admin_user_id, username: row.username,
+      role: row.role, action: row.action, resourceType: row.resource_type, resourceId: row.resource_id,
+      summary: row.summary, result: row.result, details: (() => { try { return JSON.parse(String(row.details_json)); } catch { return {}; } })(),
+      ipAddress: row.ip_address, createdAt: row.created_at })),
+    pagination: { page, pageSize, total: Number(total?.count ?? 0) },
+  });
+}
+
+async function adminCreateUser(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "users.manage")) return adminForbidden("users.manage");
+  const username = trimmed(payload.username, 40).normalize("NFKC").toLowerCase();
+  const displayName = trimmed(payload.displayName, 80);
+  const password = String(payload.password ?? "");
+  if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(username)) return json({ error: "管理员账号需为3—40位小写字母、数字、点、横线或下划线" }, 400);
+  if (!displayName) return json({ error: "请输入管理员姓名" }, 400);
+  if (password.length < 10 || password.length > 128) return json({ error: "管理员密码需为10—128位" }, 400);
+  if (!isAdminRole(payload.role)) return json({ error: "管理员角色无效" }, 400);
+  const current = adminFromPayload(payload)!;
+  const passwordRecord = await createPasswordRecord(password);
+  try {
+    const result = await getD1().prepare(`INSERT INTO admin_users
+      (username, display_name, password_hash, password_salt, password_iterations, role, status, created_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)`)
+      .bind(username, displayName, passwordRecord.hash, passwordRecord.salt, passwordRecord.iterations, payload.role, current.id).run();
+    return json({ ok: true, admin: { id: Number(result.meta.last_row_id), username, displayName, role: payload.role, status: "active" } }, 201);
+  } catch {
+    return json({ error: "管理员账号已存在" }, 409);
+  }
+}
+
+async function activeSuperAdminCount() {
+  const value = await getD1().prepare("SELECT COUNT(*) AS count FROM admin_users WHERE role = 'super_admin' AND status = 'active'").first<{ count: number }>();
+  return Number(value?.count ?? 0);
+}
+
+async function adminSetUserStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "users.manage")) return adminForbidden("users.manage");
+  const id = Math.floor(Number(payload.id));
+  const status = payload.status === "active" ? "active" : payload.status === "disabled" ? "disabled" : "";
+  if (!Number.isFinite(id) || id < 1 || !status) return json({ error: "管理员或状态无效" }, 400);
+  const current = adminFromPayload(payload)!;
+  if (id === current.id && status === "disabled") return json({ error: "不能停用当前登录账号" }, 400);
+  const target = await getD1().prepare("SELECT role, status FROM admin_users WHERE id = ?").bind(id).first<{ role: string; status: string }>();
+  if (!target) return json({ error: "管理员不存在" }, 404);
+  if (target.role === "super_admin" && target.status === "active" && status === "disabled" && await activeSuperAdminCount() <= 1) return json({ error: "至少需要保留一名启用的超级管理员" }, 400);
+  await getD1().batch([
+    getD1().prepare("UPDATE admin_users SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(status, id),
+    getD1().prepare("UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE admin_user_id = ? AND revoked_at IS NULL AND ? = 'disabled'").bind(id, status),
+  ]);
+  return json({ ok: true, id, status });
+}
+
+async function adminUpdateUser(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "users.manage")) return adminForbidden("users.manage");
+  const id = Math.floor(Number(payload.id));
+  const db = getD1();
+  const target = await db.prepare("SELECT id, role, status FROM admin_users WHERE id = ?").bind(id).first<{ id: number; role: string; status: string }>();
+  if (!target) return json({ error: "管理员不存在" }, 404);
+  const displayName = payload.displayName === undefined ? null : trimmed(payload.displayName, 80);
+  const role = payload.role === undefined ? null : String(payload.role);
+  if (displayName !== null && !displayName) return json({ error: "管理员姓名不能为空" }, 400);
+  if (role !== null && !isAdminRole(role)) return json({ error: "管理员角色无效" }, 400);
+  if (target.role === "super_admin" && role && role !== "super_admin" && target.status === "active" && await activeSuperAdminCount() <= 1) return json({ error: "至少需要保留一名启用的超级管理员" }, 400);
+  const statements = [db.prepare(`UPDATE admin_users SET display_name = COALESCE(?, display_name),
+    role = COALESCE(?, role), updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(displayName, role, id)];
+  if (payload.password !== undefined) {
+    const password = String(payload.password);
+    if (password.length < 10 || password.length > 128) return json({ error: "管理员密码需为10—128位" }, 400);
+    const record = await createPasswordRecord(password);
+    statements.push(db.prepare(`UPDATE admin_users SET password_hash = ?, password_salt = ?, password_iterations = ?,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(record.hash, record.salt, record.iterations, id));
+    statements.push(db.prepare("UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE admin_user_id = ? AND revoked_at IS NULL").bind(id));
+  }
+  await db.batch(statements);
+  return json({ ok: true, id });
+}
+
+async function adminSubmitContentReview(payload: Record<string, unknown>) {
+  payload.status = "pending_review";
+  return adminSetContentStatus(payload);
+}
+
+async function adminReviewContent(payload: Record<string, unknown>) {
+  const admin = adminFromPayload(payload);
+  if (!admin || (admin.role !== "reviewer" && admin.role !== "super_admin")) return adminForbidden("content.review");
+  if (payload.decision === "reject") payload.status = "rejected";
+  else if (payload.decision === "approve") {
+    const contentId = Math.floor(Number(payload.id));
+    const content = await getD1().prepare("SELECT publish_at, payload_json FROM content_items WHERE id = ?")
+      .bind(contentId).first<{ publish_at: string | null; payload_json: string }>();
+    if (!content) return json({ error: "内容不存在" }, 404);
+    let storedRequestedAt = "";
+    try {
+      const storedPayload = JSON.parse(content.payload_json) as Record<string, unknown>;
+      storedRequestedAt = String(storedPayload.requestedPublishAt ?? storedPayload.publishAt ?? "");
+    } catch { storedRequestedAt = ""; }
+    const requestedAt = String(payload.publishAt ?? payload.requestedPublishAt ?? content.publish_at ?? storedRequestedAt ?? "");
+    const publishAt = requestedAt ? Date.parse(requestedAt) : 0;
+    if (publishAt > Date.now()) payload.publishAt = new Date(publishAt).toISOString();
+    payload.status = publishAt > Date.now() ? "scheduled" : "published";
+  } else return json({ error: "审核决定无效" }, 400);
+  return adminSetContentStatus(payload);
+}
+
+const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
+  adminDashboard: ["dashboard.read"],
+  adminList: ["system.read"],
+  adminListQuestions: ["question.read"],
+  adminListContent: ["content.read"],
+  adminListRadar: ["radar.read"],
+  adminListGrowth: ["growth.read"],
+  adminListAnalytics: ["analytics.read"],
+  adminListSystem: ["system.read", "users.manage", "audit.read"],
+  adminListUsers: ["system.read", "users.manage"],
+  adminListAuditLogs: ["audit.read"],
+  adminGetContent: ["content.read", "radar.read"],
+  adminCreateCodes: ["growth.write"],
+  adminDisableCode: ["growth.write"],
+  adminUpdateConfig: ["growth.write"],
+  adminListContentVersions: ["content.read", "radar.read"],
+  adminRollbackContent: ["content.publish"],
+  adminDisableContent: ["content.publish"],
+  adminDuplicateContent: ["content.write", "radar.write"],
+  adminUpsertQuestionBank: ["question.write"],
+  adminSetQuestionBankStatus: ["question.write"],
+  adminStartQuestionImport: ["question.import"],
+  adminImportQuestionBatch: ["question.import"],
+  adminFinishQuestionImport: ["question.import"],
+  adminCreateUser: ["users.manage"],
+  adminSetUserStatus: ["users.manage"],
+  adminUpdateUser: ["users.manage"],
+  adminReviewContent: ["content.review"],
+  adminSubmitContentReview: ["content.write", "radar.write"],
+};
+
+const ADMIN_WRITE_ACTIONS = new Set([
+  "adminCreateCodes", "adminDisableCode", "adminUpdateConfig", "adminUpsertContentBatch",
+  "adminDisableContent", "adminSetContentStatus", "adminRollbackContent", "adminDuplicateContent",
+  "adminUpsertQuestionBank", "adminSetQuestionBankStatus", "adminStartQuestionImport",
+  "adminImportQuestionBatch", "adminFinishQuestionImport", "adminCreateUser", "adminSetUserStatus",
+  "adminUpdateUser", "adminSubmitContentReview", "adminReviewContent",
+]);
+
+function resourceTypeForAdminAction(action: string) {
+  if (action.includes("QuestionImport")) return "question_import";
+  if (action.includes("QuestionBank")) return "question_bank";
+  if (action.includes("Content")) return "content";
+  if (action.includes("Code")) return "redemption_code";
+  if (action.includes("Config")) return "config";
+  if (action.includes("User")) return "admin_user";
+  return "admin";
+}
+
+function adminHasAnyPermission(admin: AdminIdentity, permissions: AdminPermission[]) {
+  return permissions.some((permission) => hasAdminPermission(admin, permission));
+}
+
+async function auditAdminResponse(
+  request: Request,
+  admin: AdminIdentity,
+  action: string,
+  payload: Record<string, unknown>,
+  response: Response,
+) {
+  if (!ADMIN_WRITE_ACTIONS.has(action)) return;
+  let responseBody: Record<string, unknown> = {};
+  try { responseBody = await response.clone().json() as Record<string, unknown>; } catch { responseBody = {}; }
+  const resourceId = responseBody.id ?? responseBody.importId ?? payload.id ?? payload.importId ?? payload.bankId ?? "";
+  await writeAdminAudit(getD1(), request, admin, {
+    action,
+    resourceType: resourceTypeForAdminAction(action),
+    resourceId: String(resourceId ?? ""),
+    summary: response.ok ? `${action} 操作成功` : `${action} 操作失败`,
+    result: response.ok ? "success" : "failure",
+    details: { request: payload, response: responseBody },
+  });
+}
+
+async function dispatchAdminAction(request: Request, payload: Record<string, unknown>, action: string) {
+  const admin = await getAdminIdentity(getD1(), request);
+  if (!admin) return adminUnauthorized();
+  setAdminContext(payload, admin);
+  const permissions = ADMIN_ACTION_PERMISSIONS[action];
+  if (permissions && !adminHasAnyPermission(admin, permissions)) {
+    await writeAdminAudit(getD1(), request, admin, {
+      action, resourceType: resourceTypeForAdminAction(action), summary: "权限不足，操作被拒绝",
+      result: "denied", details: { requiredPermissions: permissions },
+    });
+    return adminForbidden(permissions[0]);
+  }
+  let response: Response;
+  if (action === "adminDashboard") response = await adminDashboard(payload);
+  else if (action === "adminList") response = await adminList(payload);
+  else if (action === "adminListQuestions") response = await adminListQuestions(payload);
+  else if (action === "adminListContent") response = await adminListContent(payload);
+  else if (action === "adminListRadar") response = await adminListRadar(payload);
+  else if (action === "adminListGrowth") response = await adminListGrowth(payload);
+  else if (action === "adminListAnalytics") response = await adminListAnalytics(payload);
+  else if (action === "adminListSystem") response = await adminListSystem(payload);
+  else if (action === "adminListUsers") response = await adminListUsers(payload);
+  else if (action === "adminListAuditLogs") response = await adminListAuditLogs(payload);
+  else if (action === "adminGetContent") response = await adminGetContent(payload);
+  else if (action === "adminCreateCodes") response = await adminCreateCodes(payload);
+  else if (action === "adminDisableCode") response = await adminDisableCode(payload);
+  else if (action === "adminUpdateConfig") response = await adminUpdateConfig(payload);
+  else if (action === "adminUpsertContentBatch") response = await adminUpsertContentBatch(payload);
+  else if (action === "adminDisableContent") response = await adminDisableContent(payload);
+  else if (action === "adminSetContentStatus") response = await adminSetContentStatus(payload);
+  else if (action === "adminListContentVersions") response = await adminListContentVersions(payload);
+  else if (action === "adminRollbackContent") response = await adminRollbackContent(payload);
+  else if (action === "adminDuplicateContent") response = await adminDuplicateContent(payload);
+  else if (action === "adminUpsertQuestionBank") response = await adminUpsertQuestionBank(payload);
+  else if (action === "adminSetQuestionBankStatus") response = await adminSetQuestionBankStatus(payload);
+  else if (action === "adminStartQuestionImport") response = await adminStartQuestionImport(payload);
+  else if (action === "adminImportQuestionBatch") response = await adminImportQuestionBatch(payload);
+  else if (action === "adminFinishQuestionImport") response = await adminFinishQuestionImport(payload);
+  else if (action === "adminCreateUser") response = await adminCreateUser(payload);
+  else if (action === "adminSetUserStatus") response = await adminSetUserStatus(payload);
+  else if (action === "adminUpdateUser") response = await adminUpdateUser(payload);
+  else if (action === "adminSubmitContentReview") response = await adminSubmitContentReview(payload);
+  else if (action === "adminReviewContent") response = await adminReviewContent(payload);
+  else return json({ error: "未知管理操作" }, 400);
+  await auditAdminResponse(request, admin, action, payload, response);
+  return response;
+}
+
 export async function GET(request: Request) {
   try {
     await ensureSchema();
@@ -2558,27 +3261,31 @@ export async function POST(request: Request) {
     await ensureSchema();
     await seedDefaults();
     if ((request.headers.get("content-type") ?? "").toLowerCase().includes("multipart/form-data")) {
-      return adminUploadMedia(request);
+      const admin = await getAdminIdentity(getD1(), request);
+      if (!admin) return adminUnauthorized();
+      if (!hasAdminPermission(admin, "media.upload")) {
+        await writeAdminAudit(getD1(), request, admin, { action: "adminUploadMedia", resourceType: "media", summary: "权限不足，媒体上传被拒绝", result: "denied" });
+        return adminForbidden("media.upload");
+      }
+      const response = await adminUploadMedia(request, admin);
+      let responseBody: Record<string, unknown> = {};
+      try { responseBody = await response.clone().json() as Record<string, unknown>; } catch { responseBody = {}; }
+      const asset = responseBody.asset as Record<string, unknown> | undefined;
+      await writeAdminAudit(getD1(), request, admin, {
+        action: "adminUploadMedia", resourceType: "media", resourceId: String(asset?.id ?? ""),
+        summary: response.ok ? "媒体上传成功" : "媒体上传失败", result: response.ok ? "success" : "failure",
+        details: responseBody,
+      });
+      return response;
     }
     const payload = (await request.json()) as Record<string, unknown>;
     const action = String(payload.action ?? "");
+    if (action === "adminLogin") return adminLogin(request, payload);
+    if (action === "adminSession") return adminSession(request);
+    if (action === "adminLogout") return adminLogout(request);
     if (action.startsWith("admin")) {
-      if (action === "adminList") return adminList(payload);
-      if (action === "adminCreateCodes") return adminCreateCodes(payload);
-      if (action === "adminDisableCode") return adminDisableCode(payload);
-      if (action === "adminUpdateConfig") return adminUpdateConfig(payload);
-      if (action === "adminUpsertContentBatch") return adminUpsertContentBatch(payload);
-      if (action === "adminDisableContent") return adminDisableContent(payload);
-      if (action === "adminSetContentStatus") return adminSetContentStatus(payload);
-      if (action === "adminListContentVersions") return adminListContentVersions(payload);
-      if (action === "adminRollbackContent") return adminRollbackContent(payload);
-      if (action === "adminDuplicateContent") return adminDuplicateContent(payload);
-      if (action === "adminUpsertQuestionBank") return adminUpsertQuestionBank(payload);
-      if (action === "adminSetQuestionBankStatus") return adminSetQuestionBankStatus(payload);
-      if (action === "adminStartQuestionImport") return adminStartQuestionImport(payload);
-      if (action === "adminImportQuestionBatch") return adminImportQuestionBatch(payload);
-      if (action === "adminFinishQuestionImport") return adminFinishQuestionImport(payload);
-      return json({ error: "未知管理操作" }, 400);
+      delete payload.adminToken;
+      return dispatchAdminAction(request, payload, action);
     }
     const identity = await ensureUser(request);
     let response: Response;

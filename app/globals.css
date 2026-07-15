@@ -824,6 +824,8 @@ button { color: inherit; }
 .import-progress > div { overflow: hidden; height: 8px; border-radius: 999px; background: #e9edf1; }
 .import-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), #5f9bca); transition: width 0.2s ease; }
 .import-progress span { color: var(--muted); font-size: 10px; }
+.import-result { margin-top: 12px; border: 1px solid #b8ded2; border-radius: 10px; padding: 10px 12px; color: #246a55; background: #eff9f5; font-size: 11px; line-height: 1.6; }
+.import-result.has-errors { border-color: #f0c7bf; color: #9d4f43; background: #fff4f2; }
 .import-button:disabled { opacity: 0.55; cursor: not-allowed; }
 .admin-grid { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 14px; margin-top: 14px; }
 .admin-panel { border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fff; box-shadow: 0 10px 28px rgba(25, 49, 74, 0.05); }

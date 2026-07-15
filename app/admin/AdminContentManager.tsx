@@ -20,22 +20,29 @@ export type AdminContentItem = {
   content_type: AdminContentType;
   content_key: string;
   title: string;
-  status: "draft" | "scheduled" | "published" | "archived";
+  status: "draft" | "pending_review" | "rejected" | "scheduled" | "published" | "archived";
   publish_at: string | null;
   payload?: Record<string, unknown>;
   payload_json?: string;
   version_count?: number | string;
+  review_note?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
   updated_at: string;
 };
 
 type Props = {
-  adminToken: string;
   items: AdminContentItem[];
   onReload: () => Promise<void>;
   onMessage: (message: string) => void;
+  scope?: "content" | "radar";
+  canEdit?: boolean;
+  canReview?: boolean;
+  canPublish?: boolean;
+  canUpload?: boolean;
 };
 
-type PublishMode = "draft" | "now" | "scheduled";
+type PublishMode = "draft" | "review" | "now" | "scheduled";
 type ContentDraft = {
   contentType: Exclude<AdminContentType, "practice_day">;
   contentKey: string;
@@ -49,7 +56,7 @@ type VersionItem = {
   id: number;
   version: number;
   title: string;
-  status: "draft" | "scheduled" | "published" | "archived";
+  status: "draft" | "pending_review" | "rejected" | "scheduled" | "published" | "archived";
   publish_at: string | null;
   payload?: Record<string, unknown>;
   created_at: string;
@@ -172,8 +179,17 @@ const positionTemplate = [{
   来源链接: "https://example.com/position-table",
 }];
 
-export default function AdminContentManager({ adminToken, items, onReload, onMessage }: Props) {
-  const [draft, setDraft] = useState<ContentDraft>(() => emptyDraft());
+export default function AdminContentManager({
+  items,
+  onReload,
+  onMessage,
+  scope = "content",
+  canEdit = true,
+  canReview = false,
+  canPublish = true,
+  canUpload = true,
+}: Props) {
+  const [draft, setDraft] = useState<ContentDraft>(() => emptyDraft(scope === "radar" ? "exam_notice" : "morning_read"));
   const [editingId, setEditingId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [filterType, setFilterType] = useState<"all" | AdminContentType>("all");
@@ -190,11 +206,17 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   const [readingPositions, setReadingPositions] = useState(false);
   const [importingPositions, setImportingPositions] = useState(false);
 
+  const scopedTypes = useMemo(() => CONTENT_TYPES.filter((item) => scope === "radar"
+    ? ["exam_notice", "exam_event", "job_position"].includes(item.type)
+    : ["morning_read", "current_affairs", "essay_micro", "audio_track", "drill_preset", "strategy_config"].includes(item.type)), [scope]);
+  const scopedTypeNames = useMemo(() => new Set(scopedTypes.map((item) => item.type)), [scopedTypes]);
+
   const api = async (payload: Record<string, unknown>) => {
     const response = await fetch("/api/app", {
       method: "POST",
+      credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...payload, adminToken }),
+      body: JSON.stringify(payload),
     });
     const data = await response.json() as Record<string, unknown> & { error?: string };
     if (!response.ok) throw new Error(data.error || "操作失败");
@@ -204,11 +226,13 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   const filteredItems = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return items.filter((item) => {
+      if (item.content_type !== "practice_day" && !scopedTypeNames.has(item.content_type)) return false;
+      if (item.content_type === "practice_day" && scope === "radar") return false;
       if (filterType !== "all" && item.content_type !== filterType) return false;
       if (!keyword) return true;
       return `${TYPE_LABEL[item.content_type] ?? item.content_type} ${item.content_key} ${item.title}`.toLowerCase().includes(keyword);
     });
-  }, [filterType, items, search]);
+  }, [filterType, items, scope, scopedTypeNames, search]);
 
   const setField = (name: string, value: unknown) => setDraft((current) => ({
     ...current,
@@ -240,7 +264,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
       contentType: type,
       contentKey: source.content_key,
       title: source.title,
-      publishMode: source.status === "draft" || source.status === "archived" ? "draft" : source.status === "scheduled" ? "scheduled" : "now",
+      publishMode: source.status === "pending_review" || source.status === "rejected" ? "review" : source.status === "draft" || source.status === "archived" ? "draft" : source.status === "scheduled" ? "scheduled" : "now",
       publishAt: dateTimeLocal(source.publish_at),
       payload: { ...defaultPayload(type), ...payload },
     });
@@ -276,12 +300,14 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   };
 
   const save = async () => {
+    if (!canEdit) return onMessage("当前角色没有编辑此内容的权限");
     setSaving(true);
     try {
       validateDraft();
-      const status = draft.publishMode === "draft" ? "draft" : "published";
+      const needsReview = draft.publishMode === "review" || ((draft.publishMode === "now" || draft.publishMode === "scheduled") && !canPublish);
+      const status = needsReview || draft.publishMode === "draft" ? "draft" : draft.publishMode === "scheduled" ? "scheduled" : "published";
       const publishAt = draft.publishMode === "scheduled" ? new Date(draft.publishAt).toISOString() : null;
-      await api({
+      const result = await api({
         action: "adminUpsertContentBatch",
         items: [{
           contentType: draft.contentType,
@@ -289,10 +315,15 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
           title: draft.title.trim(),
           status,
           publishAt,
-          payload: { ...draft.payload, title: draft.title.trim(), ...(draft.contentType === "audio_track" ? { id: draft.contentKey.trim() } : {}) },
+          payload: { ...draft.payload, title: draft.title.trim(), ...(needsReview && publishAt ? { requestedPublishAt: publishAt } : {}), ...(draft.contentType === "audio_track" ? { id: draft.contentKey.trim() } : {}) },
         }],
       });
-      onMessage(draft.publishMode === "draft" ? "内容已保存为草稿" : draft.publishMode === "scheduled" ? "内容已进入定时发布队列" : "内容已立即发布");
+      if (needsReview) {
+        const saved = (result.items as Array<{ id?: number }> | undefined)?.[0];
+        if (!saved?.id) throw new Error("内容已保存，但提交审核时没有取得内容编号");
+        await api({ action: "adminSubmitContentReview", id: saved.id });
+      }
+      onMessage(needsReview ? "内容已提交审核" : draft.publishMode === "draft" ? "内容已保存为草稿" : draft.publishMode === "scheduled" ? "内容已进入定时发布队列" : "内容已立即发布");
       setEditingId(null);
       setDraft(emptyDraft(draft.contentType));
       await onReload();
@@ -304,6 +335,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   };
 
   const disable = async (item: AdminContentItem) => {
+    if (!canPublish) return onMessage("当前角色没有下架内容的权限");
     try {
       await api({ action: "adminDisableContent", id: item.id });
       onMessage("内容已下架并保留在草稿库，可随时重新发布");
@@ -314,6 +346,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   };
 
   const republish = async (item: AdminContentItem) => {
+    if (!canPublish) return onMessage("当前角色没有发布内容的权限，请提交审核");
     const source = await fullItem(item);
     const payload = readPayload(source);
     if (!Object.keys(payload).length) return onMessage("该旧内容缺少回填数据，请先点编辑补齐后发布");
@@ -341,6 +374,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   };
 
   const rollback = async (version: VersionItem) => {
+    if (!canPublish) return onMessage("当前角色没有版本回滚权限");
     if (!versionItem) return;
     try {
       await api({ action: "adminRollbackContent", id: versionItem.id, version: version.version });
@@ -352,13 +386,28 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
     }
   };
 
+  const review = async (item: AdminContentItem, decision: "approve" | "reject") => {
+    if (!canReview) return onMessage("当前角色没有内容审核权限");
+    const reviewNote = decision === "reject" ? window.prompt("请输入驳回原因，方便编辑人员修改：", "")?.trim() : "";
+    if (decision === "reject" && !reviewNote) return;
+    try {
+      const source = await fullItem(item);
+      const requestedPublishAt = asText(readPayload(source).requestedPublishAt) || null;
+      await api({ action: "adminReviewContent", id: item.id, decision, reviewNote: reviewNote || null, publishAt: decision === "approve" ? requestedPublishAt : null });
+      onMessage(decision === "approve" ? "审核通过，内容已发布" : "内容已驳回并退回编辑");
+      await onReload();
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "审核操作失败");
+    }
+  };
+
   const uploadMediaFile = async (file: File) => {
+    if (!canUpload) throw new Error("当前角色没有上传媒体的权限");
     if (file.size > 25 * 1024 * 1024) throw new Error("单个文件不能超过25MB");
     const form = new FormData();
     form.append("action", "adminUploadMedia");
-    form.append("adminToken", adminToken);
     form.append("file", file);
-    const response = await fetch("/api/app", { method: "POST", body: form });
+    const response = await fetch("/api/app", { method: "POST", credentials: "include", body: form });
     const data = await response.json() as { error?: string; url?: string; asset?: { url?: string } };
     if (!response.ok) throw new Error(data.error || "媒体上传失败");
     const url = data.url ?? data.asset?.url;
@@ -476,6 +525,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   };
 
   const importPositions = async () => {
+    if (!canEdit) return onMessage("当前角色没有导入职位数据的权限");
     const valid = positionRows.filter((row) => !row.issues.length);
     if (!positionFile || !valid.length) return onMessage("没有可导入的有效职位");
     setImportingPositions(true);
@@ -537,7 +587,7 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
       {textInput("seriesId", "系列编码", "current")}{textInput("seriesTitle", "系列名称", "时政电台")}{textInput("seriesLabel", "系列短标签", "时政")}{textInput("seriesColor", "系列颜色", "#245c92")}{textInput("seriesIcon", "系列图标文字", "政")}{numberInput("sortOrder", "展示顺序", 0, 9999)}
       {textInput("kicker", "栏目角标", "月度热点")}{textInput("duration", "音频时长", "5分钟")}{textInput("source", "内容来源", "公考日练整理")}
       {textArea("description", "本期简介", "一句话说明收听价值")}{textArea("text", "音频逐字稿", "用于字幕、搜索与无障碍阅读")}
-      <label className="wide">音频文件<div className={styles.mediaRow}><input value={asText(p.audioUrl)} placeholder="上传后自动回填，也可填写已有HTTPS地址" onChange={(event) => setField("audioUrl", event.target.value)} /><label className={styles.uploadButton}><input type="file" accept="audio/*,.mp3,.m4a,.wav,.aac,.ogg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAudio(file); }} />{uploadingAudio ? "上传中…" : "选择音频"}</label></div><small>支持MP3/M4A/WAV/AAC/OGG，单文件最大25MB。</small></label>
+      <label className="wide">音频文件<div className={styles.mediaRow}><input value={asText(p.audioUrl)} placeholder="上传后自动回填，也可填写已有HTTPS地址" onChange={(event) => setField("audioUrl", event.target.value)} /><label className={styles.uploadButton}><input disabled={!canUpload} type="file" accept="audio/*,.mp3,.m4a,.wav,.aac,.ogg" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAudio(file); }} />{uploadingAudio ? "上传中…" : canUpload ? "选择音频" : "无上传权限"}</label></div><small>支持MP3/M4A/WAV/AAC/OGG，单文件最大25MB。</small></label>
     </>;
     if (draft.contentType === "exam_notice") return <>
       {textInput("targetLabel", "考试目标", "广东省考")}{textInput("targetCode", "目标编码", "province:广东")}{selectInput("noticeType", "公告类型", [["招录公告", "招录公告"], ["职位表", "职位表"], ["补充公告", "补充公告"], ["资格审查", "资格审查"], ["成绩公告", "成绩公告"]])}
@@ -575,18 +625,18 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
   const previewTitle = preview ? ("title" in preview ? preview.title : "") : "";
 
   return <>
-    <section className="admin-panel">
+    {scope === "content" && canUpload && <section className="admin-panel">
       <div className="admin-panel-title"><div><span>媒体资源库</span><h2>上传音频、题目图片与附件</h2><small>上传后复制地址，可用于题库Excel的图片地址/资源地址，或粘贴到任意内容表单。</small></div></div>
       <div className={styles.mediaRow}>
-        <label className={styles.uploadButton}><input type="file" accept="audio/*,image/*,.pdf,application/pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAsset(file); }} />{uploadingAsset ? "上传中…" : "选择媒体文件"}</label>
+        <label className={styles.uploadButton} aria-disabled={!canUpload}><input disabled={!canUpload} type="file" accept="audio/*,image/*,.pdf,application/pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAsset(file); }} />{uploadingAsset ? "上传中…" : canUpload ? "选择媒体文件" : "无上传权限"}</label>
         {lastAsset && <><input readOnly value={lastAsset.url} aria-label={`${lastAsset.name}资源地址`} /><button type="button" onClick={() => { void navigator.clipboard.writeText(lastAsset.url); onMessage("媒体地址已复制"); }}>复制地址</button></>}
       </div>
-    </section>
-    <section className="admin-panel" data-content-form>
-      <div className="admin-panel-title"><div><span>内容配置中心</span><h2>{editingId ? "编辑运营内容" : "创建运营内容"}</h2><small>框架固定，内容均可新增、编辑、排期、下架和重新发布。</small></div><button onClick={() => { setEditingId(null); setDraft(emptyDraft(draft.contentType)); }}>新建空白内容</button></div>
+    </section>}
+    {canEdit && <section className="admin-panel" data-content-form>
+      <div className="admin-panel-title"><div><span>{scope === "radar" ? "招考数据配置" : "内容配置中心"}</span><h2>{editingId ? "编辑运营内容" : "创建运营内容"}</h2><small>编辑人员先保存或提交审核，审核通过后再进入用户端。</small></div><button disabled={!canEdit} onClick={() => { setEditingId(null); setDraft(emptyDraft(draft.contentType)); }}>新建空白内容</button></div>
 
       <div className={styles.typeGrid} aria-label="内容类型">
-        {CONTENT_TYPES.map((item) => <button key={item.type} type="button" className={`${styles.typeCard} ${styles[item.tone]} ${draft.contentType === item.type ? styles.active : ""}`} onClick={() => switchType(item.type)}><b>{item.label}</b><small>{item.short}</small></button>)}
+        {scopedTypes.map((item) => <button key={item.type} type="button" className={`${styles.typeCard} ${styles[item.tone]} ${draft.contentType === item.type ? styles.active : ""}`} onClick={() => switchType(item.type)}><b>{item.label}</b><small>{item.short}</small></button>)}
       </div>
 
       <div className={styles.editorHeader}>
@@ -597,36 +647,37 @@ export default function AdminContentManager({ adminToken, items, onReload, onMes
       <div className="form-grid">
         <label>内容标题<input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="用户端看到的标题" /></label>
         <label>唯一标识<input value={draft.contentKey} onChange={(event) => setDraft((current) => ({ ...current, contentKey: event.target.value }))} placeholder="保存后不建议修改" /></label>
-        <label>发布方式<select value={draft.publishMode} onChange={(event) => setDraft((current) => ({ ...current, publishMode: event.target.value as PublishMode }))}><option value="draft">仅保存草稿</option><option value="now">立即发布</option><option value="scheduled">定时发布</option></select></label>
+        <label>保存方式<select value={draft.publishMode} onChange={(event) => setDraft((current) => ({ ...current, publishMode: event.target.value as PublishMode }))}><option value="draft">仅保存草稿</option><option value="review">提交审核</option>{canPublish && <option value="now">审核通过并立即发布</option>}{canPublish && <option value="scheduled">审核通过并定时发布</option>}</select></label>
         {draft.publishMode === "scheduled" && <label>发布时间<input type="datetime-local" value={draft.publishAt} onChange={(event) => setDraft((current) => ({ ...current, publishAt: event.target.value }))} /></label>}
         {renderTypeFields()}
       </div>
-      <div className={styles.editorActions}><button type="button" onClick={() => setPreview(draft)}>预览</button><button className="admin-primary" type="button" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : draft.publishMode === "draft" ? "保存草稿" : draft.publishMode === "scheduled" ? "保存并定时发布" : "立即发布"}</button></div>
-    </section>
+      <div className={styles.editorActions}><button type="button" onClick={() => setPreview(draft)}>预览</button><button className="admin-primary" type="button" disabled={!canEdit || saving} onClick={() => void save()}>{saving ? "保存中…" : draft.publishMode === "draft" ? "保存草稿" : draft.publishMode === "review" || !canPublish ? "提交审核" : draft.publishMode === "scheduled" ? "保存并定时发布" : "立即发布"}</button></div>
+    </section>}
 
-    <section className="admin-panel">
+    {scope === "radar" && canEdit && <section className="admin-panel">
       <div className="admin-panel-title"><div><span>职位表批量导入</span><h2>上传Excel或CSV职位数据</h2><small>文件先在本地校验和预览，通过的数据只导入为草稿。</small></div><button onClick={() => void downloadPositionTemplate()}>下载职位模板</button></div>
       <div className={styles.positionUpload}>
-        <label><input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void readPositionFile(file); }} /><span>{readingPositions ? "正在读取…" : positionFile?.name ?? "选择 XLSX / XLS / CSV 职位表"}</span><small>最大30MB，最多50000条职位</small></label>
+        <label><input disabled={!canEdit} type="file" accept=".xlsx,.xls,.csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void readPositionFile(file); }} /><span>{readingPositions ? "正在读取…" : positionFile?.name ?? "选择 XLSX / XLS / CSV 职位表"}</span><small>最大30MB，最多50000条职位</small></label>
         {positionRows.length > 0 && <div className={styles.positionSummary}><span><b>{positionRows.length}</b>总行数</span><span><b>{positionRows.filter((row) => !row.issues.length).length}</b>可导入</span><span className={positionRows.some((row) => row.issues.length) ? styles.danger : ""}><b>{positionRows.filter((row) => row.issues.length).length}</b>需修正</span></div>}
       </div>
       {positionRows.length > 0 && <>
         <div className="admin-table-wrap"><table><thead><tr><th>行号</th><th>考试</th><th>职位代码</th><th>职位名称</th><th>地区</th><th>校验</th></tr></thead><tbody>{positionRows.slice(0, 8).map((row) => <tr key={row.row}><td>{row.row}</td><td>{asText(row.payload.examName)}</td><td>{asText(row.payload.code)}</td><td>{row.title || "未填写"}</td><td>{asText(row.payload.region)}</td><td>{row.issues.length ? <span className={styles.errorText}>{row.issues.join("、")}</span> : <span className={styles.okText}>通过</span>}</td></tr>)}</tbody></table></div>
-        <div className={styles.editorActions}><p>问题行不会导入，请回到原文件修正后重新上传。</p><button className="admin-primary" disabled={importingPositions || !positionRows.some((row) => !row.issues.length)} onClick={() => void importPositions()}>{importingPositions ? "分批导入中…" : "导入有效职位为草稿"}</button></div>
+        <div className={styles.editorActions}><p>问题行不会导入，请回到原文件修正后重新上传。</p><button className="admin-primary" disabled={!canEdit || importingPositions || !positionRows.some((row) => !row.issues.length)} onClick={() => void importPositions()}>{importingPositions ? "分批导入中…" : "导入有效职位为草稿"}</button></div>
       </>}
-    </section>
+    </section>}
 
     <section className="admin-panel table-panel">
       <div className="admin-panel-title"><div><span>内容库</span><h2>全部运营内容</h2><small>支持回填编辑、复制、预览、下架、重发与历史版本回滚。</small></div><button onClick={() => void onReload()}>刷新</button></div>
-      <div className={styles.libraryFilters}><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或内容标识" /><select value={filterType} onChange={(event) => setFilterType(event.target.value as "all" | AdminContentType)}><option value="all">全部类型</option>{CONTENT_TYPES.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}<option value="practice_day">旧版日练包</option></select></div>
+      <div className={styles.libraryFilters}><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或内容标识" /><select value={filterType} onChange={(event) => setFilterType(event.target.value as "all" | AdminContentType)}><option value="all">全部类型</option>{scopedTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}{scope === "content" && <option value="practice_day">旧版日练包</option>}</select></div>
       <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>内容</th><th>状态</th><th>发布时间</th><th>版本</th><th>操作</th></tr></thead><tbody>{filteredItems.length ? filteredItems.map((item) => {
         const scheduled = item.status === "scheduled";
-        return <tr key={item.id}><td>{TYPE_LABEL[item.content_type] ?? item.content_type}</td><td><b>{item.title}</b><small>{item.content_key}</small></td><td><span className={`status ${item.status}`}>{scheduled ? "待发布" : item.status === "published" ? "已发布" : item.status === "archived" ? "已下架" : "草稿"}</span></td><td>{item.publish_at ? new Date(item.publish_at).toLocaleString("zh-CN") : item.status === "published" ? "立即" : "—"}</td><td>{Number(item.version_count ?? 1)}版</td><td><div className={styles.rowActions}><button onClick={() => void beginEdit(item)}>编辑</button><button onClick={() => void duplicate(item)}>复制</button><button onClick={() => setPreview(item)}>预览</button><button onClick={() => void openVersions(item)}>版本</button>{item.status === "published" || item.status === "scheduled" ? <button className={styles.dangerButton} onClick={() => void disable(item)}>下架</button> : <button onClick={() => void republish(item)}>发布</button>}</div></td></tr>;
+        const statusLabel = scheduled ? "待发布" : item.status === "pending_review" ? "待审核" : item.status === "rejected" ? "已驳回" : item.status === "published" ? "已发布" : item.status === "archived" ? "已下架" : "草稿";
+        return <tr key={item.id}><td>{TYPE_LABEL[item.content_type] ?? item.content_type}</td><td><b>{item.title}</b><small>{item.content_key}</small>{item.status === "rejected" && item.review_note && <small className={styles.errorText}>驳回原因：{item.review_note}</small>}</td><td><span className={`status ${item.status}`}>{statusLabel}</span></td><td>{item.publish_at ? new Date(item.publish_at).toLocaleString("zh-CN") : item.status === "published" ? "立即" : "—"}</td><td>{Number(item.version_count ?? 1)}版</td><td><div className={styles.rowActions}><button disabled={!canEdit || item.status === "pending_review"} onClick={() => void beginEdit(item)}>编辑</button><button disabled={!canEdit} onClick={() => void duplicate(item)}>复制</button><button onClick={() => setPreview(item)}>预览</button><button onClick={() => void openVersions(item)}>版本</button>{item.status === "pending_review" && canReview ? <><button onClick={() => void review(item, "approve")}>通过并发布</button><button className={styles.dangerButton} onClick={() => void review(item, "reject")}>驳回</button></> : item.status === "published" || item.status === "scheduled" ? <button disabled={!canPublish} className={styles.dangerButton} onClick={() => void disable(item)}>下架</button> : item.status !== "pending_review" && <button disabled={!canPublish} onClick={() => void republish(item)}>发布</button>}</div></td></tr>;
       }) : <tr><td colSpan={6}>没有符合条件的内容，请从上方创建。</td></tr>}</tbody></table></div>
     </section>
 
     {preview && <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="内容预览" onMouseDown={(event) => { if (event.currentTarget === event.target) setPreview(null); }}><article className={styles.modal}><header><div><span>用户端内容预览</span><h2>{previewTitle || "未命名内容"}</h2><p>{"contentType" in preview ? TYPE_LABEL[preview.contentType] : TYPE_LABEL[preview.content_type]}</p></div><button aria-label="关闭预览" onClick={() => setPreview(null)}>×</button></header><div className={styles.previewBody}>{Object.entries(previewPayload).filter(([, value]) => asText(value)).map(([key, value]) => <section key={key}><small>{key}</small><p>{asText(value)}</p></section>)}</div><footer><button onClick={() => setPreview(null)}>关闭</button></footer></article></div>}
 
-    {versionItem && <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="版本记录" onMouseDown={(event) => { if (event.currentTarget === event.target) setVersionItem(null); }}><article className={styles.modal}><header><div><span>版本记录</span><h2>{versionItem.title}</h2><p>回滚不会删除后续历史，而是生成一个新版本。</p></div><button aria-label="关闭版本记录" onClick={() => setVersionItem(null)}>×</button></header><div className={styles.versionList}>{loadingVersions ? <p>正在加载版本…</p> : versions.length ? versions.map((version) => <section key={version.id}><div><b>第 {version.version} 版</b><span className={`status ${version.status}`}>{version.status === "published" ? "发布" : version.status === "scheduled" ? "定时" : version.status === "archived" ? "下架" : "草稿"}</span><small>{new Date(version.created_at).toLocaleString("zh-CN")}</small></div><button onClick={() => void rollback(version)}>回滚到此版</button></section>) : <p>暂无历史版本；下一次编辑保存后会自动留档。</p>}</div><footer><button onClick={() => setVersionItem(null)}>关闭</button></footer></article></div>}
+    {versionItem && <div className={styles.overlay} role="dialog" aria-modal="true" aria-label="版本记录" onMouseDown={(event) => { if (event.currentTarget === event.target) setVersionItem(null); }}><article className={styles.modal}><header><div><span>版本记录</span><h2>{versionItem.title}</h2><p>回滚不会删除后续历史，而是生成一个新版本。</p></div><button aria-label="关闭版本记录" onClick={() => setVersionItem(null)}>×</button></header><div className={styles.versionList}>{loadingVersions ? <p>正在加载版本…</p> : versions.length ? versions.map((version) => <section key={version.id}><div><b>第 {version.version} 版</b><span className={`status ${version.status}`}>{version.status === "published" ? "发布" : version.status === "pending_review" ? "待审核" : version.status === "rejected" ? "驳回" : version.status === "scheduled" ? "定时" : version.status === "archived" ? "下架" : "草稿"}</span><small>{new Date(version.created_at).toLocaleString("zh-CN")}</small></div><button disabled={!canPublish} onClick={() => void rollback(version)}>回滚到此版</button></section>) : <p>暂无历史版本；下一次编辑保存后会自动留档。</p>}</div><footer><button onClick={() => setVersionItem(null)}>关闭</button></footer></article></div>}
   </>;
 }

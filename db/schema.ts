@@ -68,6 +68,70 @@ export const configs = sqliteTable("configs", {
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const adminUsers = sqliteTable(
+  "admin_users",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    username: text("username").notNull().unique(),
+    displayName: text("display_name").notNull(),
+    passwordHash: text("password_hash").notNull(),
+    passwordSalt: text("password_salt").notNull(),
+    passwordIterations: integer("password_iterations").notNull().default(210000),
+    role: text("role").notNull().default("read_only"),
+    status: text("status").notNull().default("active"),
+    lastLoginAt: text("last_login_at"),
+    createdBy: integer("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("admin_users_username_uq").on(table.username),
+    index("admin_users_status_role_idx").on(table.status, table.role),
+  ],
+);
+
+export const adminSessions = sqliteTable(
+  "admin_sessions",
+  {
+    id: text("id").primaryKey(),
+    adminUserId: integer("admin_user_id").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: text("expires_at").notNull(),
+    ipAddress: text("ip_address").notNull().default(""),
+    userAgent: text("user_agent").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastSeenAt: text("last_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    revokedAt: text("revoked_at"),
+  },
+  (table) => [
+    uniqueIndex("admin_sessions_token_hash_uq").on(table.tokenHash),
+    index("admin_sessions_user_expiry_idx").on(table.adminUserId, table.expiresAt),
+  ],
+);
+
+export const adminAuditLogs = sqliteTable(
+  "admin_audit_logs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    adminUserId: integer("admin_user_id"),
+    username: text("username").notNull().default("system"),
+    role: text("role").notNull().default("system"),
+    action: text("action").notNull(),
+    resourceType: text("resource_type").notNull().default("system"),
+    resourceId: text("resource_id").notNull().default(""),
+    summary: text("summary").notNull().default(""),
+    result: text("result").notNull().default("success"),
+    detailsJson: text("details_json").notNull().default("{}"),
+    ipAddress: text("ip_address").notNull().default(""),
+    userAgent: text("user_agent").notNull().default(""),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("admin_audit_logs_user_time_idx").on(table.adminUserId, table.createdAt),
+    index("admin_audit_logs_action_time_idx").on(table.action, table.createdAt),
+  ],
+);
+
 export const contentItems = sqliteTable(
   "content_items",
   {
@@ -78,6 +142,11 @@ export const contentItems = sqliteTable(
     payloadJson: text("payload_json").notNull(),
     status: text("status").notNull().default("draft"),
     publishAt: text("publish_at"),
+    reviewNote: text("review_note").notNull().default(""),
+    submittedBy: integer("submitted_by"),
+    submittedAt: text("submitted_at"),
+    reviewedBy: integer("reviewed_by"),
+    reviewedAt: text("reviewed_at"),
     version: integer("version").notNull().default(1),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),

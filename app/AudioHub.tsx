@@ -426,6 +426,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   };
 
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
+  const playbackStatus = playing ? (paused ? "已暂停" : "正在播放") : progress >= 100 ? "已播完" : "待播放";
   const currentVoiceOption = getVoiceOption(voicePreset);
   const voiceAvailability = speechVoices.length ? "已匹配本机中文语音" : "将使用浏览器默认中文语音";
   const selectedUsesSpeech = Boolean(selectedTrack && (!selectedTrack.audioUrl || speechFallbackIds.includes(selectedTrack.id)));
@@ -513,7 +514,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             onTimeUpdate={updateAudioProgress}
             onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }}
           />
-          <div className="player-top"><div><span>正在播放</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop()}>停止</button></div>
+          <div className="player-top"><div><span>{playbackStatus}</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop()} disabled={!playing && !paused}>停止</button></div>
           <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
           <div className="player-controls">
             <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>

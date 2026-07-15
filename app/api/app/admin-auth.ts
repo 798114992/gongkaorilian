@@ -246,7 +246,7 @@ async function ensureBootstrapAdmin(db: AdminDatabase, configuredSecret: string)
   if (!configuredSecret) return;
   const existing = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
     password_iterations, role, status FROM admin_users WHERE username = 'admin'`).first<AdminUserRow>();
-  if (existing && existing.status === "active" && existing.role === "super_admin" && await passwordMatches(configuredSecret, existing)) return;
+  if (existing && existing.status === "active" && existing.role === "super_admin") return;
 
   const record = await createPasswordRecord(configuredSecret);
   await db.batch([
@@ -316,11 +316,18 @@ export async function authenticateAdmin(
   const password = String(passwordValue ?? "");
   if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(username) || !password || password.length > 512) return null;
 
-  if (username === "admin") await ensureBootstrapAdmin(db, configuredSecret);
+  const isBootstrapAdmin = username === "admin" && Boolean(configuredSecret);
+  const isBootstrapSecret = isBootstrapAdmin && constantTimeEqual(password, configuredSecret);
+  if (isBootstrapSecret) await ensureBootstrapAdmin(db, configuredSecret);
 
   const row = await db.prepare(`SELECT id, username, display_name, password_hash, password_salt,
     password_iterations, role, status FROM admin_users WHERE username = ?`).bind(username).first<AdminUserRow>();
-  if (!row || row.status !== "active" || !(await passwordMatches(password, row))) return null;
+  if (!row || row.status !== "active") return null;
+  if (isBootstrapAdmin) {
+    if (!isBootstrapSecret || row.role !== "super_admin") return null;
+  } else if (!(await passwordMatches(password, row))) {
+    return null;
+  }
 
   const token = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await sha256(token);

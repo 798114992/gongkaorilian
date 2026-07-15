@@ -330,6 +330,8 @@ button { color: inherit; }
 .audio-empty p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 
 .audio-player { position: sticky; z-index: 18; bottom: calc(75px + env(safe-area-inset-bottom)); margin-top: 14px; border: 1px solid rgba(199, 210, 220, 0.82); border-radius: 20px; padding: 13px; background: rgba(255,255,255,0.96); box-shadow: 0 15px 38px rgba(22, 45, 68, 0.18); backdrop-filter: blur(18px); }
+.native-audio-control { display: none; width: 100%; margin-bottom: 10px; }
+.native-audio-control[controls] { display: block; }
 .player-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .player-top > div { min-width: 0; }
 .player-top span { color: var(--muted); font-size: 8px; }

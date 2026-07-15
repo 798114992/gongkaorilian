@@ -291,9 +291,13 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       updateMediaSession(track);
     } catch {
       setPlaying(false);
-      markSpeechFallback(track.id);
-      notify("固定音频未启动，已自动切换为AI朗读");
-      startSpeech(track);
+      if ("speechSynthesis" in window) {
+        markSpeechFallback(track.id);
+        notify("固定音频未启动，已自动切换为AI朗读");
+        startSpeech(track);
+        return;
+      }
+      notify("播放未启动，请使用下方原生播放器播放");
     }
   }, [markSpeechFallback, notify, startSpeech, trackEvent, updateMediaSession]);
 
@@ -412,7 +416,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   return (
     <>
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
-      <audio ref={audioRef} preload="metadata" onError={handleAudioError} onTimeUpdate={updateAudioProgress} onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }} />
       <div className="subpage-heading audio-heading">
         <div><span>日练电台</span><h1>通勤也能练</h1><p>上下班路上，听完一组时政热点、申论表达或个人错题。</p></div>
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
@@ -481,6 +484,18 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
       {selectedTrack ? (
         <section className="audio-player" aria-label="播放控制器">
+          <audio
+            ref={audioRef}
+            className="native-audio-control"
+            preload="metadata"
+            controls={Boolean(selectedTrack.audioUrl && !selectedUsesSpeech)}
+            controlsList="nodownload"
+            onError={handleAudioError}
+            onPlay={() => { setPlaying(true); setPaused(false); updateMediaSession(selectedTrack); }}
+            onPause={() => { if (audioRef.current?.currentTime && playing) setPaused(true); }}
+            onTimeUpdate={updateAudioProgress}
+            onEnded={() => { if (!loopRef.current) { setPlaying(false); setPaused(false); setProgress(100); } }}
+          />
           <div className="player-top"><div><span>正在播放</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop()}>停止</button></div>
           <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
           <div className="player-controls">

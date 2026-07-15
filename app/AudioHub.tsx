@@ -108,6 +108,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const [loop, setLoop] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState(0);
   const [cachedIds, setCachedIds] = useState<string[]>([]);
+  const [speechFallbackIds, setSpeechFallbackIds] = useState<string[]>([]);
   const [voicePreset, setVoicePreset] = useState<VoicePreset>("newsFemale");
   const [speechVoices, setSpeechVoices] = useState<SpeechSynthesisVoice[]>([]);
   const online = useSyncExternalStore(subscribeOnlineStatus, readOnlineStatus, readServerOnlineStatus);
@@ -115,6 +116,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const sessionRef = useRef(0);
   const speedRef = useRef(speed);
   const loopRef = useRef(loop);
+  const speechFallbackIdsRef = useRef<string[]>([]);
   const voicePresetRef = useRef<VoicePreset>(voicePreset);
   const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const timerRef = useRef<number | null>(null);
@@ -193,6 +195,12 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setSelectedId(nextTracks[0]?.id ?? "");
   };
 
+  const markSpeechFallback = useCallback((trackId: string) => {
+    const next = Array.from(new Set([...speechFallbackIdsRef.current, trackId]));
+    speechFallbackIdsRef.current = next;
+    setSpeechFallbackIds(next);
+  }, []);
+
   const startSpeech = useCallback((track: AudioTrack) => {
     if (!("speechSynthesis" in window)) {
       notify("当前浏览器暂不支持错题语音朗读");
@@ -267,7 +275,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setSelectedId(track.id);
     setProgress(0);
     trackEvent("audio_play", { trackId: track.id, category: track.category, fixedAudio: Boolean(track.audioUrl) });
-    if (!track.audioUrl) {
+    if (!track.audioUrl || speechFallbackIdsRef.current.includes(track.id)) {
       startSpeech(track);
       return;
     }
@@ -283,14 +291,17 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       updateMediaSession(track);
     } catch {
       setPlaying(false);
-      notify("播放未启动，请再次点击播放按钮");
+      markSpeechFallback(track.id);
+      notify("固定音频未启动，已自动切换为AI朗读");
+      startSpeech(track);
     }
-  }, [notify, startSpeech, trackEvent, updateMediaSession]);
+  }, [markSpeechFallback, notify, startSpeech, trackEvent, updateMediaSession]);
 
   const togglePlayback = () => {
     if (!selectedTrack) return;
     if (!playing) return void start(selectedTrack);
-    if (selectedTrack.audioUrl) {
+    const useSpeechPlayback = !selectedTrack.audioUrl || speechFallbackIdsRef.current.includes(selectedTrack.id);
+    if (!useSpeechPlayback && selectedTrack.audioUrl) {
       if (paused) {
         void audioRef.current?.play();
         setPaused(false);
@@ -313,17 +324,17 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     speedRef.current = nextSpeed;
     setSpeed(nextSpeed);
     if (audioRef.current) audioRef.current.playbackRate = nextSpeed;
-    if (playing && selectedTrack && !selectedTrack.audioUrl) startSpeech(selectedTrack);
+    if (playing && selectedTrack && (!selectedTrack.audioUrl || speechFallbackIdsRef.current.includes(selectedTrack.id))) startSpeech(selectedTrack);
   };
 
   const changeVoicePreset = (nextPreset: VoicePreset) => {
     voicePresetRef.current = nextPreset;
     setVoicePreset(nextPreset);
-    if (playing && selectedTrack && !selectedTrack.audioUrl) {
+    if (playing && selectedTrack && (!selectedTrack.audioUrl || speechFallbackIdsRef.current.includes(selectedTrack.id))) {
       startSpeech(selectedTrack);
       return;
     }
-    if (selectedTrack?.audioUrl) notify("固定真人音频不改变音色；错题语音和AI朗读会使用该音色");
+    if (selectedTrack?.audioUrl) notify("固定真人音频不改变音色；若自动切换AI朗读会使用该音色");
   };
 
   const toggleLoop = () => {
@@ -396,6 +407,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
   const currentVoiceOption = getVoiceOption(voicePreset);
   const voiceAvailability = speechVoices.length ? "已匹配本机中文语音" : "将使用浏览器默认中文语音";
+  const selectedUsesSpeech = Boolean(selectedTrack && (!selectedTrack.audioUrl || speechFallbackIds.includes(selectedTrack.id)));
 
   return (
     <>
@@ -415,7 +427,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
           </div>
           <button onClick={togglePlayback}>{playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
-          <small className="audio-voice-tip">{selectedTrack.audioUrl ? "固定音频保留原声；错题语音可切换音色" : `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}`}</small>
+          <small className="audio-voice-tip">{selectedUsesSpeech ? `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}` : "固定音频保留原声；若播放受限会自动切换AI朗读"}</small>
           {selectedTrack.category === "wrong" && <small className="audio-recall-tip">听到“暂停十秒”时先独立作答，再继续听答案。</small>}
         </section>
       ) : null}
@@ -458,7 +470,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
               <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
                 <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
                 <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
-                  <span>{track.kicker}{track.audioUrl ? " · 真人/固定音频" : " · AI合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
+                  <span>{track.kicker}{track.audioUrl && !speechFallbackIds.includes(track.id) ? " · 真人/固定音频" : " · AI合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
                 </button>
                 <button className={`cache-button ${cached ? "cached" : ""}`} onClick={() => void cacheTrack(track)} aria-label={`离线缓冲${track.title}`}>{cached ? "✓ 已缓冲" : "↓ 离线"}</button>
               </article>

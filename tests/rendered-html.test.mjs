@@ -280,6 +280,8 @@ test("the 日练电台 uses fixed audio and supports the requested controls", as
   assert.match(hub, /青年男/);
   assert.match(hub, /青年女/);
   assert.match(hub, /pickSpeechVoice/);
+  assert.match(hub, /speechFallbackIds/);
+  assert.match(hub, /固定音频未启动，已自动切换为AI朗读/);
   assert.match(hub, /<audio/);
   assert.match(hub, /audio-floating-player/);
   assert.match(hub, /关闭播放/);

@@ -377,6 +377,23 @@ type StudyInsights = {
   overtimeCount: number;
   stateCounts: { learning: number; weak: number; mastered: number };
   modules: Array<{ module: string; total: number; accuracy: number; avgSeconds: number }>;
+  weakPoints: Array<{
+    point: string;
+    module: string;
+    total: number;
+    accuracy: number;
+    wrong: number;
+    hesitant: number;
+    guessed: number;
+    overtime: number;
+    wrongReason: string;
+    frequency: string;
+    frequencyOccurrences: number;
+    frequencyPapers: number;
+    importanceStars: number;
+    scoreRate: number | null;
+    scoreRateAttempts: number;
+  }>;
   recent: Array<{ day: string; total: number; accuracy: number }>;
   today: {
     total: number;
@@ -486,6 +503,7 @@ type PracticeSummary = {
   overtime: number;
   repairedDue: number;
   weakModules: Array<{ module: string; total: number; accuracy: number }>;
+  points: Array<{ point: string; total: number; correct: number; wrong: number; uncertain: number; repairedDue: number }>;
 };
 
 type Bootstrap = {
@@ -587,6 +605,7 @@ const emptyInsights: StudyInsights = {
   overtimeCount: 0,
   stateCounts: { learning: 0, weak: 0, mastered: 0 },
   modules: [],
+  weakPoints: [],
   recent: [],
   today: { total: 0, correct: 0, repairedDue: 0, wrong: 0, hesitant: 0, guessed: 0, overtime: 0, avgSeconds: 0, accuracyDelta: null, avgSecondsDelta: null, highFrequencyPoints: [] },
   weekly: { total: 0, accuracy: 0, activeDays: 0, avgSeconds: 0, highFrequencyCoverage: 0, repeatErrorRate: null, accuracyDelta: null, avgSecondsDelta: null, repeatErrorRateDelta: null, masteredPoints: [], nextIssues: [] },
@@ -1328,6 +1347,7 @@ export default function DailyPracticeApp() {
   const [diagnosticPromptOpen, setDiagnosticPromptOpen] = useState(false);
   const [bonusExpanded, setBonusExpanded] = useState(false);
   const [bonusDrillOffset, setBonusDrillOffset] = useState(0);
+  const [todayGainExpanded, setTodayGainExpanded] = useState(false);
   const [bankFilter, setBankFilter] = useState("适合我");
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
@@ -1464,12 +1484,6 @@ export default function DailyPracticeApp() {
   const dailyCheckinPending = dailyTasksDone && !dailyCheckinDone;
   const allDailyDone = dailyTasksDone && dailyCheckinDone;
   const nextDailyStep = enabledDailySteps.find((step) => !stepDone[step]) ?? null;
-
-  useEffect(() => {
-    setBonusExpanded(allDailyDone);
-    setBonusDrillOffset(0);
-  }, [allDailyDone, dayKey]);
-
   const essayQuestion = essayPracticeQuestions[essayPracticeIndex] ?? null;
   const essayDraftKey = essayQuestion ? `essay:${essayQuestion.id}` : dayKey;
   const currentDueEssayRewrite = essayQuestion
@@ -1520,6 +1534,11 @@ export default function DailyPracticeApp() {
     .sort((a, b) => a.days - b.days || a.eventDate.localeCompare(b.eventDate));
   const nextCalendarEvent = upcomingCalendarEvents[0] ?? null;
   const dueReminder = upcomingCalendarEvents.find((event) => event.reminderEnabled && event.days <= event.reminderDays) ?? null;
+  const criticalReminder = upcomingCalendarEvents.find((event) =>
+    event.reminderEnabled
+    && event.days <= 1
+    && /报名截止|缴费截止|准考证打印|资格审查/.test(`${event.eventType}${event.title}`)
+    && !progress.radarTodoDone[`event:${event.id}`]) ?? null;
   const savedPositions = relevantPositions.filter((position) => progress.savedPositionIds.includes(position.id));
   const savedPositionCount = progress.savedPositionIds.length;
   const matchedPositions = relevantPositions
@@ -2275,6 +2294,7 @@ export default function DailyPracticeApp() {
       overtime: 0,
       repairedDue: 0,
       weakModules: [],
+      points: [],
     });
     setPracticeQuestions([]);
     setActiveModule("practice");
@@ -2658,13 +2678,14 @@ export default function DailyPracticeApp() {
 
   const finishPracticeSession = async () => {
     const activeSession = progressRef.current.activePractice;
-    let details: Pick<PracticeSummary, "wrong" | "hesitant" | "guessed" | "overtime" | "repairedDue" | "weakModules"> = {
+    let details: Pick<PracticeSummary, "wrong" | "hesitant" | "guessed" | "overtime" | "repairedDue" | "weakModules" | "points"> = {
       wrong: Math.max(0, (activeSession?.answered ?? sessionAnswered) - (activeSession?.correct ?? sessionCorrect)),
       hesitant: 0,
       guessed: 0,
       overtime: 0,
       repairedDue: 0,
       weakModules: [],
+      points: [],
     };
     const serverSessionId = activeSession?.serverSessionId;
     if (serverSessionId) {
@@ -3094,7 +3115,8 @@ export default function DailyPracticeApp() {
         void loadBootstrap();
       };
       return <article className="practice-summary">
-        <span>✓</span><h3>{practiceSummary.kind === "diagnostic" ? "10题摸底结果已生成" : `${practiceSummary.answered} 题已入账`}</h3><p>{practiceSummary.kind === "diagnostic" ? `当前优先处理：${practiceSummary.weakModules.slice(0, 2).map((item) => item.module).join("、") || "继续积累有效作答"}。薄弱点与复习时间均来自本次真实作答。` : practiceSummary.kind === "daily" && nextDailyStep ? "行测已完成，继续今日下一个有效动作。" : "本轮任务已完成，进度和复习时间已经自动保存。"}</p>
+        <span>✓</span><h3>{practiceSummary.kind === "diagnostic" ? "10题摸底结果已生成" : `${practiceSummary.answered}题已入账，看看解决了什么`}</h3><p>{practiceSummary.kind === "diagnostic" ? `当前优先处理：${practiceSummary.weakModules.slice(0, 2).map((item) => item.module).join("、") || "继续积累有效作答"}。薄弱点与复习时间均来自本次真实作答。` : practiceSummary.repairedDue > 0 ? `本轮真正修复${practiceSummary.repairedDue}道到期题；答错、犹豫和蒙对的题已重新排入复习。` : practiceSummary.kind === "daily" && nextDailyStep ? "本轮结果已保存，继续今日下一个有效动作。" : "本轮结果和复习时间已保存，不用手动整理错题。"}</p>
+        {practiceSummary.points.length > 0 && <section className="practice-summary-points"><div><b>本轮考点结果</b><small>不是只看总正确率</small></div>{practiceSummary.points.slice(0, 3).map((point) => <article key={point.point}><span>{point.point}</span><p>{point.total}题 · 答对{point.correct}题{point.repairedDue ? ` · 修复${point.repairedDue}题` : ""}{point.wrong ? ` · 错${point.wrong}题` : ""}{point.uncertain ? ` · ${point.uncertain}题没把握` : ""}</p></article>)}</section>}
         <div className="practice-summary-stats"><div><b>{accuracy}%</b><span>正确率</span></div><div><b>{Math.floor(practiceSummary.elapsedSeconds / 60)}:{String(practiceSummary.elapsedSeconds % 60).padStart(2, "0")}</b><span>本轮用时</span></div><div><b>{practiceSummary.reviewAdded}</b><span>加入回炉</span></div><div><b>{practiceSummary.wrong}</b><span>不会/答错</span></div><div><b>{practiceSummary.hesitant}</b><span>犹豫</span></div><div><b>{practiceSummary.guessed}</b><span>蒙对</span></div><div><b>{practiceSummary.overtime}</b><span>超时</span></div><div><b>{practiceSummary.repairedDue}</b><span>修复到期</span></div></div>
         {practiceSummary.kind === "diagnostic" && !bootstrap?.user.signedIn && <p className="diagnostic-save-note">登录后会把本次薄弱点、错题和复习安排安全同步到其他设备，并领取一次72小时完整体验。</p>}
         <div className="practice-summary-actions"><button className="primary-button" onClick={closeSummary}>{closeLabel}</button>{(practiceSummary.kind !== "daily" || !nextDailyStep) && <button className="secondary-button" onClick={() => { const summary = practiceSummary; setPracticeSummary(null); void startPractice("mixed", summary.bankCodes, { kind: "bonus", limit: 5, forceNew: true }); }}>再练10分钟</button>}</div>
@@ -3291,9 +3313,12 @@ export default function DailyPracticeApp() {
 
   const weakestModule = insights.modules.length ? [...insights.modules].sort((a, b) => a.accuracy - b.accuracy)[0] : null;
   const todayMetrics = insights.today ?? emptyInsights.today;
+  const recommendationPoint = insights.weakPoints.length
+    ? insights.weakPoints[bonusDrillOffset % insights.weakPoints.length]
+    : null;
   const rankedBonusDrills = drillPresets
     .map((drill, index) => {
-      const target = weakestModule?.module.trim() ?? "";
+      const target = recommendationPoint?.point.trim() || recommendationPoint?.module.trim() || weakestModule?.module.trim() || "";
       const searchable = `${drill.title} ${drill.module} ${drill.subTypes.join(" ")}`;
       const moduleMatch = Boolean(target && (searchable.includes(target) || (drill.module && target.includes(drill.module))));
       return {
@@ -3307,13 +3332,26 @@ export default function DailyPracticeApp() {
     })
     .sort((a, b) => b.score - a.score);
   const recommendedDrillEntry = rankedBonusDrills.length
-    ? rankedBonusDrills[bonusDrillOffset % rankedBonusDrills.length]
+    ? rankedBonusDrills[recommendationPoint ? 0 : bonusDrillOffset % rankedBonusDrills.length]
     : null;
   const recommendedDrill = recommendedDrillEntry?.drill ?? null;
+  const bonusAlternativeCount = recommendationPoint ? insights.weakPoints.length : rankedBonusDrills.length;
   const needsDiagnostic = insights.total === 0;
-  const bonusRecommendationTitle = needsDiagnostic ? "先做10题，建立提分基线" : recommendedDrill?.title ?? "主攻题库混合加练";
+  const bonusRecommendationTitle = needsDiagnostic
+    ? "先做10题，建立提分基线"
+    : recommendationPoint
+      ? `${recommendationPoint.point}专项补强`
+      : recommendedDrill?.title ?? "主攻题库混合加练";
+  const pointProblemParts = recommendationPoint ? [
+    recommendationPoint.wrong ? `错${recommendationPoint.wrong}题` : "",
+    recommendationPoint.hesitant ? `犹豫${recommendationPoint.hesitant}次` : "",
+    recommendationPoint.guessed ? `蒙对${recommendationPoint.guessed}次` : "",
+    recommendationPoint.overtime ? `超时${recommendationPoint.overtime}次` : "",
+  ].filter(Boolean) : [];
   const bonusRecommendationReason = needsDiagnostic
     ? "先记录答错、犹豫、蒙对和超时，下一次才按真实薄弱点推荐。"
+    : recommendationPoint
+      ? `近7天作答${recommendationPoint.total}题，${pointProblemParts.join("、") || `正确率${recommendationPoint.accuracy}%`}${recommendationPoint.wrongReason ? `；主要错因：${recommendationPoint.wrongReason}` : ""}。`
     : recommendedDrillEntry?.moduleMatch && weakestModule
       ? `近阶段${weakestModule.module}正确率${weakestModule.accuracy}%，优先补当前最薄弱项。`
       : weakestModule
@@ -3321,12 +3359,32 @@ export default function DailyPracticeApp() {
         : "根据主攻考试与后台已发布的高价值真题，为你挑选一组短练。";
   const bonusRecommendationMeta = needsDiagnostic
     ? "10道真题 · 约10分钟"
+    : recommendationPoint
+      ? "5道针对性真题 · 约8分钟"
     : recommendedDrill
       ? `${recommendedDrill.questionCount}${recommendedDrill.subject === "申论" ? "题" : "道"}真题 · 约${recommendedDrill.minutes}分钟`
       : "5道真题 · 约10分钟";
+  const recommendationEvidence = recommendationPoint ? [
+    "依据：近7天真实作答",
+    recommendationPoint.frequency ? `${recommendationPoint.frequency}${recommendationPoint.frequencyOccurrences && recommendationPoint.frequencyPapers ? ` · ${recommendationPoint.frequencyOccurrences}次/${recommendationPoint.frequencyPapers}套` : ""}` : "",
+    recommendationPoint.importanceStars ? `重要${"★".repeat(recommendationPoint.importanceStars)}` : "",
+    recommendationPoint.scoreRate !== null ? `拿分率${recommendationPoint.scoreRate}% · ${recommendationPoint.scoreRateAttempts}样本` : "",
+  ].filter(Boolean) : [];
   const startRecommendedBonus = () => {
     if (needsDiagnostic) {
       void startPractice("mixed", undefined, { kind: "diagnostic", limit: 10, forceNew: true });
+      return;
+    }
+    if (recommendationPoint) {
+      void startPractice("mixed", undefined, {
+        kind: "bonus",
+        limit: 5,
+        forceNew: true,
+        focusModule: recommendationPoint.point,
+        focusSubTypes: [recommendationPoint.point, recommendationPoint.module],
+        strictFocus: true,
+        focusLabel: `${recommendationPoint.point}专项补强`,
+      });
       return;
     }
     if (recommendedDrill) {
@@ -3382,10 +3440,9 @@ export default function DailyPracticeApp() {
       detail: "3天重写已到期，重新作答才能真正检验掌握",
       action: () => void startEssayPractice({ bankCodes: [item.bankCode], daily: false, questionCode: item.questionCode, attemptDateKey: item.originalDateKey }),
     }))),
-    ...(dueReminder ? [{ id: "radar", label: "报名提醒", title: `${dueReminder.targetLabel} · ${dueReminder.title}`, detail: dueReminder.days === 0 ? "今天处理" : `还有${dueReminder.days}天 · ${shortDate(dueReminder.eventDate)}`, action: () => setTab("calendar") }] : []),
+    ...(dueReminder && dueReminder !== criticalReminder ? [{ id: "radar", label: "报名提醒", title: `${dueReminder.targetLabel} · ${dueReminder.title}`, detail: dueReminder.days === 0 ? "今天处理" : `还有${dueReminder.days}天 · ${shortDate(dueReminder.eventDate)}`, action: () => setTab("calendar") }] : []),
     ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", label: "复习积压", title: `${insights.dueCount}道到期题等待回炉`, detail: `今日先按价值清理${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余自动顺延`, action: () => setTab("review") }] : []),
   ].slice(0, 3);
-  const quickBank = validLearningBanks[0];
   const todayInsight = insights.recent.find((item) => item.day === dayKey || item.day.slice(0, 10) === dayKey);
   const todayAnswered = Math.max(todayInsight?.total ?? 0, sessionAnswered, activeDailySession?.answered ?? 0);
   const todayAccuracy = sessionAnswered > 0
@@ -3393,6 +3450,18 @@ export default function DailyPracticeApp() {
     : todayInsight?.accuracy ?? 0;
   const todayReviewAdded = Math.max(sessionReviewAdded, activeDailySession?.reviewAdded ?? 0);
   const weeklyMetrics = insights.weekly ?? emptyInsights.weekly;
+  const todayValueHeadline = todayAnswered === 0
+    ? "开始后显示真实收益，不预填结果"
+    : todayMetrics.repairedDue > 0
+      ? `今天已真正修复${todayMetrics.repairedDue}道到期题`
+      : todayMetrics.highFrequencyPoints.length > 0
+        ? `今天覆盖${todayMetrics.highFrequencyPoints.length}个可靠高频考点`
+        : `今天完成${todayAnswered}道真题，结果已入账`;
+  const valueComparisonItems = [
+    todayMetrics.accuracyDelta === null ? "" : `较前7日正确率${todayMetrics.accuracyDelta >= 0 ? "提升" : "下降"}${Math.abs(todayMetrics.accuracyDelta)}pp`,
+    weeklyMetrics.repeatErrorRateDelta === null ? "" : `重复错误率${weeklyMetrics.repeatErrorRateDelta <= 0 ? "下降" : "上升"}${Math.abs(weeklyMetrics.repeatErrorRateDelta)}pp`,
+    weeklyMetrics.masteredPoints.length ? `本周新掌握${weeklyMetrics.masteredPoints.length}个考点` : "",
+  ].filter(Boolean);
   const threeDayReportReady = weeklyMetrics.activeDays >= 3;
   const threeDayReportProgress = Math.min(3, weeklyMetrics.activeDays);
   const threeDayNextIssues = weeklyMetrics.nextIssues.slice(0, 3);
@@ -3429,6 +3498,12 @@ export default function DailyPracticeApp() {
               </button>}
             </section>
 
+            {criticalReminder && <button className="critical-exam-reminder" onClick={() => { setFocusedEventId(criticalReminder.id); setRadarMode("tasks"); setTab("calendar"); }}>
+              <span>{criticalReminder.days === 0 ? "今天必须处理" : "明天截止"}</span>
+              <div><b>{criticalReminder.targetLabel} · {criticalReminder.title}</b><small>{shortDate(criticalReminder.eventDate)} · 错过可能影响报考，请优先核对官方来源</small></div>
+              <em>立即处理 ›</em>
+            </button>}
+
             <section className={`today-command-card${allDailyDone ? " completed" : ""}`}>
               <div className="today-command-top"><span>{dailyPlan.minutes === 10 ? "忙碌保底" : "今日最该做"}</span><em>{new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "long", day: "numeric", weekday: "short" }).format(new Date())}</em></div>
               <div className="today-command-main">
@@ -3436,7 +3511,7 @@ export default function DailyPracticeApp() {
                 <div className="today-progress-orb" style={{ "--progress": `${doneCount * (360 / Math.max(1, enabledDailySteps.length))}deg` } as React.CSSProperties}><strong>{dailyConfigurationBlocking ? "—" : `${doneCount}/${enabledDailySteps.length}`}</strong><span>{dailyConfigurationBlocking ? "待配置" : "完成"}</span></div>
               </div>
               <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道，补足后才生成真实日练` : dailyCheckinPending ? "学习步骤已完成 · 点击重新同步" : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 练完自动打卡`}</span></button>
-              <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>}{allDailyDone && <button onClick={runBonusPractice}>再练10分钟</button>}{quickBank && <button onClick={() => void startPractice("mixed", [quickBank.code], { kind: "bank" })}>单本加练</button>}</div>
+              <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟` : "今天太忙？10分钟保底"}</button>}</div>
             </section>
 
             {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天可练5题，完整体验学习闭环</h3></div><button onClick={() => setTab("me")}>去激活</button></section>}
@@ -3462,11 +3537,18 @@ export default function DailyPracticeApp() {
               })}</div>
             </section>
 
-            <section className="today-gain-card"><div className="compact-section-heading"><div><span>今日收益</span><h2>{allDailyDone ? "今日已完成，可以收工" : dailyCheckinPending ? "任务完成，打卡待同步" : todayAnswered || doneCount ? "每一步都有可核对的结果" : "开始后实时记录，不预填成果"}</h2></div><em>{allDailyDone ? "已服务端打卡" : dailyCheckinPending ? "待同步" : `连续${streak}天`}</em></div>
-              <div className="today-gain-grid"><div><b>{todayAnswered}</b><span>已完成真题</span></div><div><b>{todayAnswered ? `${todayAccuracy}%` : "—"}</b><span>今日正确率</span></div><div><b>{todayMetrics.repairedDue}</b><span>修复到期题</span></div><div><b>{todayMetrics.wrong}</b><span>发现错题</span></div></div>
-              <details className="today-gain-detail" open={allDailyDone && todayAnswered > 0}><summary>查看完整收益单</summary><div className="today-gain-detail-grid"><div><b>{todayMetrics.guessed}</b><span>蒙对</span></div><div><b>{todayMetrics.hesitant}</b><span>犹豫</span></div><div><b>{todayMetrics.overtime}</b><span>超时</span></div><div><b>{todayMetrics.accuracyDelta === null ? "—" : `${todayMetrics.accuracyDelta >= 0 ? "+" : ""}${todayMetrics.accuracyDelta}pp`}</b><span>较前7日正确率</span></div><div><b>{todayMetrics.avgSecondsDelta === null ? "—" : `${todayMetrics.avgSecondsDelta >= 0 ? "+" : ""}${todayMetrics.avgSecondsDelta}秒`}</b><span>较前7日均时</span></div><div><b>{tomorrowPlan.dueCount}</b><span>明日到期复习</span></div></div><p><b>本次高频考点：</b>{todayMetrics.highFrequencyPoints.length ? todayMetrics.highFrequencyPoints.join("、") : "暂无达到可靠样本门槛的考点"}</p></details>
-              <p className="today-gain-review-note">本轮新增回炉 {todayReviewAdded} 道 · 完成 {doneCount}/{enabledDailySteps.length} 个有效动作</p>
-              <div className="today-gain-streak"><div><b>本周打卡</b><span>距{nextStreakMilestone}天还差{Math.max(0, nextStreakMilestone - streak)}天</span></div><div className="streak-dot-row" aria-label="本周打卡进度">{currentWeekCheckinKeys.map((key, index) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""} title={`${weekLabels[index]} ${key}`}>{weekLabels[index]}</em>)}</div></div>
+            <section className="today-gain-card compact-gain-card">
+              <details className="today-gain-disclosure" open={todayGainExpanded} onToggle={(event) => setTodayGainExpanded(event.currentTarget.open)}>
+                <summary><div><span>今日收益</span><b>{todayValueHeadline}</b><small>{allDailyDone ? "今日闭环已完成，结果均来自真实作答" : todayAnswered ? `已完成${todayAnswered}题 · 新增回炉${todayReviewAdded}题` : "未完成主线时保持收起，不打扰当前任务"}</small></div><em>{todayGainExpanded ? "收起" : "查看"}⌄</em></summary>
+                <div className="today-gain-content">
+                  {valueComparisonItems.length > 0 && <div className="value-comparison-row">{valueComparisonItems.map((item) => <span key={item}>{item}</span>)}</div>}
+                  <div className="today-gain-grid"><div><b>{todayAnswered}</b><span>已完成真题</span></div><div><b>{todayAnswered ? `${todayAccuracy}%` : "—"}</b><span>今日正确率</span></div><div><b>{todayMetrics.repairedDue}</b><span>修复到期题</span></div><div><b>{todayMetrics.wrong}</b><span>发现错题</span></div></div>
+                  <div className="today-gain-detail-grid"><div><b>{todayMetrics.guessed}</b><span>蒙对</span></div><div><b>{todayMetrics.hesitant}</b><span>犹豫</span></div><div><b>{todayMetrics.overtime}</b><span>超时</span></div><div><b>{todayMetrics.avgSecondsDelta === null ? "—" : `${todayMetrics.avgSecondsDelta >= 0 ? "+" : ""}${todayMetrics.avgSecondsDelta}秒`}</b><span>较前7日均时</span></div><div><b>{weeklyMetrics.masteredPoints.length}</b><span>本周新掌握考点</span></div><div><b>{tomorrowPlan.dueCount}</b><span>明日到期复习</span></div></div>
+                  <p className="gain-point-note"><b>今天练到的可靠高频考点：</b>{todayMetrics.highFrequencyPoints.length ? todayMetrics.highFrequencyPoints.join("、") : "暂无达到可靠样本门槛的考点，系统不会强行贴高频标签。"}</p>
+                  <p className="today-gain-review-note">本轮新增回炉 {todayReviewAdded} 道 · 完成 {doneCount}/{enabledDailySteps.length} 个有效动作</p>
+                  <div className="today-gain-streak"><div><b>本周打卡</b><span>距{nextStreakMilestone}天还差{Math.max(0, nextStreakMilestone - streak)}天</span></div><div className="streak-dot-row" aria-label="本周打卡进度">{currentWeekCheckinKeys.map((key, index) => <em key={key} className={progress.checkins.includes(key) ? "checked" : key === dayKey ? "today" : ""} title={`${weekLabels[index]} ${key}`}>{weekLabels[index]}</em>)}</div></div>
+                </div>
+              </details>
             </section>
 
             {todayAlertItems.length > 0 && <section className="today-alert-card"><div className="compact-section-heading"><div><span>今日提醒</span><h2>只保留今天必须处理的事</h2></div></div>
@@ -3487,8 +3569,8 @@ export default function DailyPracticeApp() {
                 <div className="smart-bonus-content">
                   {allDailyDone ? <article className="smart-bonus-recommendation">
                     <div className="smart-bonus-icon" style={{ color: recommendedDrill?.color, background: recommendedDrill ? `${recommendedDrill.color}18` : undefined }}>{needsDiagnostic ? "测" : recommendedDrill?.icon ?? "练"}</div>
-                    <div className="smart-bonus-copy"><span>{needsDiagnostic ? "首次诊断" : recommendedDrillEntry?.moduleMatch ? "薄弱项优先" : "智能推荐"}</span><h3>{bonusRecommendationTitle}</h3><p>{bonusRecommendationReason}</p><small>{bonusRecommendationMeta}</small></div>
-                    <div className="smart-bonus-actions"><button className="primary-button" disabled={busy} onClick={startRecommendedBonus}>{needsDiagnostic ? "开始摸底" : "开始加练"}</button>{rankedBonusDrills.length > 1 && !needsDiagnostic && <button className="bonus-switch-button" onClick={() => setBonusDrillOffset((value) => value + 1)}>换一组</button>}</div>
+                    <div className="smart-bonus-copy"><span>{needsDiagnostic ? "首次诊断" : recommendationPoint ? "考点级推荐" : recommendedDrillEntry?.moduleMatch ? "薄弱项优先" : "智能推荐"}</span><h3>{bonusRecommendationTitle}</h3><p>{bonusRecommendationReason}</p>{recommendationEvidence.length > 0 && <div className="recommendation-evidence">{recommendationEvidence.map((item) => <em key={item}>{item}</em>)}</div>}<small>{bonusRecommendationMeta}</small></div>
+                    <div className="smart-bonus-actions"><button className="primary-button" disabled={busy} onClick={startRecommendedBonus}>{needsDiagnostic ? "开始摸底" : "开始加练"}</button>{bonusAlternativeCount > 1 && !needsDiagnostic && <button className="bonus-switch-button" onClick={() => setBonusDrillOffset((value) => value + 1)}>换一组</button>}</div>
                   </article> : <div className="bonus-locked-note"><span>主</span><div><b>先完成今天的学习闭环</b><small>完成后自动生成个性化加练，避免在多个入口之间反复选择。</small></div><button onClick={runDailyAction}>回到今日主线</button></div>}
                   <div className="bonus-more-heading"><span>更多学习方式</span><small>按需使用，不计入今日必做</small></div>
                   <div className="smart-bonus-tools">

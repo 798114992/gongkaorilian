@@ -2278,10 +2278,53 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
         AND COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) IS NOT NULL
         AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
       ORDER BY knowledge_point LIMIT 5`).bind(userId).all<{ knowledge_point: string }>(),
+    db.prepare(`SELECT
+        COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) AS knowledge_point,
+        MAX(q.module) AS module,
+        COUNT(*) AS total,
+        COALESCE(SUM(pa.is_correct), 0) AS correct,
+        COALESCE(SUM(CASE WHEN pa.is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong_total,
+        COALESCE(SUM(CASE WHEN pa.confidence = 'hesitant' THEN 1 ELSE 0 END), 0) AS hesitant_total,
+        COALESCE(SUM(CASE WHEN pa.confidence = 'guessed' THEN 1 ELSE 0 END), 0) AS guessed_total,
+        COALESCE(SUM(pa.overtime), 0) AS overtime_total,
+        GROUP_CONCAT(NULLIF(TRIM(pa.wrong_reason), ''), '｜') AS wrong_reasons,
+        MAX(CASE WHEN ${RELIABLE_FREQUENCY_SQL}
+          THEN CASE WHEN q.frequency_occurrences * 1.0 / q.frequency_papers >= 0.55 THEN 3
+            WHEN q.frequency_occurrences * 1.0 / q.frequency_papers >= 0.25 THEN 2 ELSE 1 END
+          ELSE 0 END) AS frequency_rank,
+        MAX(CASE WHEN ${RELIABLE_FREQUENCY_SQL} THEN q.frequency_occurrences ELSE 0 END) AS frequency_occurrences,
+        MAX(CASE WHEN ${RELIABLE_FREQUENCY_SQL} THEN q.frequency_papers ELSE 0 END) AS frequency_papers,
+        MAX(CASE WHEN q.truth_verified = 1 AND q.importance_stars BETWEEN 1 AND 5
+          AND TRIM(q.importance_rule_version) <> ''
+          AND (TRIM(q.importance_reason) <> '' OR TRIM(q.importance_override_reason) <> '')
+          AND (TRIM(q.importance_override_reason) <> '' OR (${RELIABLE_FREQUENCY_SQL}))
+          THEN q.importance_stars ELSE 0 END) AS importance_stars,
+        CAST(ROUND(AVG(CASE WHEN q.truth_verified = 1 AND q.score_rate_attempts >= 100
+          AND q.score_rate_correct <= q.score_rate_attempts AND TRIM(q.score_rate_scope) <> ''
+          AND q.score_rate_updated_at IS NOT NULL AND TRIM(q.score_rate_updated_at) <> ''
+          THEN q.score_rate_correct * 100.0 / q.score_rate_attempts END)) AS INTEGER) AS score_rate,
+        MAX(CASE WHEN q.truth_verified = 1 AND q.score_rate_attempts >= 100
+          AND q.score_rate_correct <= q.score_rate_attempts AND TRIM(q.score_rate_scope) <> ''
+          AND q.score_rate_updated_at IS NOT NULL AND TRIM(q.score_rate_updated_at) <> ''
+          THEN q.score_rate_attempts ELSE 0 END) AS score_rate_attempts
+      FROM practice_attempts pa
+      JOIN questions q ON q.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.apply_status = 'applied'
+        AND date(pa.answered_at, '+8 hours') >= date('now', '+8 hours', '-6 days')
+        AND COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(q.module), '')) IS NOT NULL
+      GROUP BY knowledge_point
+      HAVING COUNT(*) >= 2
+      ORDER BY (wrong_total + hesitant_total + guessed_total + overtime_total) DESC, total DESC
+      LIMIT 8`).bind(userId).all<{
+        knowledge_point: string; module: string; total: number; correct: number; wrong_total: number;
+        hesitant_total: number; guessed_total: number; overtime_total: number; wrong_reasons: string | null;
+        frequency_rank: number; frequency_occurrences: number; frequency_papers: number; importance_stars: number;
+        score_rate: number | null; score_rate_attempts: number;
+      }>(),
   ]);
   const [selectedBankRows, stats] = await Promise.all([selectedBanksPromise, statsPromise]);
   const selectedBanks = selectedBankRows.slice(0, 32);
-  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek] = stats;
+  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek, weakPointRows] = stats;
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
   const correct = Number(summary?.correct ?? 0);
@@ -2343,6 +2386,35 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
     .sort((a, b) => a.accuracy - b.accuracy || b.avgSeconds - a.avgSeconds)
     .slice(0, 3)
     .map((item) => `${item.module}：${item.accuracy}%正确率，平均${item.avgSeconds}秒`);
+  const dominantWrongReason = (value: string | null) => {
+    const counts = new Map<string, number>();
+    for (const reason of String(value ?? "").split("｜").map((item) => item.trim()).filter(Boolean)) {
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? "";
+  };
+  const weakPoints = weakPointRows.results.map((row) => {
+    const pointTotal = Number(row.total);
+    const pointCorrect = Number(row.correct);
+    const frequencyRank = Number(row.frequency_rank);
+    return {
+      point: row.knowledge_point,
+      module: row.module,
+      total: pointTotal,
+      accuracy: pointTotal ? Math.round(pointCorrect * 100 / pointTotal) : 0,
+      wrong: Number(row.wrong_total),
+      hesitant: Number(row.hesitant_total),
+      guessed: Number(row.guessed_total),
+      overtime: Number(row.overtime_total),
+      wrongReason: dominantWrongReason(row.wrong_reasons),
+      frequency: frequencyRank === 3 ? "高频" : frequencyRank === 2 ? "中频" : frequencyRank === 1 ? "低频" : "",
+      frequencyOccurrences: Number(row.frequency_occurrences),
+      frequencyPapers: Number(row.frequency_papers),
+      importanceStars: Number(row.importance_stars),
+      scoreRate: row.score_rate === null ? null : Number(row.score_rate),
+      scoreRateAttempts: Number(row.score_rate_attempts),
+    };
+  });
   return {
     total,
     accuracy: total ? Math.round((correct / total) * 100) : 0,
@@ -2356,6 +2428,7 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
       mastered: stateMap.mastered ?? 0,
     },
     modules: moduleInsights,
+    weakPoints,
     recent: recent.results.map((row) => ({ day: row.day, total: Number(row.total), accuracy: Number(row.total) ? Math.round((Number(row.correct) / Number(row.total)) * 100) : 0 })),
     today: {
       total: todayTotal,
@@ -2855,7 +2928,7 @@ async function bootstrap(request: Request) {
       dailyPracticeCompleted: false,
       studyInsights: {
         total: 0, accuracy: 0, avgSeconds: 0, uncertainCount: 0, overtimeCount: 0, dueCount: 0,
-        stateCounts: { learning: 0, weak: 0, mastered: 0 }, modules: [], recent: [],
+        stateCounts: { learning: 0, weak: 0, mastered: 0 }, modules: [], weakPoints: [], recent: [],
         today: { total: 0, correct: 0, repairedDue: 0, wrong: 0, hesitant: 0, guessed: 0, overtime: 0, avgSeconds: 0, accuracyDelta: null, avgSecondsDelta: null, highFrequencyPoints: [] },
         weekly: { total: 0, accuracy: 0, activeDays: 0, avgSeconds: 0, highFrequencyCoverage: 0, repeatErrorRate: null, accuracyDelta: null, avgSecondsDelta: null, repeatErrorRateDelta: null, masteredPoints: [], nextIssues: [] },
         tomorrowPlan: { dueCount: 0, focusModule: null, focusQuestionCount: 0, estimatedMinutes: 5, taskText: "先完成备考组合配置，再开始首组日练。" },
@@ -4562,7 +4635,16 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
     : `FROM practice_attempts scoped
       WHERE scoped.user_id = ? AND scoped.practice_session_id = ? AND scoped.apply_status = 'applied'`;
   const scopeBindings = wholeDaily ? [userId, session.date_key] : [userId, sessionId];
-  const [stats, modules] = await Promise.all([
+  const pointAttemptScope = wholeDaily
+    ? `FROM practice_attempts pa
+      JOIN practice_sessions ps ON ps.id = pa.practice_session_id AND ps.user_id = pa.user_id
+      LEFT JOIN questions q ON q.question_code = pa.question_code
+      WHERE pa.user_id = ? AND ps.date_key = ? AND ps.kind = 'daily' AND ps.mode = 'mixed'
+        AND pa.apply_status = 'applied'`
+    : `FROM practice_attempts pa
+      LEFT JOIN questions q ON q.question_code = pa.question_code
+      WHERE pa.user_id = ? AND pa.practice_session_id = ? AND pa.apply_status = 'applied'`;
+  const [stats, modules, points] = await Promise.all([
     db.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(is_correct), 0) AS correct,
       COALESCE(SUM(CASE WHEN is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
       COALESCE(SUM(CASE WHEN confidence = 'hesitant' AND is_correct = 1 THEN 1 ELSE 0 END), 0) AS hesitant,
@@ -4575,6 +4657,18 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
       ${attemptScope}
       GROUP BY module ORDER BY (1.0 * COALESCE(SUM(is_correct), 0) / COUNT(*)) ASC, total DESC LIMIT 5`)
       .bind(...scopeBindings).all<{ module: string; total: number; correct: number }>(),
+    db.prepare(`SELECT
+        COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(pa.module), '')) AS knowledge_point,
+        COUNT(*) AS total,
+        COALESCE(SUM(pa.is_correct), 0) AS correct,
+        COALESCE(SUM(CASE WHEN pa.is_correct = 0 THEN 1 ELSE 0 END), 0) AS wrong,
+        COALESCE(SUM(CASE WHEN pa.confidence IN ('hesitant', 'guessed') THEN 1 ELSE 0 END), 0) AS uncertain,
+        COALESCE(SUM(CASE WHEN pa.was_due = 1 AND pa.is_correct = 1 AND pa.confidence = 'confident' THEN 1 ELSE 0 END), 0) AS repaired_due
+      ${pointAttemptScope}
+      AND COALESCE(NULLIF(TRIM(q.sub_type), ''), NULLIF(TRIM(pa.module), '')) IS NOT NULL
+      GROUP BY knowledge_point
+      ORDER BY (wrong + uncertain) DESC, total DESC LIMIT 4`)
+      .bind(...scopeBindings).all<{ knowledge_point: string; total: number; correct: number; wrong: number; uncertain: number; repaired_due: number }>(),
   ]);
   return json({
     wrong: Number(stats?.wrong ?? 0),
@@ -4586,6 +4680,14 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
       module: row.module,
       total: Number(row.total),
       accuracy: Number(row.total) ? Math.round(Number(row.correct) * 100 / Number(row.total)) : 0,
+    })),
+    points: points.results.map((row) => ({
+      point: row.knowledge_point,
+      total: Number(row.total),
+      correct: Number(row.correct),
+      wrong: Number(row.wrong),
+      uncertain: Number(row.uncertain),
+      repairedDue: Number(row.repaired_due),
     })),
   });
 }

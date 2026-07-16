@@ -1326,6 +1326,8 @@ export default function DailyPracticeApp() {
   const [profileDraft, setProfileDraft] = useState<ExamProfile>({ onboarded: false, dailyMinutes: 30, targets: [] });
   const [onboardingBankCode, setOnboardingBankCode] = useState("");
   const [diagnosticPromptOpen, setDiagnosticPromptOpen] = useState(false);
+  const [bonusExpanded, setBonusExpanded] = useState(false);
+  const [bonusDrillOffset, setBonusDrillOffset] = useState(0);
   const [bankFilter, setBankFilter] = useState("适合我");
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
@@ -1462,6 +1464,12 @@ export default function DailyPracticeApp() {
   const dailyCheckinPending = dailyTasksDone && !dailyCheckinDone;
   const allDailyDone = dailyTasksDone && dailyCheckinDone;
   const nextDailyStep = enabledDailySteps.find((step) => !stepDone[step]) ?? null;
+
+  useEffect(() => {
+    setBonusExpanded(allDailyDone);
+    setBonusDrillOffset(0);
+  }, [allDailyDone, dayKey]);
+
   const essayQuestion = essayPracticeQuestions[essayPracticeIndex] ?? null;
   const essayDraftKey = essayQuestion ? `essay:${essayQuestion.id}` : dayKey;
   const currentDueEssayRewrite = essayQuestion
@@ -3282,6 +3290,51 @@ export default function DailyPracticeApp() {
   })();
 
   const weakestModule = insights.modules.length ? [...insights.modules].sort((a, b) => a.accuracy - b.accuracy)[0] : null;
+  const todayMetrics = insights.today ?? emptyInsights.today;
+  const rankedBonusDrills = drillPresets
+    .map((drill, index) => {
+      const target = weakestModule?.module.trim() ?? "";
+      const searchable = `${drill.title} ${drill.module} ${drill.subTypes.join(" ")}`;
+      const moduleMatch = Boolean(target && (searchable.includes(target) || (drill.module && target.includes(drill.module))));
+      return {
+        drill,
+        score: (moduleMatch ? 100 : 0)
+          + (drill.importanceStars ?? 0) * 3
+          + (drill.frequency?.includes("高") ? 8 : 0)
+          - index / 100,
+        moduleMatch,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+  const recommendedDrillEntry = rankedBonusDrills.length
+    ? rankedBonusDrills[bonusDrillOffset % rankedBonusDrills.length]
+    : null;
+  const recommendedDrill = recommendedDrillEntry?.drill ?? null;
+  const needsDiagnostic = insights.total === 0;
+  const bonusRecommendationTitle = needsDiagnostic ? "先做10题，建立提分基线" : recommendedDrill?.title ?? "主攻题库混合加练";
+  const bonusRecommendationReason = needsDiagnostic
+    ? "先记录答错、犹豫、蒙对和超时，下一次才按真实薄弱点推荐。"
+    : recommendedDrillEntry?.moduleMatch && weakestModule
+      ? `近阶段${weakestModule.module}正确率${weakestModule.accuracy}%，优先补当前最薄弱项。`
+      : weakestModule
+        ? `当前最薄弱的是${weakestModule.module}；暂未匹配到对应专项，先按已发布的高价值真题保持手感。`
+        : "根据主攻考试与后台已发布的高价值真题，为你挑选一组短练。";
+  const bonusRecommendationMeta = needsDiagnostic
+    ? "10道真题 · 约10分钟"
+    : recommendedDrill
+      ? `${recommendedDrill.questionCount}${recommendedDrill.subject === "申论" ? "题" : "道"}真题 · 约${recommendedDrill.minutes}分钟`
+      : "5道真题 · 约10分钟";
+  const startRecommendedBonus = () => {
+    if (needsDiagnostic) {
+      void startPractice("mixed", undefined, { kind: "diagnostic", limit: 10, forceNew: true });
+      return;
+    }
+    if (recommendedDrill) {
+      startMicroDrill(recommendedDrill);
+      return;
+    }
+    runBonusPractice();
+  };
   const tomorrowPlan = insights.tomorrowPlan;
   const nextStepText = dailyConfigurationBlocking ? "备考组合待补全" : dailyCheckinPending ? "任务已完成，打卡待同步" : nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
   const primaryTaskTitle = dailyConfigurationBlocking
@@ -3339,7 +3392,6 @@ export default function DailyPracticeApp() {
     ? Math.round((sessionCorrect / sessionAnswered) * 100)
     : todayInsight?.accuracy ?? 0;
   const todayReviewAdded = Math.max(sessionReviewAdded, activeDailySession?.reviewAdded ?? 0);
-  const todayMetrics = insights.today ?? emptyInsights.today;
   const weeklyMetrics = insights.weekly ?? emptyInsights.weekly;
   const threeDayReportReady = weeklyMetrics.activeDays >= 3;
   const threeDayReportProgress = Math.min(3, weeklyMetrics.activeDays);
@@ -3391,6 +3443,14 @@ export default function DailyPracticeApp() {
 
 
             <section className="daily-timeline-card"><div className="compact-section-heading"><div><span>今日{dailyStepItems.length}项安排</span><h2>{dailyConfigurationBlocking ? "题库补全后自动生成行测" : allDailyDone ? "已完成，明天继续" : "按顺序做，不用自己想"}</h2></div><em>{dailyConfigurationBlocking ? "待配置" : allDailyDone ? "收工" : `还剩${enabledDailySteps.length - doneCount}项`}</em></div>
+              {!dailyConfigurationBlocking && (insights.dueCount > 0 || todayMetrics.repairedDue > 0) && <button
+                className={`review-priority-card${insights.dueCount === 0 ? " completed" : ""}`}
+                onClick={() => stepDone.practice ? setTab("review") : void startPractice("mixed", undefined, { kind: "daily" })}
+              >
+                <span>{insights.dueCount === 0 ? "✓" : "复"}</span>
+                <div><b>{insights.dueCount === 0 ? "今日到期回炉已完成" : "到期回炉已排入今日行测"}</b><small>{insights.dueCount === 0 ? `已修复${todayMetrics.repairedDue}道到期题，今天无需重复刷。` : `${insights.dueCount}道到期题优先出现；超出今日容量的题自动顺延。`}</small></div>
+                <em>{insights.dueCount === 0 ? "已完成" : stepDone.practice ? "继续回炉" : "先复习"}</em>
+              </button>}
               <div className="daily-timeline">{dailyStepItems.map((item, index) => {
                 const active = !item.done && item.key === nextDailyStep;
                 return <button key={item.key} className={`${item.done ? "done" : active ? "active" : "pending"}`} onClick={item.action}>
@@ -3413,10 +3473,32 @@ export default function DailyPracticeApp() {
               <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className="urgent" onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
             </section>}
 
-            <section className="quick-practice-card"><div className="compact-section-heading"><div><span>加练一下</span><h2>有余力再点，不打断今日主线</h2></div><button onClick={() => setTab("banks")}>题库书架</button></div>
-              <div className="quick-practice-grid">{drillPresets.map((drill) => <button key={drill.id} onClick={() => startMicroDrill(drill)} title={drill.subtitle}><span style={{ color: drill.color, background: `${drill.color}18` }}>{drill.icon}</span><b>{drill.title}</b><small>{drill.minutes}分钟 · {drill.questionCount}{drill.subject === "申论" ? "题" : "道"}</small></button>)}</div>
-              {!drillPresets.length && <div className="inline-empty-note">专项微练发布后会自动出现在这里。</div>}
-              <div className="quick-tool-row"><button onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤/睡前</small></button><button onClick={() => setTab("review")}><span>复</span><b>到期回炉</b><small>{insights.dueCount}道</small></button><button onClick={() => insights.total ? setTab("report") : void startPractice("mixed", undefined, { kind: "bonus", limit: 5, forceNew: true })}><span>报</span><b>{insights.total ? "提分诊断" : "首次诊断"}</b><small>{weakestModule ? weakestModule.module : "先做5题建基线"}</small></button>{day.currentAffairs.length > 0 && <button onClick={() => setActiveModule("affairs")}><span>政</span><b>今日时政</b><small>{day.currentAffairs.length}条速记</small></button>}<QuizFeature notify={notify} trackEvent={trackEvent} variant="tool" unlocked={allDailyDone} /></div>
+            <section className={`quick-practice-card smart-bonus-card${allDailyDone ? " ready" : ""}`}>
+              <div className="compact-section-heading"><div><span>再练10分钟</span><h2>{allDailyDone ? "如果还有时间，只练最值得的一组" : "先完成今日主线，有余力再展开"}</h2></div></div>
+              <details
+                className="smart-bonus-disclosure"
+                open={bonusExpanded}
+                onToggle={(event) => setBonusExpanded(event.currentTarget.open)}
+              >
+                <summary>
+                  <div><span>{allDailyDone ? "今日主线已完成" : "不会打断今日任务"}</span><b>{allDailyDone ? "已根据你的作答选好一组" : "更多练习与学习方式"}</b></div>
+                  <em>{bonusExpanded ? "收起" : "展开"}⌄</em>
+                </summary>
+                <div className="smart-bonus-content">
+                  {allDailyDone ? <article className="smart-bonus-recommendation">
+                    <div className="smart-bonus-icon" style={{ color: recommendedDrill?.color, background: recommendedDrill ? `${recommendedDrill.color}18` : undefined }}>{needsDiagnostic ? "测" : recommendedDrill?.icon ?? "练"}</div>
+                    <div className="smart-bonus-copy"><span>{needsDiagnostic ? "首次诊断" : recommendedDrillEntry?.moduleMatch ? "薄弱项优先" : "智能推荐"}</span><h3>{bonusRecommendationTitle}</h3><p>{bonusRecommendationReason}</p><small>{bonusRecommendationMeta}</small></div>
+                    <div className="smart-bonus-actions"><button className="primary-button" disabled={busy} onClick={startRecommendedBonus}>{needsDiagnostic ? "开始摸底" : "开始加练"}</button>{rankedBonusDrills.length > 1 && !needsDiagnostic && <button className="bonus-switch-button" onClick={() => setBonusDrillOffset((value) => value + 1)}>换一组</button>}</div>
+                  </article> : <div className="bonus-locked-note"><span>主</span><div><b>先完成今天的学习闭环</b><small>完成后自动生成个性化加练，避免在多个入口之间反复选择。</small></div><button onClick={runDailyAction}>回到今日主线</button></div>}
+                  <div className="bonus-more-heading"><span>更多学习方式</span><small>按需使用，不计入今日必做</small></div>
+                  <div className="smart-bonus-tools">
+                    <button className="bonus-tool-entry" onClick={() => { setBankFilter("专项"); setTab("banks"); }}><span>专</span><b>专项自选</b><small>自己挑5–10分钟微练</small></button>
+                    <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤或睡前听</small></button>
+                    <QuizFeature notify={notify} trackEvent={trackEvent} variant="tool" unlocked={allDailyDone} />
+                  </div>
+                  {allDailyDone && <button className="finish-today-button" onClick={() => { setBonusExpanded(false); notify("今日学习已完成，明天继续"); }}>今天学够了，结束学习</button>}
+                </div>
+              </details>
             </section>
           </div>}
 

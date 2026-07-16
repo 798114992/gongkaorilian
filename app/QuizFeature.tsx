@@ -331,13 +331,14 @@ export default function QuizFeature({
       {variant === "tool" ? <button
         type="button"
         className={`quiz-tool-entry${unlocked ? " unlocked" : ""}`}
-        aria-label="打开局长思维小测"
+        aria-label={unlocked ? "打开局长思维小测" : "完成今日主线后解锁局长思维小测"}
+        disabled={!unlocked}
         onClick={() => openQuiz()}
       >
         <span className="quiz-tool-icon" aria-hidden="true">局</span>
         <span className="quiz-tool-copy">
           <b>局长思维小测</b>
-          <small>{unlocked ? "今日彩蛋 · 已解锁" : "10题 · 约3分钟"}</small>
+          <small>{unlocked ? "今日彩蛋 · 已解锁" : "完成主线后解锁"}</small>
         </span>
         <em aria-hidden="true">›</em>
       </button> : <section className="quiz-teaser-card" aria-label="趣味测试">

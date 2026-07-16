@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -89,7 +89,7 @@ const initialData: QuizDomain = {
   summary: { totalQuestions: 0, publishedQuestions: 0, attempts: 0, completed: 0, avgScore: "0", directorCount: 0, shares: 0 },
 };
 
-const quizId = "quiz-juzhang-thinking";
+const defaultQuizId = "quiz-juzhang-thinking";
 
 function difficultyTag(value: string) {
   if (value === "hard") return <Tag color="red">困难</Tag>;
@@ -123,16 +123,32 @@ function sheetRowsFromFile(file: File): Promise<Record<string, unknown>[]> {
 
 export default function QuizAdminPage() {
   const { can } = useAdminSession();
-  const { data, loading, error, reload } = useAdminDomain<QuizDomain>("adminListQuizzes", initialData);
+  const [selectedQuizId, setSelectedQuizId] = useState(defaultQuizId);
+  const { data, loading, error, reload } = useAdminDomain<QuizDomain>("adminListQuizzes", initialData, { quizId: selectedQuizId });
   const [notice, setNotice] = useState("");
   const [questionOpen, setQuestionOpen] = useState(false);
   const [levelOpen, setLevelOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [questionForm] = Form.useForm();
   const [levelForm] = Form.useForm();
   const [settingsForm] = Form.useForm();
+  const [createForm] = Form.useForm();
   const canWrite = can("content.write");
-  const currentQuiz = data.tests.find((item) => item.id === quizId) ?? data.tests[0];
+  const currentQuiz = data.tests.find((item) => item.id === selectedQuizId) ?? data.tests[0];
+  const quizId = currentQuiz?.id ?? selectedQuizId;
+
+  useEffect(() => {
+    if (!currentQuiz) return;
+    settingsForm.setFieldsValue({
+      title: currentQuiz.title,
+      description: currentQuiz.description,
+      questionCount: currentQuiz.question_count,
+      status: currentQuiz.status,
+      shareTitle: currentQuiz.share_title,
+      disclaimer: currentQuiz.disclaimer,
+    });
+  }, [currentQuiz, settingsForm]);
 
   const resultDistribution = useMemo(() => {
     const completed = Number(data.summary.completed || 0);
@@ -215,6 +231,20 @@ export default function QuizAdminPage() {
     }
   };
 
+  const createQuiz = async () => {
+    const values = await createForm.validateFields();
+    setSaving(true);
+    try {
+      const created = await adminApi<{ id: string }>({ action: "adminCreateQuiz", ...values });
+      setNotice("新的测评主题已创建为草稿。请先配置题目和结果段位，再发布。");
+      setCreateOpen(false);
+      createForm.resetFields();
+      setSelectedQuizId(created.id);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const uploadProps: UploadProps = {
     accept: ".xlsx,.xls,.csv",
     showUploadList: false,
@@ -246,10 +276,28 @@ export default function QuizAdminPage() {
       loading={loading}
       error={error}
       onReload={() => void reload()}
-      extra={canWrite ? <Button type="primary" icon={<PlusOutlined />} onClick={() => openQuestion()}>新增题目</Button> : undefined}
+      extra={canWrite ? <Space wrap>
+        <Button icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建测评主题</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openQuestion()}>新增题目</Button>
+      </Space> : undefined}
     >
       {notice && <Alert closable showIcon type="info" message={notice} onClose={() => setNotice("")} style={{ marginBottom: 18 }} />}
       {!canWrite && <Alert showIcon type="warning" message="只读模式" description="当前角色只能查看趣味测试配置和数据，不能新增或修改。" style={{ marginBottom: 18 }} />}
+      <Card size="small" style={{ marginBottom: 18 }}>
+        <Space wrap align="center">
+          <Typography.Text strong>当前测评主题</Typography.Text>
+          <Select
+            value={quizId}
+            style={{ minWidth: 280 }}
+            options={data.tests.map((item) => ({
+              value: item.id,
+              label: `${item.title}（${item.status === "published" ? "已发布" : "草稿"}）`,
+            }))}
+            onChange={setSelectedQuizId}
+          />
+          <Typography.Text type="secondary">题库、结果段位、分享文案和数据均按主题独立管理。</Typography.Text>
+        </Space>
+      </Card>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         <Col xs={12} lg={6}><Card><Statistic title="可用题目" value={data.summary.publishedQuestions} suffix={`/ ${data.summary.totalQuestions}`} /></Card></Col>
@@ -371,6 +419,25 @@ export default function QuizAdminPage() {
             <Col xs={12} md={8}><Form.Item name="reviewStatus" label="审核状态"><Select options={[{ value: "pending_review", label: "待审核" }, { value: "approved", label: "通过" }]} /></Form.Item></Col>
             <Col xs={12} md={8}><Form.Item name="sortOrder" label="排序"><InputNumber min={0} style={{ width: "100%" }} /></Form.Item></Col>
             <Col xs={24}><Form.Item name="explanation" label="解析"><Input.TextArea rows={3} /></Form.Item></Col>
+          </Row>
+        </Form>
+      </Modal>
+
+      <Modal title="新建趣味测评主题" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => void createQuiz()} confirmLoading={saving} width={680}>
+        <Alert
+          showIcon
+          type="info"
+          message="先建空白主题，再分别配置题目、结果段位和分享文案"
+          description="新主题默认是草稿，不会自动出现在用户端。完成配置并测试后再发布。"
+          style={{ marginBottom: 16 }}
+        />
+        <Form form={createForm} layout="vertical" initialValues={{ questionCount: 10 }}>
+          <Row gutter={12}>
+            <Col xs={24} md={14}><Form.Item name="title" label="测评标题" rules={[{ required: true, message: "请输入测评标题" }]}><Input placeholder="例如：测测你是哪种公考选手" maxLength={80} /></Form.Item></Col>
+            <Col xs={24} md={10}><Form.Item name="slug" label="英文标识" rules={[{ required: true, message: "请输入英文标识" }, { pattern: /^[a-z0-9-]+$/, message: "仅支持小写字母、数字和短横线" }]}><Input placeholder="exam-personality" maxLength={80} /></Form.Item></Col>
+            <Col xs={24} md={8}><Form.Item name="questionCount" label="每次抽题数"><InputNumber min={5} max={20} style={{ width: "100%" }} /></Form.Item></Col>
+            <Col xs={24}><Form.Item name="description" label="测评简介"><Input.TextArea rows={2} maxLength={240} /></Form.Item></Col>
+            <Col xs={24}><Form.Item name="shareTitle" label="默认分享标题"><Input maxLength={120} placeholder="留空将自动生成" /></Form.Item></Col>
           </Row>
         </Form>
       </Modal>

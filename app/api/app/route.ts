@@ -5555,6 +5555,33 @@ async function adminUpdateQuiz(payload: Record<string, unknown>) {
   return json({ ok: true, id: quizId });
 }
 
+async function adminCreateQuiz(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const title = trimmed(payload.title, 80);
+  const slug = trimmed(payload.slug, 80).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const questionCount = Math.max(5, Math.min(20, Math.floor(Number(payload.questionCount ?? DEFAULT_QUIZ_QUESTION_COUNT)) || DEFAULT_QUIZ_QUESTION_COUNT));
+  if (!title || !slug) return json({ error: "测试标题和英文标识不能为空" }, 400);
+  const quizId = `quiz-${slug}`;
+  try {
+    await getD1().prepare(`INSERT INTO quiz_tests
+      (id, slug, title, description, question_count, status, share_title, disclaimer)
+      VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)`)
+      .bind(
+        quizId,
+        slug,
+        title,
+        trimmed(payload.description, 240),
+        questionCount,
+        trimmed(payload.shareTitle, 120) || `我完成了“${title}”，你也来试试？`,
+        trimmed(payload.disclaimer, 160) || "本测试仅供学习交流与娱乐，不构成招录、任职或职业判断。",
+      ).run();
+  } catch (error) {
+    if (String(error).toLowerCase().includes("unique")) return json({ error: "这个英文标识已存在，请换一个" }, 409);
+    throw error;
+  }
+  return json({ ok: true, id: quizId, slug });
+}
+
 async function adminUpsertQuizQuestion(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
   const quizId = trimmed(payload.quizId, 80) || DEFAULT_QUIZ_ID;
@@ -10092,6 +10119,7 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminReviewContent: ["content.review"],
   adminSubmitContentReview: ["content.write", "radar.write"],
   adminUpdateQuiz: ["content.write"],
+  adminCreateQuiz: ["content.write"],
   adminUpsertQuizQuestion: ["content.write"],
   adminBulkUpsertQuizQuestions: ["content.write"],
   adminSetQuizQuestionStatus: ["content.write"],
@@ -10108,7 +10136,7 @@ const ADMIN_WRITE_ACTIONS = new Set([
   "adminReviewContentImport", "adminRollbackContentImport",
   "adminRollbackQuestionVersion", "adminCreateUser", "adminSetUserStatus",
   "adminUpdateUser", "adminSetAnalyticsEligibility", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
-  "adminUpdateQuiz", "adminUpsertQuizQuestion", "adminBulkUpsertQuizQuestions", "adminSetQuizQuestionStatus", "adminUpsertQuizResult",
+  "adminCreateQuiz", "adminUpdateQuiz", "adminUpsertQuizQuestion", "adminBulkUpsertQuizQuestions", "adminSetQuizQuestionStatus", "adminUpsertQuizResult",
 ]);
 
 function resourceTypeForAdminAction(action: string) {
@@ -10238,6 +10266,7 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminResolveContentReport") response = await adminResolveContentReport(payload);
   else if (action === "adminSubmitContentReview") response = await adminSubmitContentReview(payload);
   else if (action === "adminReviewContent") response = await adminReviewContent(payload);
+  else if (action === "adminCreateQuiz") response = await adminCreateQuiz(payload);
   else if (action === "adminUpdateQuiz") response = await adminUpdateQuiz(payload);
   else if (action === "adminUpsertQuizQuestion") response = await adminUpsertQuizQuestion(payload);
   else if (action === "adminBulkUpsertQuizQuestions") response = await adminBulkUpsertQuizQuestions(payload);

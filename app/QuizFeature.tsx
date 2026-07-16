@@ -67,6 +67,9 @@ type QuizResult = {
 type Props = {
   notify: (message: string) => void;
   trackEvent: (eventName: string, eventData?: Record<string, unknown>) => void;
+  variant?: "teaser" | "tool";
+  unlocked?: boolean;
+  quizSlug?: string;
 };
 
 async function quizApi<T>(payload: Record<string, unknown>) {
@@ -86,9 +89,9 @@ function shareTitleFor(result: QuizResult) {
   return result.result.shareText || `我测出了${result.result.title}，你来试试？`;
 }
 
-function safeChallengeUrl(attemptId: string) {
+function safeChallengeUrl(attemptId: string, slug = "juzhang-thinking") {
   const url = new URL(window.location.origin);
-  url.searchParams.set("quiz", "juzhang-thinking");
+  url.searchParams.set("quiz", slug);
   url.searchParams.set("challenge", attemptId);
   return url.toString();
 }
@@ -118,7 +121,7 @@ function resultTaglineFor(result: QuizResult) {
 }
 
 function sharePayloadFor(result: QuizResult) {
-  const url = safeChallengeUrl(result.attemptId);
+  const url = safeChallengeUrl(result.attemptId, result.quiz?.slug);
   const title = shareTitleFor(result);
   const text = `${title}\n${result.result.title}｜答对${result.correctCount}/${result.total}题\n${result.result.shareText}`;
   return { url, title, text, fullText: `${text}\n同题挑战：${url}` };
@@ -142,7 +145,13 @@ async function writeClipboardText(text: string) {
   if (!ok) throw new Error("copy failed");
 }
 
-export default function QuizFeature({ notify, trackEvent }: Props) {
+export default function QuizFeature({
+  notify,
+  trackEvent,
+  variant = "teaser",
+  unlocked = false,
+  quizSlug = "juzhang-thinking",
+}: Props) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"intro" | "question" | "result" | "review">("intro");
   const [meta, setMeta] = useState<QuizMeta | null>(null);
@@ -154,28 +163,33 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [activeSlug, setActiveSlug] = useState(quizSlug);
 
   const currentQuestion = attempt?.questions[currentIndex] ?? null;
   const progressText = attempt ? `${Math.min(currentIndex + 1, attempt.questions.length)}/${attempt.questions.length}` : "10题";
   const answeredCount = useMemo(() => attempt ? Object.keys(attempt.answered ?? {}).length : 0, [attempt]);
 
-  const loadMeta = useCallback(async (incomingChallengeId = "") => {
+  const loadMeta = useCallback(async (incomingChallengeId = "", incomingSlug = quizSlug) => {
     setError("");
     try {
       const data = await quizApi<{ quiz: QuizMeta; challenge: QuizChallenge | null }>({
         action: "getQuiz",
-        slug: "juzhang-thinking",
+        slug: incomingSlug,
         challengeId: incomingChallengeId,
       });
       setMeta(data.quiz);
+      setActiveSlug(data.quiz.slug);
       setChallenge(data.challenge);
-      trackEvent(incomingChallengeId ? "quiz_challenge_open" : "quiz_view", { challengeId: incomingChallengeId });
+      trackEvent(incomingChallengeId ? "quiz_challenge_open" : "quiz_view", {
+        challengeId: incomingChallengeId,
+        quizSlug: data.quiz.slug,
+      });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "测试暂时不可用");
     }
-  }, [trackEvent]);
+  }, [quizSlug, trackEvent]);
 
-  const openQuiz = useCallback((incomingChallengeId = "") => {
+  const openQuiz = useCallback((incomingChallengeId = "", incomingSlug = quizSlug) => {
     setOpen(true);
     setView("intro");
     setAttempt(null);
@@ -183,15 +197,16 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
     setCurrentIndex(0);
     setSelectedIndex(null);
     setChallengeId(incomingChallengeId);
-    void loadMeta(incomingChallengeId);
-  }, [loadMeta]);
+    setActiveSlug(incomingSlug);
+    void loadMeta(incomingChallengeId, incomingSlug);
+  }, [loadMeta, quizSlug]);
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const queryChallenge = String(query.get("challenge") ?? "").slice(0, 80);
-    const queryQuiz = query.get("quiz");
-    if (queryChallenge || queryQuiz === "juzhang-thinking") openQuiz(queryChallenge);
-  }, [openQuiz]);
+    const queryQuiz = String(query.get("quiz") ?? "").slice(0, 80);
+    if (queryChallenge || queryQuiz) openQuiz(queryChallenge, queryQuiz || quizSlug);
+  }, [openQuiz, quizSlug]);
 
   const closeQuiz = () => {
     setOpen(false);
@@ -211,7 +226,7 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
     try {
       const data = await quizApi<{ attempt: QuizAttempt }>({
         action: "startQuizAttempt",
-        slug: "juzhang-thinking",
+        slug: activeSlug,
         challengeId: sameChallenge ? challengeId : "",
       });
       setAttempt(data.attempt);
@@ -303,7 +318,19 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
 
   return (
     <>
-      <section className="quiz-teaser-card" aria-label="趣味测试">
+      {variant === "tool" ? <button
+        type="button"
+        className={`quiz-tool-entry${unlocked ? " unlocked" : ""}`}
+        aria-label="打开局长思维小测"
+        onClick={() => openQuiz()}
+      >
+        <span className="quiz-tool-icon" aria-hidden="true">局</span>
+        <span className="quiz-tool-copy">
+          <b>局长思维小测</b>
+          <small>{unlocked ? "今日彩蛋 · 已解锁" : "10题 · 约3分钟"}</small>
+        </span>
+        <em aria-hidden="true">›</em>
+      </button> : <section className="quiz-teaser-card" aria-label="趣味测试">
         <div>
           <span>轻松一下 · 可分享</span>
           <h2>测测你有没有“局长”思维？</h2>
@@ -315,7 +342,7 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
           <em />
         </div>
         <button onClick={() => openQuiz()}>开始测试</button>
-      </section>
+      </section>}
 
       {open && <div className="quiz-overlay" role="dialog" aria-modal="true" aria-labelledby="quiz-title">
         <section className={`quiz-panel ${result ? `theme-${result.result.theme}` : ""}`}>

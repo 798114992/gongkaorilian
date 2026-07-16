@@ -506,6 +506,10 @@ export default function AdminShell({ children }: { children: ReactNode }) {
           colorWarning: "#e88a42",
           colorError: "#d55252",
           borderRadius: 10,
+          fontSize: 14,
+          fontSizeSM: 12,
+          lineHeight: 1.55,
+          controlHeight: 40,
           fontFamily: 'Inter, "PingFang SC", "Microsoft YaHei", sans-serif',
         },
         components: {

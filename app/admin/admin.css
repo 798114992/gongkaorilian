@@ -481,7 +481,7 @@
 
 .admin-quick-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 12px;
 }
 
@@ -522,8 +522,17 @@
   gap: 3px;
 }
 
-.admin-quick-grid strong { color: var(--admin-text); font-size: 12px; }
-.admin-quick-grid small { overflow: hidden; color: var(--admin-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-quick-grid strong { color: var(--admin-text); font-size: 13px; }
+.admin-quick-grid small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--admin-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .admin-quick-grid > a > .anticon { color: #a4afb8; font-size: 10px; }
 
 .admin-anomaly-list article {

@@ -8,6 +8,7 @@ import {
   Descriptions,
   Divider,
   Drawer,
+  Grid,
   Input,
   List,
   Modal,
@@ -122,6 +123,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
   const [reviewing, setReviewing] = useState<{ question: ReviewQuestion; decision: "approve" | "reject" } | null>(null);
   const [reviewNote, setReviewNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const screens = Grid.useBreakpoint();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -176,7 +178,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
     { title: "所属题库", dataIndex: "bank_names", key: "banks", width: 160, render: (value: string | null) => value || "未归入题库" },
     { title: "状态", key: "status", width: 110, render: (_: unknown, row: ReviewQuestion) => <ReviewStatusTag status={row.review_status} /> },
     { title: "审核备注", dataIndex: "review_note", key: "note", width: 180, render: (value: string) => value || "—" },
-    { title: "操作", key: "action", fixed: "right" as const, width: 245, render: (_: unknown, row: ReviewQuestion) => <Space size={2}>
+    { title: "操作", key: "action", fixed: screens.md ? "right" as const : undefined, width: 245, render: (_: unknown, row: ReviewQuestion) => <Space size={2}>
       <Button type="link" icon={<EyeOutlined />} onClick={() => setDetailQuestion(row)}>详情</Button>
       {row.review_status === "pending_review" && <>
         <Button type="link" icon={<CheckOutlined />} disabled={!canReview} onClick={() => openReview(row, "approve")}>通过</Button>
@@ -208,7 +210,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
 
       <Drawer
         title={detailQuestion ? `${detailQuestion.question_code} · 真题审核详情` : "真题审核详情"}
-        width={820}
+        width="min(820px, 100vw)"
         open={Boolean(detailQuestion)}
         onClose={() => setDetailQuestion(null)}
         extra={detailQuestion?.review_status === "pending_review" && canReview ? <Space>
@@ -237,7 +239,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
             dataSource={detailOptions}
             renderItem={(option, index) => <List.Item><Typography.Text strong style={{ width: 28 }}>{String.fromCharCode(65 + index)}.</Typography.Text><Typography.Text style={{ flex: 1, whiteSpace: "pre-wrap" }}>{option}</Typography.Text></List.Item>}
           />}
-          <Descriptions bordered size="small" column={2} style={{ marginTop: 16 }}>
+          <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} style={{ marginTop: 16 }}>
             <Descriptions.Item label="正确答案">{detailQuestion.answer ? <Tag color="blue">{detailQuestion.answer}</Tag> : EMPTY_TEXT}</Descriptions.Item>
             <Descriptions.Item label={detailQuestion.subject === "申论" ? "字数限制" : "建议用时"}>
               {detailQuestion.subject === "申论"
@@ -259,7 +261,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
           {detailQuestion.technique && <><Typography.Text type="secondary">技巧/补充说明</Typography.Text>{multiline(detailQuestion.technique)}</>}
 
           <Typography.Title level={5} style={{ marginTop: 24 }}>来源与原始资源</Typography.Title>
-          <Descriptions bordered size="small" column={2}>
+          <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
             <Descriptions.Item label="真题来源">{detailQuestion.source || EMPTY_TEXT}</Descriptions.Item>
             <Descriptions.Item label="地区-年份">{detailQuestion.source_region || EMPTY_TEXT}-{detailQuestion.source_year ?? EMPTY_TEXT}</Descriptions.Item>
             <Descriptions.Item label="考试类型">{detailQuestion.source_exam_type || EMPTY_TEXT}</Descriptions.Item>
@@ -270,7 +272,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
           </Descriptions>
 
           <Typography.Title level={5} style={{ marginTop: 24 }}>考频与重要度证据</Typography.Title>
-          <Descriptions bordered size="small" column={2}>
+          <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
             <Descriptions.Item label="考频">{detailQuestion.frequency || EMPTY_TEXT}</Descriptions.Item>
             <Descriptions.Item label="覆盖统计">出现{detailQuestion.frequency_occurrences ?? 0}套 / 覆盖{detailQuestion.frequency_papers ?? 0}套</Descriptions.Item>
             <Descriptions.Item label="覆盖年份">{frequencyYears.length ? frequencyYears.join("、") : EMPTY_TEXT}</Descriptions.Item>
@@ -282,7 +284,7 @@ export default function QuestionReviewQueue({ canReview, onMessage, onChanged }:
           </Descriptions>
 
           <Typography.Title level={5} style={{ marginTop: 24 }}>拿分率证据</Typography.Title>
-          <Descriptions bordered size="small" column={2}>
+          <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
             <Descriptions.Item label="拿分率">{scoreAttempts > 0 ? `${calculatedScoreRate}%` : "暂无有效样本"}</Descriptions.Item>
             <Descriptions.Item label="样本">{scoreCorrect}/{scoreAttempts}</Descriptions.Item>
             <Descriptions.Item label="统计范围">{detailQuestion.score_rate_scope || EMPTY_TEXT}</Descriptions.Item>

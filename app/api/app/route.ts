@@ -82,6 +82,7 @@ const EVENT_NAMES = new Set([
   "audio_close",
   "audio_complete",
   "audio_speed_change",
+  "audio_seek",
   "audio_cached",
   "paywall_view",
   "paywall_action",

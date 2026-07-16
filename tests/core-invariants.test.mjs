@@ -342,7 +342,10 @@ test("content reports are user-scoped, deduplicated, rate-limited and auditable"
 });
 
 test("audio player uses one news male voice and preserves recoverable playback state", async () => {
-  const audio = await readFile(files.audio, "utf8");
+  const [audio, route] = await Promise.all([
+    readFile(files.audio, "utf8"),
+    readFile(files.route, "utf8"),
+  ]);
   assert.match(audio, /新闻男声/);
   assert.match(audio, /稳重磁性播报/);
   assert.match(audio, /pickNewsMaleVoice/);
@@ -353,6 +356,14 @@ test("audio player uses one news male voice and preserves recoverable playback s
   assert.match(audio, /speechSynthesis\.cancel\(\)/);
   assert.match(audio, /audio-floating-player/);
   assert.match(audio, /关闭播放/);
+  assert.match(audio, /type="range"/);
+  assert.match(audio, /播放进度/);
+  assert.match(audio, /onTouchEnd/);
+  assert.match(audio, /commitSeek/);
+  assert.match(audio, /speechCursorFromProgress/);
+  assert.match(audio, /audioRef\.current\.currentTime/);
+  assert.match(audio, /formatPlaybackTime/);
+  assert.match(route, /"audio_seek"/);
   assert.match(audio, /playbackRate = safeSpeed/);
   assert.match(audio, /loopRef\.current/);
   assert.match(audio, /gongkao-audio-v2/);

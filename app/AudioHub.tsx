@@ -114,6 +114,54 @@ function speechProgress(cursor: SpeechCursor) {
   return Math.min(99, Math.round(((completed + cursor.charIndex) / total) * 100));
 }
 
+function clampProgress(value: number) {
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+}
+
+function speechCursorFromProgress(trackId: string, chunks: string[], progress: number): SpeechCursor {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (!total || !chunks.length) return { trackId, chunks, chunkIndex: 0, charIndex: 0 };
+  const target = Math.min(total - 1, Math.floor(total * clampProgress(progress) / 100));
+  let completed = 0;
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+    const nextCompleted = completed + chunks[chunkIndex].length;
+    if (target < nextCompleted) {
+      return { trackId, chunks, chunkIndex, charIndex: Math.max(0, target - completed) };
+    }
+    completed = nextCompleted;
+  }
+  const lastIndex = chunks.length - 1;
+  return { trackId, chunks, chunkIndex: lastIndex, charIndex: Math.max(0, chunks[lastIndex].length - 1) };
+}
+
+function trackDurationSeconds(track: AudioTrack | undefined) {
+  if (!track) return 0;
+  const label = track.duration || "";
+  const hours = Number(label.match(/(\d+(?:\.\d+)?)\s*(?:小时|时)/)?.[1] ?? 0);
+  const minutes = Number(label.match(/(\d+(?:\.\d+)?)\s*分钟/)?.[1] ?? 0);
+  const seconds = Number(label.match(/(\d+(?:\.\d+)?)\s*秒/)?.[1] ?? 0);
+  const labeled = hours * 3600 + minutes * 60 + seconds;
+  if (labeled > 0) return Math.round(labeled);
+  const text = (track.text || track.description || "").trim();
+  return text ? Math.max(30, Math.round(text.length / 3.5)) : 0;
+}
+
+function speechDurationSeconds(track: AudioTrack | undefined) {
+  if (!track) return 0;
+  const text = (track.text || track.description || "").trim();
+  return text ? Math.max(30, Math.round(text.length / 3.5)) : trackDurationSeconds(track);
+}
+
+function formatPlaybackTime(value: number) {
+  const seconds = Math.max(0, Math.round(Number.isFinite(value) ? value : 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
+    : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 function reviewDueTimestamp(question: ReviewAwareQuestion) {
   const raw = question.nextReviewAt ?? question.reviewDueAt ?? question.next_review_at;
   const timestamp = raw ? Date.parse(raw) : Number.NaN;
@@ -179,6 +227,9 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const [buffering, setBuffering] = useState(false);
   const [playbackEngine, setPlaybackEngine] = useState<PlaybackEngine>(null);
   const [progress, setProgress] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [totalSeconds, setTotalSeconds] = useState(0);
+  const [seekPreview, setSeekPreview] = useState<number | null>(null);
   const [speed, setSpeed] = useState(1);
   const [loop, setLoop] = useState(false);
   const [sleepMinutes, setSleepMinutes] = useState(0);
@@ -197,6 +248,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const objectUrlRef = useRef<string | null>(null);
   const speedRef = useRef(speed);
   const progressRef = useRef(progress);
+  const seekPreviewRef = useRef<number | null>(null);
   const loopRef = useRef(loop);
   const speechFallbackIdsRef = useRef<string[]>([]);
   const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
@@ -340,6 +392,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setPaused(false);
     setBuffering(false);
     setProgress(0);
+    setElapsedSeconds(0);
+    setTotalSeconds(0);
+    seekPreviewRef.current = null;
+    setSeekPreview(null);
     setSleepMinutes(0);
     if (message) notify(message);
     if ("mediaSession" in navigator) {
@@ -396,6 +452,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
     const previous = preservePosition && speechCursorRef.current?.trackId === track.id ? speechCursorRef.current : null;
     const chunks = splitForSpeech(text);
+    const timelineDuration = speechDurationSeconds(track);
     const firstChunkIndex = previous ? Math.min(previous.chunkIndex, chunks.length - 1) : 0;
     const firstCharIndex = previous ? Math.min(previous.charIndex, Math.max(0, chunks[firstChunkIndex].length - 1)) : 0;
     const session = sessionRef.current + 1;
@@ -411,6 +468,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         if (loopRef.current) {
           speechCursorRef.current = { trackId: track.id, chunks, chunkIndex: 0, charIndex: 0 };
           setProgress(0);
+          setElapsedSeconds(0);
           speakChunk(0, 0);
         } else {
           emitPlaybackLifecycle("audio_complete", track, "natural_complete", { engine: "speech", progress: 100 });
@@ -424,6 +482,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
           setPaused(false);
           setBuffering(false);
           setProgress(100);
+          setElapsedSeconds(timelineDuration);
           if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none";
         }
         return;
@@ -446,12 +505,16 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       utterance.onboundary = (event) => {
         if (sessionRef.current !== session || speechCursorRef.current?.trackId !== track.id) return;
         speechCursorRef.current.charIndex = Math.min(currentChunk.length, safeCharIndex + event.charIndex);
-        setProgress(speechProgress(speechCursorRef.current));
+        const nextProgress = speechProgress(speechCursorRef.current);
+        setProgress(nextProgress);
+        setElapsedSeconds(timelineDuration * nextProgress / 100);
       };
       utterance.onend = () => {
         if (sessionRef.current !== session) return;
         speechCursorRef.current = { trackId: track.id, chunks, chunkIndex: index + 1, charIndex: 0 };
-        setProgress(index + 1 >= chunks.length ? 100 : speechProgress(speechCursorRef.current));
+        const nextProgress = index + 1 >= chunks.length ? 100 : speechProgress(speechCursorRef.current);
+        setProgress(nextProgress);
+        setElapsedSeconds(timelineDuration * nextProgress / 100);
         speakChunk(index + 1, 0);
       };
       utterance.onerror = () => {
@@ -474,7 +537,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     setPlaying(true);
     setPaused(false);
     setBuffering(false);
-    setProgress(previous ? speechProgress({ trackId: track.id, chunks, chunkIndex: firstChunkIndex, charIndex: firstCharIndex }) : 0);
+    const initialProgress = previous ? speechProgress({ trackId: track.id, chunks, chunkIndex: firstChunkIndex, charIndex: firstCharIndex }) : 0;
+    setProgress(initialProgress);
+    setElapsedSeconds(timelineDuration * initialProgress / 100);
+    setTotalSeconds(timelineDuration);
     if (!preservePosition) {
       emitAudioBehavior(track, "start", {
         engine: "speech",
@@ -603,6 +669,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     activeTrackRef.current = track;
     setSelectedId(track.id);
     setProgress(0);
+    setElapsedSeconds(0);
+    setTotalSeconds(trackDurationSeconds(track));
+    seekPreviewRef.current = null;
+    setSeekPreview(null);
     setPlaying(true);
     setPaused(false);
     setBuffering(Boolean(track.audioUrl && !preferSpeechFallback));
@@ -776,10 +846,61 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const updateAudioProgress = () => {
     const audio = audioRef.current;
     if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
-    setProgress(Math.round((audio.currentTime / audio.duration) * 100));
+    const nextProgress = Math.round((audio.currentTime / audio.duration) * 100);
+    setProgress(nextProgress);
+    setElapsedSeconds(audio.currentTime);
+    setTotalSeconds(audio.duration);
     if ("mediaSession" in navigator && "setPositionState" in navigator.mediaSession) {
       try { navigator.mediaSession.setPositionState({ duration: audio.duration, playbackRate: audio.playbackRate, position: audio.currentTime }); } catch { /* unsupported transient state */ }
     }
+  };
+
+  const previewSeek = (value: number) => {
+    const nextProgress = clampProgress(value);
+    seekPreviewRef.current = nextProgress;
+    setSeekPreview(nextProgress);
+  };
+
+  const commitSeek = (value = seekPreviewRef.current) => {
+    if (!selectedTrack || value === null) return;
+    const nextProgress = clampProgress(value);
+    seekPreviewRef.current = null;
+    setSeekPreview(null);
+    progressRef.current = nextProgress;
+    setProgress(nextProgress);
+    const fallbackDuration = totalSeconds || trackDurationSeconds(selectedTrack);
+    setElapsedSeconds(fallbackDuration * nextProgress / 100);
+    trackEvent("audio_seek", {
+      trackId: selectedTrack.id,
+      category: selectedTrack.category,
+      engine: engineRef.current,
+      progress: nextProgress,
+    });
+
+    if (engineRef.current === "audio" && audioRef.current && Number.isFinite(audioRef.current.duration) && audioRef.current.duration > 0) {
+      audioRef.current.currentTime = audioRef.current.duration * nextProgress / 100;
+      updateAudioProgress();
+      return;
+    }
+
+    if (engineRef.current !== "speech") return;
+    const text = (selectedTrack.text || selectedTrack.description || "").trim();
+    if (!text) return;
+    const chunks = splitForSpeech(text);
+    speechCursorRef.current = speechCursorFromProgress(selectedTrack.id, chunks, nextProgress);
+    sessionRef.current += 1;
+    window.speechSynthesis.cancel();
+    if (paused) {
+      speechNeedsRestartRef.current = true;
+      setBuffering(false);
+    } else {
+      startSpeech(selectedTrack, true);
+    }
+  };
+
+  const finishSeek = (value?: number) => {
+    if (seekPreviewRef.current === null) return;
+    commitSeek(typeof value === "number" ? value : seekPreviewRef.current);
   };
 
   const handleAudioError = () => {
@@ -792,6 +913,14 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
   const playbackStatus = buffering ? "正在缓冲" : playing ? (paused ? "已暂停" : "正在播放") : progress >= 100 ? "播放完成" : "待播放";
   const selectedUsesSpeech = Boolean(selectedTrack && (playbackEngine === "speech" || !selectedTrack.audioUrl || speechFallbackIds.includes(selectedTrack.id)));
+  const displayedProgress = seekPreview ?? progress;
+  const displayedTotalSeconds = totalSeconds || trackDurationSeconds(selectedTrack);
+  const displayedElapsedSeconds = seekPreview === null
+    ? elapsedSeconds
+    : displayedTotalSeconds * displayedProgress / 100;
+  const timelineLabel = `${formatPlaybackTime(displayedElapsedSeconds)} / ${selectedUsesSpeech ? "约" : ""}${formatPlaybackTime(displayedTotalSeconds)}`;
+  const seekDisabled = buffering || (!playing && !paused);
+  const seekStyle = { "--seek-progress": `${displayedProgress}%` } as React.CSSProperties;
 
   return (
     <>
@@ -876,6 +1005,8 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             onLoadStart={() => { if (engineRef.current === "audio") setBuffering(true); }}
             onCanPlay={() => { if (engineRef.current === "audio") setBuffering(false); }}
             onWaiting={() => { if (engineRef.current === "audio") setBuffering(true); }}
+            onLoadedMetadata={updateAudioProgress}
+            onDurationChange={updateAudioProgress}
             onPlaying={() => { if (engineRef.current === "audio") { setPlaying(true); setPaused(false); setBuffering(false); updateMediaSession(selectedTrack); } }}
             onPause={() => {
               if (suppressAudioPauseRef.current) {
@@ -893,10 +1024,31 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
               }
             }}
             onTimeUpdate={updateAudioProgress}
-            onEnded={() => { if (!loopRef.current) { emitPlaybackLifecycle("audio_complete", selectedTrack, "natural_complete", { engine: "audio", progress: 100 }); engineRef.current = null; activeTrackRef.current = null; if (timerRef.current) window.clearTimeout(timerRef.current); timerRef.current = null; setSleepMinutes(0); setPlaybackEngine(null); setPlaying(false); setPaused(false); setBuffering(false); setProgress(100); if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none"; } }}
+            onEnded={() => { if (!loopRef.current) { emitPlaybackLifecycle("audio_complete", selectedTrack, "natural_complete", { engine: "audio", progress: 100 }); engineRef.current = null; activeTrackRef.current = null; if (timerRef.current) window.clearTimeout(timerRef.current); timerRef.current = null; setSleepMinutes(0); setPlaybackEngine(null); setPlaying(false); setPaused(false); setBuffering(false); setProgress(100); setElapsedSeconds(totalSeconds || audioRef.current?.duration || 0); if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "none"; } }}
           />
           <div className="player-top"><div><span>{playbackStatus}</span><h3>{selectedTrack.title}</h3></div><button onClick={() => stop(undefined, "stop")} disabled={!playing && !paused}>停止</button></div>
-          <div className="audio-progress"><i style={{ width: `${progress}%` }} /></div>
+          <div className="audio-progress-row">
+            <input
+              className="audio-seek"
+              type="range"
+              min={0}
+              max={100}
+              step={0.1}
+              value={displayedProgress}
+              disabled={seekDisabled}
+              style={seekStyle}
+              aria-label="播放进度"
+              aria-valuetext={timelineLabel}
+              onChange={(event) => previewSeek(Number(event.target.value))}
+              onPointerUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onPointerCancel={(event) => finishSeek(Number(event.currentTarget.value))}
+              onTouchEnd={(event) => finishSeek(Number(event.currentTarget.value))}
+              onMouseUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onKeyUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onBlur={(event) => finishSeek(Number(event.currentTarget.value))}
+            />
+            <time>{timelineLabel}</time>
+          </div>
           <div className="player-controls">
             <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
             <label>倍速<select aria-label="播放倍速" value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></label>
@@ -911,7 +1063,28 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         <div className="audio-floating-copy">
           <span>{buffering ? "正在缓冲" : paused ? "已暂停" : "正在播放"}</span>
           <b>{selectedTrack.title}</b>
-          <div className="audio-floating-progress"><i style={{ width: `${Math.max(2, progress)}%` }} /></div>
+          <div className="audio-floating-timeline">
+            <input
+              className="audio-seek audio-floating-progress"
+              type="range"
+              min={0}
+              max={100}
+              step={0.1}
+              value={displayedProgress}
+              disabled={seekDisabled}
+              style={seekStyle}
+              aria-label="悬浮播放器进度"
+              aria-valuetext={timelineLabel}
+              onChange={(event) => previewSeek(Number(event.target.value))}
+              onPointerUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onPointerCancel={(event) => finishSeek(Number(event.currentTarget.value))}
+              onTouchEnd={(event) => finishSeek(Number(event.currentTarget.value))}
+              onMouseUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onKeyUp={(event) => finishSeek(Number(event.currentTarget.value))}
+              onBlur={(event) => finishSeek(Number(event.currentTarget.value))}
+            />
+            <time>{timelineLabel}</time>
+          </div>
         </div>
         <button className="audio-mini-toggle" onClick={togglePlayback}>{buffering ? "取消" : paused ? "继续" : "暂停"}</button>
         <button className="audio-mini-close" onClick={() => stop("已关闭播放", "close")} aria-label={`关闭播放${selectedTrack.title}`}>×</button>

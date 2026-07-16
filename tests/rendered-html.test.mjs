@@ -354,6 +354,10 @@ test("the 日练电台 supports dynamic series, protected audio fallback and the
   assert.match(hub, /<audio/);
   assert.match(hub, /audio-floating-player/);
   assert.match(hub, /关闭播放/);
+  assert.match(hub, /播放进度/);
+  assert.match(hub, /悬浮播放器进度/);
+  assert.match(hub, /speechCursorFromProgress/);
+  assert.match(hub, /formatPlaybackTime/);
   assert.match(hub, /MediaMetadata/);
   assert.match(hub, /gongkao-audio-v3/);
   assert.match(hub, /track\.accessLevel === "free"/);

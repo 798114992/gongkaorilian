@@ -117,6 +117,31 @@ function resultTaglineFor(result: QuizResult) {
   return "你精准避开了所有标准答案，这何尝不是一种天赋。";
 }
 
+function sharePayloadFor(result: QuizResult) {
+  const url = safeChallengeUrl(result.attemptId);
+  const title = shareTitleFor(result);
+  const text = `${title}\n${result.result.title}｜答对${result.correctCount}/${result.total}题\n${result.result.shareText}`;
+  return { url, title, text, fullText: `${text}\n同题挑战：${url}` };
+}
+
+async function writeClipboardText(text: string) {
+  if (window.navigator.clipboard?.writeText) {
+    await window.navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!ok) throw new Error("copy failed");
+}
+
 export default function QuizFeature({ notify, trackEvent }: Props) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"intro" | "question" | "result" | "review">("intro");
@@ -241,28 +266,38 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
 
   const shareResult = async () => {
     if (!result) return;
-    const url = safeChallengeUrl(result.attemptId);
-    const title = shareTitleFor(result);
-    const text = `${title}\n${result.result.title}｜答对${result.correctCount}/${result.total}题\n${result.result.shareText}`;
+    const { url, title, text, fullText } = sharePayloadFor(result);
     try {
       await quizApi({ action: "recordQuizShare", attemptId: result.attemptId, eventName: "share_panel" });
       if (typeof window.navigator.share === "function") {
         await window.navigator.share({ title, text, url });
         await quizApi({ action: "recordQuizShare", attemptId: result.attemptId, eventName: "native_share" });
-        notify("同题挑战已发出");
+        notify("分享面板已打开，可以发给朋友同题挑战");
         return;
       }
-      await window.navigator.clipboard.writeText(`${text}\n${url}`);
+      await writeClipboardText(fullText);
       await quizApi({ action: "recordQuizShare", attemptId: result.attemptId, eventName: "copy_link" });
-      notify("结果和同题挑战链接已复制");
+      notify("当前浏览器不支持直接分享，已复制分享文案和挑战链接");
     } catch (shareError) {
       if (shareError instanceof DOMException && shareError.name === "AbortError") return;
       try {
-        await window.navigator.clipboard.writeText(`${text}\n${url}`);
-        notify("结果链接已复制");
+        await writeClipboardText(fullText);
+        notify("已复制分享文案和挑战链接");
       } catch {
         notify("当前浏览器暂时无法分享");
       }
+    }
+  };
+
+  const copyChallengeLink = async () => {
+    if (!result) return;
+    const payload = sharePayloadFor(result);
+    try {
+      await writeClipboardText(payload.fullText);
+      await quizApi({ action: "recordQuizShare", attemptId: result.attemptId, eventName: "copy_link" });
+      notify("分享文案和同题挑战链接已复制");
+    } catch {
+      notify("复制失败，可以手动复制浏览器地址栏链接");
     }
   };
 
@@ -358,6 +393,8 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
                 <div><b>{result.correctCount}/{result.total}</b><span>答对题数</span></div>
                 <div><b>{avatarTitleFor(result)}</b><span>头像判词</span></div>
               </div>
+              <button className="quiz-card-share-button" onClick={() => void shareResult()}>一键分享结果</button>
+              <small className="quiz-share-hint">发给朋友后，对方会进入同一套题的挑战页</small>
               <em>{result.notableChoice}</em>
               <small>公考日练 · 测测你有没有“局长”思维？</small>
             </div>
@@ -366,7 +403,8 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
               <div><span>你</span><b>{result.correctCount}/{result.total}</b><small>{result.result.title}</small></div>
             </div>}
             <div className="quiz-result-actions">
-              <button className="primary-button" onClick={() => void shareResult()}>发起同题挑战</button>
+              <button className="primary-button" onClick={() => void shareResult()}>一键分享结果</button>
+              <button className="secondary-button" onClick={() => void copyChallengeLink()}>复制挑战链接</button>
               <button className="secondary-button" onClick={() => setView("review")}>查看全部答案</button>
               <button className="secondary-button" onClick={restart}>不服，再测10道</button>
             </div>

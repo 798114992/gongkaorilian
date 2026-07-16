@@ -305,9 +305,9 @@ export default function QuizFeature({ notify, trackEvent }: Props) {
     <>
       <section className="quiz-teaser-card" aria-label="趣味测试">
         <div>
-          <span>1分钟趣味测试</span>
+          <span>轻松一下 · 可分享</span>
           <h2>测测你有没有“局长”思维？</h2>
-          <p>随机10道题，每次都不一样。答完生成段位卡，还能发起同题挑战。</p>
+          <p>今日练完再来一把。随机10道题，答完生成段位卡，还能发起同题挑战。</p>
         </div>
         <div className="quiz-teaser-visual" aria-hidden="true">
           <i />

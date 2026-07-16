@@ -963,10 +963,10 @@ export default function AdminContentManager({
       {numberInput("morning30", "30分钟·晨读", 0, 30)}{numberInput("practice30", "30分钟·刷题", 0, 30)}{numberInput("essay30", "30分钟·申论", 0, 30)}
       {numberInput("morning45", "45分钟·晨读", 0, 45)}{numberInput("practice45", "45分钟·刷题", 0, 45)}{numberInput("essay45", "45分钟·申论", 0, 45)}
       {numberInput("morning60", "60分钟·晨读", 0, 60)}{numberInput("practice60", "60分钟·刷题", 0, 60)}{numberInput("essay60", "60分钟·申论", 0, 60)}
-      {numberInput("reviewRatio", "到期回炉题占比%", 0, 100)}{numberInput("urgentExamDays", "临考加权天数", 1, 180)}
+      {numberInput("reviewRatio", "到期复习题占比%", 0, 100)}{numberInput("urgentExamDays", "临考加权天数", 1, 180)}
       {numberInput("regionWeight", "地区匹配权重%", 0, 100)}{numberInput("frequencyWeight", "考频权重%", 0, 100)}{numberInput("importanceWeight", "重要星级权重%", 0, 100)}{numberInput("scoreRateWeight", "拿分率权重%", 0, 100)}
       {numberInput("scoreRateMin", "优先拿分率下限%", 0, 100)}{numberInput("scoreRateMax", "优先拿分率上限%", 0, 100)}
-      <p className={`${styles.formHint} wide`}>权重用于“今天最值得练什么”的选题排序。建议地区、考频、重要星级、拿分率四项合计为100%。发布新策略前请先预览。</p>
+      <p className={`${styles.formHint} wide`}>权重用于今日训练的选题排序。建议地区、考频、重要星级、拿分率四项合计为100%。发布新策略前请先预览。</p>
     </>;
   };
 

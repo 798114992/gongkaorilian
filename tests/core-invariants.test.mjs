@@ -178,7 +178,7 @@ test("commerce preserves the public lifetime offer and keeps payment in explicit
     assert.match(schema, new RegExp(`"${table}"`));
   assert.match(route, /'gkrl-lifetime-2980'/);
   assert.match(route, /2980, 'CNY', 'lifetime'/);
-  assert.match(route, /29\.8元一次购买，终身使用/);
+  assert.match(route, /29\.8元开通终身会员/);
   assert.match(route, /PAYMENT_TEST_MODE/);
   assert.match(route, /TEST_PAYMENT_DISABLED/);
   assert.match(schema, /orders_user_idempotency_uq/);
@@ -372,11 +372,11 @@ test("three-day experience report uses real insights and shares without a paywal
   assert.match(daily, /window\.navigator\.share/);
   assert.match(daily, /window\.navigator\.clipboard\?\.writeText/);
   assert.match(reportView, /近7日真题/);
-  assert.match(reportView, /累计犹豫\/蒙对/);
-  assert.match(reportView, /当前复习欠账/);
+  assert.match(reportView, /掌握不稳定\/猜测作答/);
+  assert.match(reportView, /当前到期复习/);
   assert.match(reportView, /近7日高频覆盖/);
-  assert.match(reportView, /接下来优先处理/);
-  assert.match(reportView, /未达到3个真实活跃日前只显示进度/);
+  assert.match(reportView, /下一阶段优先训练/);
+  assert.match(reportView, /累计3个学习日后生成完整报告/);
   assert.match(reportView, /不含排名或提分预测/);
   assert.doesNotMatch(reportView, /openPaywall/);
   assert.match(route, /"three_day_report_view"/);

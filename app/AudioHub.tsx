@@ -36,7 +36,7 @@ type AudioHubProps = {
 const builtInCategoryMeta: Record<string, { label: string; title: string; empty: string; color: string }> = {
   current: { label: "时政", title: "时政电台", empty: "月度热点、重要会议和新法解读会在这里更新。", color: "#245c92" },
   essay: { label: "申论", title: "申论晨读", empty: "人民日报评论拆解、规范表达和分主题金句会在这里更新。", color: "#e27f42" },
-  wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，真实错题会自动生成听练内容。", color: "#2f8067" },
+  wrong: { label: "错题", title: "错题语音朗读", empty: "完成行测后，个人错题会自动生成听练内容。", color: "#2f8067" },
 };
 
 // A stable session reference keeps due-ordering deterministic across re-renders.
@@ -65,7 +65,7 @@ const voiceOptions: Array<{ id: VoicePreset; label: string; tone: string; pitch:
   { id: "newsMale", label: "新闻男", tone: "稳重播报", pitch: 0.82, rateOffset: -0.04, hints: ["yunyang", "yunxi", "kangkang", "male", "男"] },
   { id: "newsFemale", label: "新闻女", tone: "清晰播报", pitch: 1.02, rateOffset: -0.02, hints: ["xiaoxiao", "xiaoyi", "huihui", "female", "女"] },
   { id: "youngMale", label: "青年男", tone: "轻快讲解", pitch: 0.94, rateOffset: 0.03, hints: ["yunxi", "yunyang", "male", "男"] },
-  { id: "youngFemale", label: "青年女", tone: "亲和带练", pitch: 1.14, rateOffset: 0.04, hints: ["xiaoyi", "xiaoxiao", "female", "女"] },
+  { id: "youngFemale", label: "青年女", tone: "自然讲解", pitch: 1.14, rateOffset: 0.04, hints: ["xiaoyi", "xiaoxiao", "female", "女"] },
 ];
 
 function getVoiceOption(id: VoicePreset) {
@@ -387,7 +387,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       setPlaying(false);
       setPaused(false);
       setBuffering(false);
-      notify("当前浏览器暂不支持系统语音；播放未启动，请使用下方原生播放器播放");
+      notify("当前设备暂不支持系统朗读，请更换设备或浏览器后重试");
       return;
     }
     const text = (typeof track.text === "string" ? track.text.trim() : "")
@@ -399,7 +399,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       setPlaying(false);
       setPaused(false);
       setBuffering(false);
-      notify("该节目缺少音频和朗读文本，请联系运营人员补充");
+      notify("该节目暂缺音频与朗读文本，请稍后再试");
       return;
     }
     const previous = preservePosition && speechCursorRef.current?.trackId === track.id ? speechCursorRef.current : null;
@@ -579,8 +579,8 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
     markSpeechFallback(track.id);
     notify(reason === "offline"
-      ? "当前离线且未找到有效缓冲，已切换为AI朗读（调用本机系统语音）"
-      : "固定音频未启动，已自动切换为AI朗读（调用本机系统语音）");
+      ? "当前未找到可用的离线音频，已切换为系统朗读"
+      : "录制音频未能播放，已自动切换为系统朗读");
     startSpeech(track, false);
     updateMediaSession(track);
   }, [markSpeechFallback, notify, startSpeech, updateMediaSession]);
@@ -733,7 +733,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     voicePresetRef.current = nextPreset;
     setVoicePreset(nextPreset);
     const resolution = resolveSpeechVoice(nextPreset, speechVoicesRef.current);
-    if (!resolution.matchedPreset) notify(`本机没有独立“${getVoiceOption(nextPreset).label}”音色，已用默认中文音色配合语速和音调呈现`);
+    if (!resolution.matchedPreset) notify(`当前设备暂不提供独立“${getVoiceOption(nextPreset).label}”音色，已使用默认中文音色呈现`);
     if (playing && selectedTrack && engineRef.current === "speech") {
       if (paused) {
         sessionRef.current += 1;
@@ -742,7 +742,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       } else startSpeech(selectedTrack, true);
       return;
     }
-    if (selectedTrack?.audioUrl) notify("固定真人音频不改变音色；若自动切换AI朗读会使用所选音色");
+    if (selectedTrack?.audioUrl) notify("录制音频保留原声；切换为系统朗读后将使用所选音色");
   };
 
   const toggleLoop = () => {
@@ -765,9 +765,9 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   };
 
   const cacheTrack = async (track: AudioTrack) => {
-    if (!track.audioUrl) return notify("系统合成朗读依赖当前设备语音，不标记为离线音频");
-    if (!canCacheOffline(track)) return notify("会员节目需在线校验使用权益；仅免费试听音频支持离线缓冲");
-    if (!("caches" in window)) return notify("当前浏览器暂不支持离线缓冲");
+    if (!track.audioUrl) return notify("系统朗读使用当前设备语音，无需缓存音频");
+    if (!canCacheOffline(track)) return notify("该节目需在线收听；免费试听音频支持离线缓存");
+    if (!("caches" in window)) return notify("当前浏览器暂不支持离线缓存");
     try {
       const cache = await caches.open(AUDIO_CACHE_NAME);
       const request = new Request(new URL(track.audioUrl, window.location.origin).toString());
@@ -779,9 +779,9 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       window.localStorage.setItem("gkrl-cached-audio", JSON.stringify(next));
       clearSpeechFallback(track.id);
       trackEvent("audio_cached", { trackId: track.id, category: track.category, action: "complete" });
-      notify("音频文件已缓冲；离线时会先校验缓存，未命中则明确回退到系统朗读");
+      notify("音频已缓存，可在离线状态下收听");
     } catch {
-      notify("离线缓冲失败，请检查网络和浏览器存储权限");
+      notify("离线缓存失败，请检查网络和浏览器存储权限");
     }
   };
 
@@ -816,34 +816,34 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   };
 
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
-  const playbackStatus = buffering ? "正在缓冲" : playing ? (paused ? "已暂停" : "正在播放") : progress >= 100 ? "已播完" : "待播放";
+  const playbackStatus = buffering ? "正在缓冲" : playing ? (paused ? "已暂停" : "正在播放") : progress >= 100 ? "播放完成" : "待播放";
   const currentVoiceOption = getVoiceOption(voicePreset);
   const currentVoiceResolution = resolveSpeechVoice(voicePreset, speechVoices);
   const voiceAvailability = currentVoiceResolution.matchedPreset && currentVoiceResolution.voice
     ? `本机音色：${currentVoiceResolution.voice.name}`
     : speechVoices.length
-      ? `无独立${currentVoiceOption.label}，使用默认中文音色调节呈现`
-      : "未检测到独立中文音色，将使用浏览器默认语音";
+      ? `当前设备暂不提供独立${currentVoiceOption.label}，将使用默认中文音色`
+      : "当前设备未提供独立中文音色，将使用默认语音";
   const selectedUsesSpeech = Boolean(selectedTrack && (playbackEngine === "speech" || !selectedTrack.audioUrl || speechFallbackIds.includes(selectedTrack.id)));
 
   return (
     <>
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
       <div className="subpage-heading audio-heading">
-        <div><span>日练电台</span><h1>通勤也能练</h1><p>上下班路上，听完一组时政热点、申论表达或个人错题。</p></div>
+        <div><span>日练电台</span><h1>通勤听练</h1><p>可收听时政热点、申论表达和个人错题。</p></div>
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
       </div>
 
       {selectedTrack ? (
         <section className="audio-hero">
-          <div className="audio-live"><i /> {selectedUsesSpeech ? "系统朗读 · 锁屏能力依设备" : "固定音频 · 支持锁屏播放"}</div>
+          <div className="audio-live"><i /> {selectedUsesSpeech ? "系统朗读 · 锁屏播放以设备支持为准" : "录制音频 · 锁屏播放以设备支持为准"}</div>
           <h2>{selectedTrack.title}</h2>
           <p>{selectedTrack.description}</p>
           <div className={`waveform ${playing && !paused ? "playing" : ""}`} aria-hidden="true">
             {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
           </div>
           <button onClick={togglePlayback}>{buffering ? "× 取消加载" : playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
-          <small className="audio-voice-tip">{selectedUsesSpeech ? `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}；实际声音取决于本机语音库` : "固定音频保留原声；若播放受限会自动切换AI朗读（本机系统语音）"}</small>
+          <small className="audio-voice-tip">{selectedUsesSpeech ? `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}；实际效果取决于当前设备` : "录制音频保留原声；播放受限时将自动切换为系统朗读"}</small>
           {selectedTrack.category === "wrong" && <small className="audio-recall-tip">听到“暂停十秒”时先独立作答，再继续听答案。</small>}
         </section>
       ) : null}
@@ -859,7 +859,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             const hasCacheableAudio = categoryTracks.some(canCacheOffline);
             return (
               <article className={`audio-category-card ${item.id === "current" || item.id === "essay" || item.id === "wrong" ? item.id : "dynamic"}`} style={{ "--series-color": item.color } as React.CSSProperties} key={item.id}>
-                <header><span>{item.icon}</span><div><h3>{item.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 可倍速/循环${hasCacheableAudio ? "/离线缓冲" : ""}` : item.empty}</p></div></header>
+                <header><span>{item.icon}</span><div><h3>{item.title}</h3><p>{categoryTracks.length ? `${categoryTracks.length} 个节目 · 支持倍速、循环${hasCacheableAudio ? "和离线缓存" : ""}` : item.empty}</p></div></header>
                 <div>
                   {categoryTracks.slice(0, 2).map((track) => {
                     const selected = selectedTrack?.id === track.id;
@@ -870,13 +870,13 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
               </article>
             );
           })}
-          {!series.length && <div className="audio-empty"><span>台</span><div><h3>栏目正在上架</h3><p>运营人员发布栏目和节目后会自动出现在这里。</p></div></div>}
+          {!series.length && <div className="audio-empty"><span>台</span><div><h3>暂无已发布栏目</h3><p>内容更新后将显示在此处。</p></div></div>}
         </section>
       ) : (
         <section className="audio-list" aria-label="音频节目列表">
           {visibleTracks.length === 0 ? (
             filter === "wrong" ? (
-              <div className="audio-empty"><span>错</span><div><h3>完成行测后再来听</h3><p>系统会把真实错题的题干、答案和解析生成听练内容，并优先排列到期复习题。</p></div></div>
+              <div className="audio-empty"><span>错</span><div><h3>暂无错题朗读内容</h3><p>系统将根据错题的题干、答案和解析生成朗读内容，并优先展示到期复习题。</p></div></div>
             ) : (
               <div className="audio-empty"><span>新</span><div><h3>本栏目内容准备中</h3><p>新的时政与申论音频会按内容计划陆续更新。</p></div></div>
             )
@@ -888,9 +888,9 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
               <article className={`audio-track ${selected ? "selected" : ""}`} key={track.id}>
                 <button className="track-play" data-track-id={track.id} onClick={playTrackFromButton} aria-label={`播放${track.title}`}>{selected && playing && !paused ? "Ⅱ" : "▶"}</button>
                 <button className="track-copy" data-track-id={track.id} onClick={selectTrackFromButton}>
-                  <span>{track.kicker}{track.audioUrl && !speechFallbackIds.includes(track.id) ? " · 真人/固定音频" : " · 系统合成朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
+                  <span>{track.kicker}{track.audioUrl && !speechFallbackIds.includes(track.id) ? " · 录制音频" : " · 系统朗读"}</span><h3>{track.title}</h3><p>{track.source} · {track.duration}</p>
                 </button>
-                <button className={`cache-button ${cached ? "cached" : ""}`} disabled={!cacheable} onClick={() => void cacheTrack(track)} aria-label={cacheable ? `离线缓冲${track.title}` : track.audioUrl ? `${track.title}为会员在线音频，不能离线缓存` : `${track.title}使用设备语音，不能标记为离线音频`}>{cacheable ? (cached ? "✓ 已缓冲" : "↓ 离线") : track.audioUrl ? "在线收听" : "设备语音"}</button>
+                <button className={`cache-button ${cached ? "cached" : ""}`} disabled={!cacheable} onClick={() => void cacheTrack(track)} aria-label={cacheable ? `离线缓存${track.title}` : track.audioUrl ? `${track.title}需在线收听` : `${track.title}使用系统朗读，无需缓存音频`}>{cacheable ? (cached ? "✓ 已缓存" : "↓ 缓存") : track.audioUrl ? "在线收听" : "系统朗读"}</button>
               </article>
             );
           })}

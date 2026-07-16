@@ -30,6 +30,6 @@ test("offline UI never claims an unconfirmed answer was saved", async () => {
 
   assert.match(client, /本题尚未同步/);
   assert.match(client, /待同步记录不会计入进度/);
-  assert.match(client, /记录没有被标为已保存/);
+  assert.match(client, /本次答案尚未保存/);
   assert.match(client, /pendingQueueDurable/);
 });

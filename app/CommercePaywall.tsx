@@ -66,28 +66,28 @@ type CommercePaywallProps = {
 const reasonCopy: Record<PaywallReason, { eyebrow: string; title: string; detail: string }> = {
   daily_limit: {
     eyebrow: "今日免费真题已完成",
-    title: "保留今天的手感，继续练下去",
-    detail: "你的作答和错题已经保存。开通后可继续组题，完成后会回到刚才的训练动作。",
+    title: "继续完成今日训练",
+    detail: "当前作答记录和错题进度已保存。激活会员权益后，可从当前练习进度继续。",
   },
   second_bank: {
     eyebrow: "备考组合扩展",
-    title: "把国考与多个省考一起加入书架",
-    detail: "免费版可保留 1 套题库；开通后可按真实报名组合加入多套题库，并参与每日组题。",
+    title: "扩展国考与多省考备考组合",
+    detail: "免费版可保留1套题库；会员可按实际报考组合添加多套题库，并参与每日组题。",
   },
   essay: {
     eyebrow: "申论真题微练",
-    title: "解锁申论作答、自评与二次改写",
-    detail: "开通后继续刚才的申论真题，草稿、自评和回炉节点都会保留。",
+    title: "继续申论作答、自评与第二版作答",
+    detail: "激活会员权益后可继续当前申论真题，草稿、自评和后续复习计划均会保留。",
   },
   radar: {
     eyebrow: "公考雷达完整筛选",
-    title: "用真实报考条件筛职位，不再手翻整张表",
+    title: "根据报考条件筛选职位",
     detail: "开通后可同时筛国考和多个省考，按学历、专业、身份等条件匹配，并收藏、横向对比职位。",
   },
   value_loop: {
     eyebrow: "公考日练终身会员",
-    title: "用一套轻量闭环完成每天 10–60 分钟",
-    detail: "解锁多题库组合、每日真题、申论微练、错题回炉与电台听练。",
+    title: "按每日10–60分钟完成重点训练",
+    detail: "会员可使用多题库组合、每日真题、申论微练、错题间隔复习和日练电台。",
   },
 };
 
@@ -190,9 +190,9 @@ export default function CommercePaywall({
         </div>
 
         {value.completedQuestions > 0 && (
-          <div className={styles.valueStrip} aria-label="你的真实学习进度">
+          <div className={styles.valueStrip} aria-label="当前学习进度">
             <div><strong>{value.completedQuestions}</strong><span>累计真题</span></div>
-            <div><strong>{value.wrongQuestions}</strong><span>待巩固</span></div>
+            <div><strong>{value.wrongQuestions}</strong><span>待复习</span></div>
             <div><strong>{value.tomorrowDue}</strong><span>明日到期</span></div>
             <div><strong>{reason === "second_bank" ? value.bankCount : value.tomorrowMinutes}</strong><span>{reason === "second_bank" ? "已加题库" : "预计分钟"}</span></div>
           </div>
@@ -201,21 +201,21 @@ export default function CommercePaywall({
         {loading ? <div className={styles.loading}>正在读取权益配置…</div> : product ? (
           <article className={styles.product}>
             <div className={styles.productTop}>
-              <div><span>唯一核心套餐</span><h3>{product.name}</h3></div>
+              <div><span>会员方案</span><h3>{product.name}</h3></div>
               <div className={styles.price}><small>¥</small><strong>{priceText(product.priceCents)}</strong><span>/ 终身</span></div>
             </div>
-            <p>{product.publicPromise || "29.8元一次购买，终身使用"}</p>
+            <p>{product.publicPromise || "29.8元开通终身会员"}</p>
             <ul>
               <li>多套国考、省考与专项题库自由组合</li>
-              <li>每日真题不限 5 题，错题按记忆周期回炉</li>
-              <li>申论真题微练、学习诊断与电台完整解锁</li>
+              <li>可按10–60分钟计划完成每日真题训练，错题按记忆周期复习</li>
+              <li>可使用申论真题微练、学习诊断与日练电台</li>
             </ul>
           </article>
-        ) : <div className={styles.error}>当前没有可用商品，请联系运营人员检查商品配置。</div>}
+        ) : <div className={styles.error}>当前暂无可购买的会员方案，请稍后再试。</div>}
 
         {catalog && (
           <div className={catalog.testMode ? styles.testNotice : styles.unavailableNotice}>
-            <b>{catalog.testMode ? "测试支付模式 · 不会扣款" : "真实支付尚未接入"}</b>
+            <b>{catalog.testMode ? "测试支付模式 · 不会扣款" : "当前采用兑换码激活"}</b>
             <span>{catalog.notice}</span>
           </div>
         )}
@@ -224,17 +224,17 @@ export default function CommercePaywall({
 
         <div className={styles.actions}>
           {!signedIn ? (
-            <a className={styles.primary} href={loginHref} onClick={onLogin}>登录后开通并同步权益</a>
+            <a className={styles.primary} href={loginHref} onClick={onLogin}>登录后兑换并同步权益</a>
           ) : catalog?.testMode ? (
             order
               ? <button className={styles.primary} type="button" disabled={submitting} onClick={() => void completeOrder()}>{submitting ? "发放中…" : "确认测试支付并发放权益（不扣款）"}</button>
               : <button className={styles.primary} type="button" disabled={submitting || !product} onClick={() => void createOrder()}>{submitting ? "创建中…" : "创建测试订单（不会扣款）"}</button>
           ) : (
-            <button className={styles.primary} type="button" disabled>在线支付待接入</button>
+            <button className={styles.primary} type="button" disabled>请前往官方公众号购买兑换码</button>
           )}
-          <button className={styles.secondary} type="button" onClick={openRedemption}>已有兑换码，去激活</button>
+          <button className={styles.secondary} type="button" onClick={openRedemption}>已有兑换码，立即激活</button>
         </div>
-        <p className={styles.footnote}>测试环境不会产生真实交易；正式支付接入前，不会展示虚假的支付成功状态。</p>
+        <p className={styles.footnote}>当前不支持应用内直接付款；请通过官方公众号购买兑换码后返回激活。</p>
       </section>
     </div>
   );

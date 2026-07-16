@@ -1345,8 +1345,12 @@ async function seedDefaults() {
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO products
       (id, name, description, price_cents, currency, grant_type, duration_days, public_promise, status, sort_order)
-      VALUES ('gkrl-lifetime-2980', '公考日练终身会员', '解锁完整真题日练、多题库组合、智能复习、申论微练与日练电台。',
-        2980, 'CNY', 'lifetime', NULL, '29.8元一次购买，终身使用', 'active', 10)`),
+      VALUES ('gkrl-lifetime-2980', '公考日练终身会员', '包含完整真题日练、多题库组合、记忆周期复习、申论微练与日练电台。',
+        2980, 'CNY', 'lifetime', NULL, '29.8元开通终身会员', 'active', 10)`),
+    db.prepare(`UPDATE products
+      SET description = '包含完整真题日练、多题库组合、记忆周期复习、申论微练与日练电台。',
+          public_promise = '29.8元开通终身会员'
+      WHERE id = 'gkrl-lifetime-2980'`),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_reward_days', '7')"),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invitee_reward_days', '3')"),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_monthly_cap', '30')"),
@@ -1357,7 +1361,7 @@ async function seedDefaults() {
     db.prepare("UPDATE redemption_codes SET status = 'disabled' WHERE batch_name = '内测演示码'"),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
-      VALUES ('gk-2027', '2027国考行测', 'national', NULL, 2027, '行测', '按国考命题结构整理，支持后台持续导入真题与专项题。', 'navy', 'draft')`),
+      VALUES ('gk-2027', '2027国考行测', 'national', NULL, 2027, '行测', '按国考命题结构整理，持续收录真题与专项训练内容。', 'navy', 'draft')`),
     db.prepare(`INSERT OR IGNORE INTO question_banks
       (bank_code, name, exam_type, province, exam_year, subject, description, cover_color, status)
       VALUES ('joint-provincial-2027', '2027省考联考通用', 'special', '多省', 2027, '行测', '用于省考共通模块训练，各省差异题仍放在对应省份独立题库。', 'green', 'draft')`),
@@ -1413,10 +1417,10 @@ async function seedDefaultContentOnce() {
   if (marker) return;
   const presets = [
     { id: "data-analysis", title: "资料分析速算", subtitle: "5—10分钟一组", icon: "📊", color: "blue", subject: "行测", module: "资料分析", subTypes: [], questionCount: 5, minutes: 8, sortOrder: 10, enabled: true },
-    { id: "graphic-reasoning", title: "图形判断", subtitle: "高频规律微练", icon: "🧩", color: "purple", subject: "行测", module: "判断推理", subTypes: ["图形推理"], questionCount: 5, minutes: 8, sortOrder: 20, enabled: true },
-    { id: "idiom", title: "言语易错成语", subtitle: "易混词精练", icon: "📖", color: "orange", subject: "行测", module: "言语理解", subTypes: ["选词填空"], questionCount: 5, minutes: 6, sortOrder: 30, enabled: true },
-    { id: "current-affairs", title: "常识时政", subtitle: "高频真题快练", icon: "📰", color: "red", subject: "行测", module: "常识判断", subTypes: ["时政"], questionCount: 5, minutes: 5, sortOrder: 40, enabled: true },
-    { id: "essay-expression", title: "申论规范表达", subtitle: "从材料到得分词", icon: "✍️", color: "green", subject: "申论", module: "规范表达", subTypes: [], questionCount: 1, minutes: 10, sortOrder: 50, enabled: true },
+    { id: "graphic-reasoning", title: "图形推理", subtitle: "高频规律专项训练", icon: "🧩", color: "purple", subject: "行测", module: "判断推理", subTypes: ["图形推理"], questionCount: 5, minutes: 8, sortOrder: 20, enabled: true },
+    { id: "idiom", title: "言语易错成语", subtitle: "易混词辨析训练", icon: "📖", color: "orange", subject: "行测", module: "言语理解", subTypes: ["选词填空"], questionCount: 5, minutes: 6, sortOrder: 30, enabled: true },
+    { id: "current-affairs", title: "时政常识", subtitle: "高频真题训练", icon: "📰", color: "red", subject: "行测", module: "常识判断", subTypes: ["时政"], questionCount: 5, minutes: 5, sortOrder: 40, enabled: true },
+    { id: "essay-expression", title: "申论规范表达", subtitle: "材料要点与规范表达", icon: "✍️", color: "green", subject: "申论", module: "规范表达", subTypes: [], questionCount: 1, minutes: 10, sortOrder: 50, enabled: true },
   ];
   const statements: D1PreparedStatement[] = [];
   for (const day of defaultPracticeDays) {
@@ -1957,7 +1961,7 @@ async function authorizeAudioPlayback(userId: string, payload: Record<string, un
       LIMIT 1`).bind(trackId).first<{ payload_json: string; access_level: string }>();
     if (!row) return json({ error: "节目不存在或尚未发布", code: "AUDIO_TRACK_INVALID" }, 404);
     if (row.access_level !== "free") {
-      return json({ error: "该节目为会员内容，开通后可继续收听", code: "PAYWALL_AUDIO" }, 403);
+      return json({ error: "该节目需开通会员后收听", code: "PAYWALL_AUDIO" }, 403);
     }
     let managedAsset = "";
     try {
@@ -1968,7 +1972,7 @@ async function authorizeAudioPlayback(userId: string, payload: Record<string, un
   }
 
   if (!await grantDailyFreeAudio(userId, claimKey)) {
-    return json({ error: "今日免费电台额度已使用，开通后可继续听时政、申论和错题朗读", code: "PAYWALL_AUDIO" }, 403);
+    return json({ error: "今日免费试听次数已用完，开通会员可收听完整电台内容", code: "PAYWALL_AUDIO" }, 403);
   }
   return json({ ok: true, access: "daily_free", claimKey });
 }
@@ -2096,7 +2100,10 @@ function displayExamType(value: string) {
 
 function questionScopeLabel(examType: string, province: unknown) {
   if (examType === "national") return "国考题源";
-  if (examType === "provincial") return `${normalizeProvince(province) || "省考"}省考题源`;
+  if (examType === "provincial") {
+    const normalizedProvince = normalizeProvince(province);
+    return normalizedProvince ? `${normalizedProvince}省考题源` : "省考题源";
+  }
   return "通用专项";
 }
 
@@ -2461,7 +2468,7 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
       focusModule: focusModule?.module ?? null,
       focusQuestionCount,
       estimatedMinutes,
-      taskText: `${tomorrowDueCount ? `先回炉${tomorrowDueCount}道到期题` : "先完成到期检查"}${focusModule ? `，再练${focusQuestionCount}道${focusModule.module}` : "，再按主攻题库补充新题"}，预计${estimatedMinutes}分钟。`,
+      taskText: `${tomorrowDueCount ? `先完成${tomorrowDueCount}道到期复习题` : "先完成到期复习检查"}${focusModule ? `，再完成${focusQuestionCount}道${focusModule.module}专项训练` : "，再从主攻题库完成新题训练"}，预计${estimatedMinutes}分钟。`,
     },
   };
 }
@@ -2664,7 +2671,7 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
     if (existing) return existing;
     const created: PracticeDay = {
       day,
-      label: "今日精练",
+      label: "今日训练",
       morning: { title: "", lead: "", paragraphs: [], keywords: [] },
       questions: [],
       currentAffairs: [],
@@ -2931,7 +2938,7 @@ async function bootstrap(request: Request) {
         stateCounts: { learning: 0, weak: 0, mastered: 0 }, modules: [], weakPoints: [], recent: [],
         today: { total: 0, correct: 0, repairedDue: 0, wrong: 0, hesitant: 0, guessed: 0, overtime: 0, avgSeconds: 0, accuracyDelta: null, avgSecondsDelta: null, highFrequencyPoints: [] },
         weekly: { total: 0, accuracy: 0, activeDays: 0, avgSeconds: 0, highFrequencyCoverage: 0, repeatErrorRate: null, accuracyDelta: null, avgSecondsDelta: null, repeatErrorRateDelta: null, masteredPoints: [], nextIssues: [] },
-        tomorrowPlan: { dueCount: 0, focusModule: null, focusQuestionCount: 0, estimatedMinutes: 5, taskText: "先完成备考组合配置，再开始首组日练。" },
+        tomorrowPlan: { dueCount: 0, focusModule: null, focusQuestionCount: 0, estimatedMinutes: 5, taskText: "请先完成备考组合设置，再开始今日训练。" },
       },
       wrongAudioQuestions: [],
       dueEssayRewrites: [],
@@ -3010,7 +3017,7 @@ async function bootstrap(request: Request) {
     contentPromise,
     dailyReadinessPromise,
   ]);
-  if (!user) return json({ error: "用户初始化失败" }, 500, identity.setCookie);
+  if (!user) return json({ error: "账号信息加载失败，请刷新后重试" }, 500, identity.setCookie);
   let progress: Record<string, unknown> = {};
   try { progress = JSON.parse(state?.progress_json ?? "{}"); } catch { progress = {}; }
   // 打卡只信规范化记录。旧 progress_json 可被客户端整体保存，不能继续作为
@@ -3047,7 +3054,7 @@ async function bootstrap(request: Request) {
 
 async function saveProgress(userId: string, payload: Record<string, unknown>) {
   const value = JSON.stringify(payload.progress ?? {});
-  if (value.length > 120_000) return json({ error: "学习记录过大" }, 400);
+  if (value.length > 120_000) return json({ error: "学习记录暂无法保存，请刷新后重试" }, 400);
   const expectedVersion = Number.isInteger(Number(payload.progressVersion)) ? Number(payload.progressVersion) : null;
   const db = getD1();
   if (expectedVersion !== null) {
@@ -3058,7 +3065,7 @@ async function saveProgress(userId: string, payload: Record<string, unknown>) {
         .bind(userId).first<{ progress_json: string; version: number }>();
       let progress: unknown = {};
       try { progress = JSON.parse(latest?.progress_json ?? "{}"); } catch { progress = {}; }
-      return json({ error: "学习记录已在其他设备更新，请合并后重试", code: "PROGRESS_CONFLICT", progress, progressVersion: latest?.version ?? 0 }, 409);
+      return json({ error: "检测到其他设备更新，请刷新同步后重试", code: "PROGRESS_CONFLICT", progress, progressVersion: latest?.version ?? 0 }, 409);
     }
   } else {
     // Compatibility for an older client; new clients should always send the
@@ -3120,7 +3127,7 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
       return typeMatches && (!year || (year <= target.examYear && year >= target.examYear - 4));
     });
     if (!initialBank || !matchesTarget || !["行测", "综合"].includes(initialBank.subject) || Number(initialBank.question_count) < 5) {
-      return json({ error: "所选题库尚未审核上架、可练真题不足5道，或与当前报考目标不匹配" }, 409);
+      return json({ error: "所选题库当前不可用、可练真题不足5道，或与当前报考目标不匹配" }, 409);
     }
     const [membership, currentBanks] = await Promise.all([userMembership(userId), selectedBankCodes(userId)]);
     if (!membershipIsActive(membership) && !currentBanks.includes(initialBankCode) && currentBanks.length >= 1) {
@@ -3376,7 +3383,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const lockedRequestedBankCodes = requested.filter((code) => selected.includes(code) && !entitlementAllowed.has(code));
   if (!active && !dailyRequest && lockedRequestedBankCodes.length) {
     return json({
-      error: "该题库已随试用结束转为保留状态，开通后可继续单本练和多库混练",
+      error: "该题库已随试用结束转为保留状态，开通后可继续单题库训练及多题库组合训练",
       code: "FREE_BANK_LIMIT",
       lockedRequestedBankCodes,
     }, 403);
@@ -3607,7 +3614,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     : 0;
   if (sessionKind === "daily" && !existingSession && sessionItems.length < requiredNewDailyQuestions) {
     return json({
-      error: "当前备考组合不足以补齐今天的真实日练，请补充与报考目标匹配的已审核真题库",
+      error: "当前备考组合无法生成完整的今日任务，请补充与报考目标匹配的已审核真题库",
       code: "DAILY_BANK_INSUFFICIENT",
       availableQuestionCount: dailyCarry.answered + sessionItems.length,
     }, 409);
@@ -3666,7 +3673,7 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const questions = sessionItems.map((item) => {
     const question = publicQuestion(item.question, item.progress);
     const planReason = question.due
-      ? item.progress?.state === "weak" ? "错题到期" : "记忆到期"
+      ? item.progress?.state === "weak" ? "错题复习到期" : "间隔复习到期"
       : item.question.bankCode === primaryBankCode
         ? "主攻考试"
         : urgentBankCodes.has(item.question.bankCode)
@@ -3742,7 +3749,7 @@ async function getEssayPracticeBatch(userId: string, payload: Record<string, unk
   const bankCodes = (requested.length ? requested : selected).filter((code) => allowed.has(code)).slice(0, 32);
   if (!bankCodes.length) return json({ questions: [], mode: "essay", limit: 0, access: "preview" });
   const active = membershipIsActive(await userMembership(userId));
-  if (!active) return json({ error: "申论真题微练为会员权益，可先登录领取一次72小时体验", code: "PAYWALL_ESSAY" }, 403);
+  if (!active) return json({ error: "申论真题微练需开通会员后使用；登录后可领取一次72小时体验", code: "PAYWALL_ESSAY" }, 403);
   const limit = Math.max(1, Math.min(active ? 10 : 2, Math.floor(Number(payload.limit)) || 3));
   const placeholders = bankCodes.map(() => "?").join(",");
   const focusModule = trimmed(payload.focusModule, 40);
@@ -3900,7 +3907,7 @@ function publicEssayAttempt(attempt: EssayAttemptRow) {
 
 async function saveEssayAttempt(userId: string, payload: Record<string, unknown>) {
   if (!membershipIsActive(await userMembership(userId))) {
-    return json({ error: "申论真题微练为完整会员权益", code: "PAYWALL_ESSAY" }, 403);
+    return json({ error: "申论真题微练需开通会员后使用", code: "PAYWALL_ESSAY" }, 403);
   }
   const questionCode = trimmed(payload.questionCode, 80);
   const stage = String(payload.stage ?? "draft");
@@ -3919,8 +3926,8 @@ async function saveEssayAttempt(userId: string, payload: Record<string, unknown>
   if (stageIndex >= 1 && firstDraft.length < 10) return json({ error: "请先完成独立作答" }, 400);
   if (stageIndex >= 2 && checks.length < 2) return json({ error: "请至少完成两项自查" }, 400);
   if (stageIndex >= 3 && selfScore === null) return json({ error: "请先完成采分自评" }, 400);
-  if (stageIndex >= 4 && revisedDraft.length < 10) return json({ error: "请先完成二改" }, 400);
-  if (stageIndex >= 5 && rewriteDraft.length < 10) return json({ error: "请完成3天重写" }, 400);
+  if (stageIndex >= 4 && revisedDraft.length < 10) return json({ error: "请先完成第二版作答" }, 400);
+  if (stageIndex >= 5 && rewriteDraft.length < 10) return json({ error: "请完成3天后独立重写" }, 400);
   const db = getD1();
   const available = await db.prepare(`SELECT q.question_code, q.scoring_points_json, q.explanation, q.technique FROM questions q
     JOIN question_bank_items qbi ON qbi.question_id = q.id
@@ -3941,11 +3948,11 @@ async function saveEssayAttempt(userId: string, payload: Record<string, unknown>
   if (existingIndex >= 1 && existing?.first_draft !== firstDraft) return json({ error: "独立初稿已锁定，不能覆盖" }, 409);
   const serverRewriteDueAt = stageIndex >= 4 ? (existing?.rewrite_due_at ?? chinaDateKeyAfter(dateKey, 3)) : null;
   if (stage === "scheduled" && requestedRewriteDueAt && requestedRewriteDueAt !== serverRewriteDueAt) {
-    return json({ error: `3天重写由系统安排在${serverRewriteDueAt}` }, 409);
+    return json({ error: `本题独立重写任务将于${serverRewriteDueAt}开放` }, 409);
   }
   if (stage === "completed") {
     const dueDate = existing?.rewrite_due_at ?? serverRewriteDueAt;
-    if (!dueDate || dueDate > chinaDateKey()) return json({ error: "3天重写尚未到期" }, 409);
+    if (!dueDate || dueDate > chinaDateKey()) return json({ error: "本题独立重写任务尚未开放" }, 409);
   }
   const id = existing?.id ?? crypto.randomUUID();
   await db.prepare(`INSERT INTO essay_attempts
@@ -4100,7 +4107,7 @@ async function submitContentReport(userId: string, payload: Record<string, unkno
     }
   }
   if (!reportableQuestion) {
-    return json({ error: "这道题不在你当前可练的题库中", code: "CONTENT_REPORT_NOT_REPORTABLE" }, 403);
+    return json({ error: "当前题目不属于已加入且可练的题库", code: "CONTENT_REPORT_NOT_REPORTABLE" }, 403);
   }
 
   const existing = await db.prepare(`SELECT id FROM content_reports
@@ -4111,7 +4118,7 @@ async function submitContentReport(userId: string, payload: Record<string, unkno
   const recent = await db.prepare(`SELECT COUNT(*) AS count FROM content_reports
     WHERE user_id = ? AND created_at >= datetime('now','-24 hours')`).bind(userId).first<{ count: number }>();
   if (Number(recent?.count ?? 0) >= CONTENT_REPORT_DAILY_LIMIT) {
-    const response = json({ error: "今天提交的报错较多，请明天再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
+    const response = json({ error: "今日内容反馈次数已达上限，请明日再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
     response.headers.set("retry-after", "86400");
     return response;
   }
@@ -4132,7 +4139,7 @@ async function submitContentReport(userId: string, payload: Record<string, unkno
     WHERE user_id = ? AND content_type = 'question' AND content_key = ? AND reason_code = ? AND status = 'pending'
     LIMIT 1`).bind(userId, questionCode, reasonCode).first<{ id: number }>();
   if (!report) {
-    const response = json({ error: "今天提交的报错较多，请明天再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
+    const response = json({ error: "今日内容反馈次数已达上限，请明日再试", code: "CONTENT_REPORT_RATE_LIMIT" }, 429);
     response.headers.set("retry-after", "86400");
     return response;
   }
@@ -4146,7 +4153,7 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const uncertain = payload.uncertain === true;
   const durationMs = Math.max(0, Math.min(30 * 60_000, Math.floor(Number(payload.durationMs)) || 0));
   const practiceSessionId = trimmed(payload.practiceSessionId ?? payload.sessionId, 80);
-  if (!practiceSessionId) return json({ error: "练习会话缺失，请重新进入本组练习" }, 409);
+  if (!practiceSessionId) return json({ error: "本次训练记录缺失，请重新进入" }, 409);
   // One question can be applied only once in a server-issued session. Client
   // attempt ids are deliberately ignored so changing them cannot farm quota,
   // progress, check-ins or invite rewards.
@@ -4166,7 +4173,7 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     if (!question) question = await resolveQuestion(questionCode, bankCode, true);
     if (!question) return json({ error: "原答题记录对应的题目已不存在，请刷新练习", code: "PRACTICE_SESSION_INVALIDATED" }, 409);
     if (duplicate.question_code !== questionCode || Number(duplicate.selected_answer) !== selectedAnswer) {
-      return json({ error: "答题请求标识冲突，请刷新后重试" }, 409);
+      return json({ error: "检测到作答请求冲突，请刷新页面后重试" }, 409);
     }
     const current = await db.prepare(`SELECT state, next_review_at, review_stage FROM user_question_progress
       WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
@@ -4224,8 +4231,8 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
     const entitlementChanged = sessionPolicy.code === "PRACTICE_SESSION_ENTITLEMENT_CHANGED";
     return json({
       error: entitlementChanged
-        ? "会员或试用权益、题库组合已变化，旧练习已结束；已完成记录保留，请重新开始"
-        : "练习已过期或题库内容已更新，请重新开始",
+        ? "因会员状态或备考组合发生变化，本组练习已结束；已完成记录已保存，请重新开始训练"
+        : "本组练习已过期或题库内容已更新，请重新开始训练",
       code: entitlementChanged ? "PRACTICE_SESSION_ENTITLEMENT_CHANGED" : "PRACTICE_SESSION_INVALIDATED",
     }, entitlementChanged ? 403 : 409);
   }
@@ -4234,14 +4241,14 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
       await db.prepare(`UPDATE practice_sessions SET status = 'abandoned', updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND user_id = ? AND status = 'active'`).bind(session.id, userId).run();
     }
-    return json({ error: "题库内容已更新，这组练习需要重新生成", code: "PRACTICE_SESSION_INVALIDATED" }, 409);
+    return json({ error: "题库内容已更新，请重新生成本组练习", code: "PRACTICE_SESSION_INVALIDATED" }, 409);
   }
   if (selectedAnswer < 0 || selectedAnswer >= question.options.length || question.answer < 0) {
-    return json({ error: "题目或答案无效" }, 400);
+    return json({ error: "提交的作答信息无效，请重新选择答案" }, 400);
   }
   const diagnosticSession = session?.kind === "diagnostic";
   if (!signedIn && !diagnosticSession) {
-    return json({ error: "首次摸底可免登录完成；正式日练请登录后继续", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403);
+    return json({ error: "首次能力诊断可免登录完成；正式日练请登录后继续", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403);
   }
 
   const correct = selectedAnswer === question.answer;
@@ -4367,7 +4374,7 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const appliedAttempt = await db.prepare(`SELECT id FROM practice_attempts
     WHERE user_id = ? AND attempt_key = ? AND apply_status = 'applied'`)
     .bind(userId, attemptKey).first<{ id: number }>();
-  if (!appliedAttempt) return json({ error: "今日5道免费真题已完成，明天可继续", code: "FREE_DAILY_LIMIT", freeRemaining: 0 }, 429);
+  if (!appliedAttempt) return json({ error: "今日免费练习已完成，明日可继续", code: "FREE_DAILY_LIMIT", freeRemaining: 0 }, 429);
   const attemptId = Number(appliedAttempt.id);
   const finalProgress = await db.prepare(`SELECT state, next_review_at, review_stage FROM user_question_progress
     WHERE user_id = ? AND question_code = ?`).bind(userId, questionCode)
@@ -4535,7 +4542,7 @@ async function recordDailyStep(userId: string, payload: Record<string, unknown>)
         (date_key = ? AND stage IN ('scheduled', 'completed'))
         OR (stage = 'completed' AND date(updated_at, '+8 hours') = date('now', '+8 hours'))
       ) ORDER BY updated_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
-    if (!attempt) return json({ error: "完成申论二改或到期重写后才能记录本步骤", code: "DAILY_ESSAY_INCOMPLETE" }, 409);
+    if (!attempt) return json({ error: "完成申论第二版作答或到期重写后，才能记录本步骤", code: "DAILY_ESSAY_INCOMPLETE" }, 409);
     sourceRef = attempt.id;
   }
   await db.prepare(`INSERT INTO daily_step_completions
@@ -4600,7 +4607,7 @@ async function recordDailyCheckin(userId: string, payload: Record<string, unknow
       AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
     ORDER BY completed_at DESC LIMIT 1`).bind(userId, today).first<{ id: string }>();
   if (!session) {
-    return json({ error: "完成真实日练后才能打卡，空题库或未完成任务不会计入", code: "DAILY_PRACTICE_INCOMPLETE" }, 409);
+    return json({ error: "完成今日规定任务后才能打卡；未完成的训练不计入打卡", code: "DAILY_PRACTICE_INCOMPLETE" }, 409);
   }
   const requiredSteps = await requiredDailyStepNames(userId, today);
   const completedRows = await db.prepare(`SELECT step FROM daily_step_completions
@@ -4618,11 +4625,11 @@ async function recordDailyCheckin(userId: string, payload: Record<string, unknow
 
 async function getPracticeSessionSummary(userId: string, payload: Record<string, unknown>) {
   const sessionId = trimmed(payload.practiceSessionId, 80);
-  if (!sessionId) return json({ error: "练习会话不能为空" }, 400);
+  if (!sessionId) return json({ error: "训练记录不能为空" }, 400);
   const db = getD1();
   const session = await db.prepare("SELECT id, date_key, kind, mode FROM practice_sessions WHERE id = ? AND user_id = ?")
     .bind(sessionId, userId).first<{ id: string; date_key: string; kind: string; mode: string }>();
-  if (!session) return json({ error: "练习会话不存在" }, 404);
+  if (!session) return json({ error: "未找到本次训练记录" }, 404);
   const wholeDaily = session.kind === "daily" && session.mode === "mixed";
   const attemptScope = wholeDaily
     ? `FROM (
@@ -4701,7 +4708,7 @@ async function bindInvite(userId: string, payload: Record<string, unknown>) {
   const inviter = await db.prepare("SELECT id, verified_at FROM users WHERE invite_code = ?").bind(inviteCode)
     .first<{ id: string; verified_at: string | null }>();
   if (!inviter) return json({ error: "邀请码无效" }, 404);
-  if (!inviter.verified_at) return json({ error: "邀请账号尚未验证" }, 409);
+  if (!inviter.verified_at) return json({ error: "该邀请码暂不可用" }, 409);
   if (inviter.id === userId) return json({ error: "不能邀请自己" }, 400);
   const existing = await db.prepare("SELECT inviter_id, status FROM invite_relations WHERE invitee_id = ?").bind(userId).first<{ inviter_id: string; status: string }>();
   if (existing) return json({ ok: true, status: existing.status, message: "已绑定邀请关系" });
@@ -4722,10 +4729,10 @@ async function bindInvite(userId: string, payload: Record<string, unknown>) {
       .bind(inviter.id).first<{ count: number }>(),
   ]);
   if (sameBrowserSwitch) {
-    return json({ error: "同一浏览器切换账号不能参与邀请时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
+    return json({ error: "当前邀请不符合活动规则，无法获得时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
   }
   if (Number(inviterDailyBindings?.count ?? 0) >= 10) {
-    return json({ error: "该邀请账号今日绑定过于集中，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
+    return json({ error: "该邀请码今日绑定次数已达上限，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
   }
   // Friendly checks above keep normal errors clear; this INSERT is the
   // authoritative rolling-24-hour and same-browser gate. D1 serializes the
@@ -4776,14 +4783,14 @@ async function bindInvite(userId: string, payload: Record<string, unknown>) {
     ]);
     if (current) return json({ ok: true, status: current.status, message: "已绑定邀请关系" });
     if (currentRisk) {
-      return json({ error: "同一浏览器切换账号不能参与邀请时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
+      return json({ error: "当前邀请不符合活动规则，无法获得时长奖励", code: "INVITE_SAME_DEVICE_RISK" }, 409);
     }
     if (Number(currentRate?.count ?? 0) >= 10) {
-      return json({ error: "该邀请账号今日绑定过于集中，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
+      return json({ error: "该邀请码今日绑定次数已达上限，请24小时后再试", code: "INVITE_RATE_RISK" }, 429);
     }
-    return json({ error: "邀请关系绑定冲突，请刷新后重试", code: "INVITE_BIND_CONFLICT" }, 409);
+    return json({ error: "邀请关系绑定失败，请刷新后重试", code: "INVITE_BIND_CONFLICT" }, 409);
   }
-  return json({ ok: true, status: "pending", message: "已绑定；完成首次有效日练后，被邀请人得3天、邀请人得7天" });
+  return json({ ok: true, status: "pending", message: "邀请关系已绑定；完成首次规定日练后，受邀人增加3天使用时长，邀请人增加7天使用时长" });
 }
 
 async function rewardInvite(inviteeId: string) {
@@ -4854,7 +4861,7 @@ async function rewardInvite(inviteeId: string) {
         SELECT SUM(delta_days) FROM membership_ledger
         WHERE user_id = ? AND source_type = 'invite_reward'
           AND datetime(created_at) >= datetime('now', '+8 hours', 'start of month', '-8 hours')
-      ), 0))), 'invite_reward', ?, '好友完成首次有效日练奖励'
+      ), 0))), 'invite_reward', ?, '受邀好友完成首次规定日练奖励'
       WHERE MIN(?, MAX(0, ? - COALESCE((
         SELECT SUM(delta_days) FROM membership_ledger
         WHERE user_id = ? AND source_type = 'invite_reward'
@@ -4924,7 +4931,7 @@ async function redeem(userId: string, payload: Record<string, unknown>) {
   const sourceId = `redeem:${row.id}:${userId}`;
   const configuredDays = Math.floor(Number(row.duration_days));
   if (grantType === "duration" && !new Set([7, 30, 365]).has(configuredDays)) {
-    return json({ error: "兑换码权益配置无效，请联系管理员", code: "REDEMPTION_GRANT_INVALID" }, 409);
+    return json({ error: "兑换码权益配置异常，请联系客服处理", code: "REDEMPTION_GRANT_INVALID" }, 409);
   }
   // Claim, idempotency ledger, membership mutation, completion and capacity
   // accounting are one D1 transaction. Cleanup only targets legacy pending
@@ -5056,21 +5063,21 @@ async function getCommerceProducts(request: Request, userId: string) {
     membershipType: membership?.membership_type ?? "duration",
     notice: testMode
       ? "测试支付模式：只验证订单与权益链路，不会发生真实扣款。"
-      : "真实支付尚未接入；当前页面仅展示既有公开权益与价格承诺，不能完成付款。",
+      : "当前采用公众号购买兑换码的方式开通会员；获得兑换码后可在本应用内激活。",
   });
 }
 
 async function createTestOrder(request: Request, userId: string, payload: Record<string, unknown>) {
   if (!commerceTestMode(request)) {
     return json({
-      error: "真实支付尚未接入，当前环境不能创建或完成付款",
+      error: "当前采用兑换码激活方式，暂不支持在本页面直接付款",
       code: "PAYMENT_NOT_CONFIGURED",
       testMode: false,
     }, 503);
   }
   const productId = trimmed(payload.productId, 80);
   const idempotencyKey = trimmed(payload.idempotencyKey, 120);
-  if (!/^[a-zA-Z0-9:_-]{12,120}$/.test(idempotencyKey)) return json({ error: "订单幂等键无效" }, 400);
+  if (!/^[a-zA-Z0-9:_-]{12,120}$/.test(idempotencyKey)) return json({ error: "订单信息无效，请刷新后重试" }, 400);
   const db = getD1();
   const membership = await userMembership(userId);
   if (membership?.membership_type === "lifetime") {
@@ -5412,7 +5419,7 @@ async function startQuizAttempt(userId: string, payload: Record<string, unknown>
   const quiz = active.quiz;
   const count = Math.max(1, Math.min(20, Number(quiz.question_count || DEFAULT_QUIZ_QUESTION_COUNT)));
   if (active.questionCount < Math.min(count, DEFAULT_QUIZ_QUESTION_COUNT)) {
-    return json({ error: "已发布题目不足10道，请先在后台补齐并审核题目", code: "QUIZ_NOT_READY" }, 409);
+    return json({ error: "当前测试题目数量不足，请稍后再试", code: "QUIZ_NOT_READY" }, 409);
   }
   const db = getD1();
   const sourceAttemptId = trimmed(payload.challengeId, 80);
@@ -6014,7 +6021,7 @@ async function serveAuthorizedMedia(assetId: string, request: Request) {
 
   const identity = await ensureUser(request, { persist: false });
   if (identity.bootstrapDeferred) {
-    const response = json({ error: "账号状态正在安全迁移，请重试播放", code: "IDENTITY_PREPARATION_REQUIRED" }, 409, identity.setCookie);
+    const response = json({ error: "账号信息更新中，请稍后重试播放", code: "IDENTITY_PREPARATION_REQUIRED" }, 409, identity.setCookie);
     response.headers.set("retry-after", "1");
     return response;
   }
@@ -6030,11 +6037,11 @@ async function serveAuthorizedMedia(assetId: string, request: Request) {
     }
     allowed = await grantDailyFreeAudio(identity.userId, assetId);
     if (!allowed) {
-      return json({ error: "今日1条免费试听已使用，完整电台需开通会员", code: "PAYWALL_AUDIO_DAILY" }, 403, identity.setCookie);
+      return json({ error: "今日免费试听次数已用完，开通会员后可收听完整内容", code: "PAYWALL_AUDIO_DAILY" }, 403, identity.setCookie);
     }
   }
   if (!allowed) {
-    return json({ error: "该媒体属于完整会员内容", code: "PAYWALL_MEDIA" }, 403, identity.setCookie);
+    return json({ error: "该内容需开通会员后收听", code: "PAYWALL_MEDIA" }, 403, identity.setCookie);
   }
   return serveMedia(assetId, request, identity.setCookie, false);
 }
@@ -10501,7 +10508,7 @@ export async function POST(request: Request) {
       // yet, so the same payload is safe to retry after the new opaque cookie
       // is stored by the browser.
       return json({
-        error: "账号初始化中，正在安全重试",
+        error: "账号信息同步中，请稍后重试",
         code: "IDENTITY_PREPARING",
         retryAction: true,
         retryBootstrap: true,
@@ -10515,7 +10522,7 @@ export async function POST(request: Request) {
     ]);
     if (!identity.signedIn && verifiedLearningActions.has(action)) {
       const response = json({
-        error: "请先登录后继续；答题次数、错题进度与会员权益需要绑定到同一账号",
+        error: "请先登录后继续，学习记录与会员权益将统一保存至当前账号",
         code: "VERIFIED_ACCOUNT_REQUIRED",
       }, 403);
       appendCookies(response.headers, identity.setCookie);

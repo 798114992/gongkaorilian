@@ -11,7 +11,7 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(page, /公考日练/);
-  assert.match(app, /今日最该做/);
+  assert.match(app, /今日重点任务/);
   assert.match(app, /today-command-card/);
   assert.match(app, /daily-timeline-card/);
   assert.match(app, />电台<\/button>/);
@@ -39,11 +39,11 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(app, /bank\.questionCount > 0/);
   assert.match(app, /bankYearSupportsTarget\(bank\.examYear, target\.examYear\)/);
   assert.doesNotMatch(app, /label: "题库提醒"/);
-  assert.match(app, /精选标准/);
+  assert.match(app, /推荐标准/);
   assert.match(app, /取消/);
   assert.match(app, /buildDailyPlan/);
-  assert.match(app, /错题、超时与没把握/);
-  assert.match(app, /不确定（即使答对也会复习）/);
+  assert.match(app, /答错、超时及掌握不稳定/);
+  assert.match(app, /把握不足（答对后仍会复习）/);
   assert.match(route, /getPracticeBatch/);
   assert.match(route, /submitPracticeAnswer/);
   assert.match(route, /nextReviewAt/);
@@ -62,7 +62,7 @@ test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defa
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(`${page}\n${layout}`, /10–60 分钟/);
+  assert.match(`${page}\n${layout}`, /10–60\s*分钟/);
   assert.doesNotMatch(`${page}\n${layout}`, /每天\s*20\s*分钟/);
   assert.match(schema, /dailyMinutes:[\s\S]*?\.default\(30\)/);
 
@@ -71,7 +71,7 @@ test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defa
     assert.match(app, new RegExp(`questionCount:\\s*${questionCount}\\b`));
   }
   assert.match(app, /planOverrides/);
-  assert.match(app, /10分钟保底/);
+  assert.match(app, /10分钟精简/);
   assert.match(app, /todayKey/);
   assert.match(route, /chinaDateKey/);
   assert.match(route, /resumeQuestionCodes/);
@@ -90,7 +90,7 @@ test("the compact loop exposes review, honest bank states and a finite session s
 
   assert.match(app, /tab === "review"/);
   assert.match(app, /setTab\("review"\)/);
-  assert.match(app, /今天学够了/);
+  assert.match(app, /今日任务已完成/);
   assert.match(app, /startEssayPractice/);
   assert.match(app, /材料作答 · 采分点自评/);
   assert.match(route, /getEssayPracticeBatch/);
@@ -142,9 +142,9 @@ test("the differentiated daily prescription records confidence, balances banks a
   assert.match(app, /今日日练/);
   assert.match(app, /nextDailyStep/);
   assert.match(app, /timeZone: "Asia\/Shanghai"/);
-  assert.match(app, /真会/);
-  assert.match(app, /有点犹豫/);
-  assert.match(app, /蒙对了/);
+  assert.match(app, /确定掌握/);
+  assert.match(app, /掌握不稳定/);
+  assert.match(app, /猜测作答/);
   assert.match(app, /明日安排/);
   assert.match(route, /takeBalanced/);
   assert.match(route, /questionFingerprint/);
@@ -349,16 +349,16 @@ test("the 日练电台 supports dynamic series, protected audio fallback and the
   assert.match(hub, /青年女/);
   assert.match(hub, /pickSpeechVoice/);
   assert.match(hub, /speechFallbackIds/);
-  assert.match(hub, /固定音频未启动，已自动切换为AI朗读/);
+  assert.match(hub, /录制音频未能播放，已自动切换为系统朗读/);
   assert.match(hub, /native-audio-control/);
-  assert.match(hub, /播放未启动，请使用下方原生播放器播放/);
+  assert.match(hub, /当前设备暂不支持系统朗读，请更换设备或浏览器后重试/);
   assert.match(hub, /<audio/);
   assert.match(hub, /audio-floating-player/);
   assert.match(hub, /关闭播放/);
   assert.match(hub, /MediaMetadata/);
   assert.match(hub, /gongkao-audio-v3/);
   assert.match(hub, /track\.accessLevel === "free"/);
-  assert.match(hub, /会员节目需在线校验使用权益/);
+  assert.match(hub, /该节目需在线收听；免费试听音频支持离线缓存/);
   assert.match(audioData, /audioUrl/);
   assert.match(audioData, /新法解读/);
   assert.equal(publicFiles.includes("audio"), false);

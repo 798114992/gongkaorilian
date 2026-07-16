@@ -3555,6 +3555,8 @@ export default function DailyPracticeApp() {
               <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className="urgent" onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
             </section>}
 
+            <QuizFeature notify={notify} trackEvent={trackEvent} variant="teaser" />
+
             <section className={`quick-practice-card smart-bonus-card${allDailyDone ? " ready" : ""}`}>
               <div className="compact-section-heading"><div><span>再练10分钟</span><h2>{allDailyDone ? "如果还有时间，只练最值得的一组" : "先完成今日主线，有余力再展开"}</h2></div></div>
               <details
@@ -3576,7 +3578,6 @@ export default function DailyPracticeApp() {
                   <div className="smart-bonus-tools">
                     <button className="bonus-tool-entry" onClick={() => { setBankFilter("专项"); setTab("banks"); }}><span>专</span><b>专项自选</b><small>自己挑5–10分钟微练</small></button>
                     <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤或睡前听</small></button>
-                    <QuizFeature notify={notify} trackEvent={trackEvent} variant="tool" unlocked={allDailyDone} />
                   </div>
                   {allDailyDone && <button className="finish-today-button" onClick={() => { setBonusExpanded(false); notify("今日学习已完成，明天继续"); }}>今天学够了，结束学习</button>}
                 </div>

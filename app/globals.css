@@ -537,7 +537,7 @@ img { max-width: 100%; }
 .bonus-more-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 2px 0; }
 .bonus-more-heading span { color: var(--ink); font-size: 9px; font-weight: 900; }
 .bonus-more-heading small { color: var(--muted); font-size: 7px; }
-.smart-bonus-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.smart-bonus-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .smart-bonus-tools > button {
   display: grid;
   min-width: 0;

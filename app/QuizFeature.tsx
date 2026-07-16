@@ -68,7 +68,6 @@ type Props = {
   notify: (message: string) => void;
   trackEvent: (eventName: string, eventData?: Record<string, unknown>) => void;
   variant?: "teaser" | "tool";
-  unlocked?: boolean;
   quizSlug?: string;
 };
 
@@ -158,7 +157,6 @@ export default function QuizFeature({
   notify,
   trackEvent,
   variant = "teaser",
-  unlocked = false,
   quizSlug = "juzhang-thinking",
 }: Props) {
   const [open, setOpen] = useState(false);
@@ -215,7 +213,9 @@ export default function QuizFeature({
     const query = new URLSearchParams(window.location.search);
     const queryChallenge = String(query.get("challenge") ?? "").slice(0, 80);
     const queryQuiz = String(query.get("quiz") ?? "").slice(0, 80);
-    if (queryChallenge || queryQuiz) openQuiz(queryChallenge, queryQuiz || quizSlug);
+    if (!queryChallenge && !queryQuiz) return;
+    const timer = window.setTimeout(() => openQuiz(queryChallenge, queryQuiz || quizSlug), 0);
+    return () => window.clearTimeout(timer);
   }, [openQuiz, quizSlug]);
 
   const closeQuiz = () => {
@@ -330,22 +330,21 @@ export default function QuizFeature({
     <>
       {variant === "tool" ? <button
         type="button"
-        className={`quiz-tool-entry${unlocked ? " unlocked" : ""}`}
-        aria-label={unlocked ? "打开局长思维小测" : "完成今日主线后解锁局长思维小测"}
-        disabled={!unlocked}
+        className="quiz-tool-entry unlocked"
+        aria-label="打开局长思维小测"
         onClick={() => openQuiz()}
       >
         <span className="quiz-tool-icon" aria-hidden="true">局</span>
         <span className="quiz-tool-copy">
           <b>局长思维小测</b>
-          <small>{unlocked ? "今日彩蛋 · 已解锁" : "完成主线后解锁"}</small>
+          <small>趣味测试 · 免费开放</small>
         </span>
         <em aria-hidden="true">›</em>
       </button> : <section className="quiz-teaser-card" aria-label="趣味测试">
         <div>
-          <span>轻松一下 · 可分享</span>
+          <span>轻松测一测 · 可分享</span>
           <h2>测测你有没有“局长”思维？</h2>
-          <p>今日练完再来一把。随机10道题，答完生成段位卡，还能发起同题挑战。</p>
+          <p>独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。</p>
         </div>
         <div className="quiz-teaser-visual" aria-hidden="true">
           <i />

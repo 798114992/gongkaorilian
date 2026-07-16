@@ -781,12 +781,11 @@ img { max-width: 100%; }
 .player-top > button { min-width: 44px; min-height: 44px; border: 0; color: var(--muted); background: transparent; font-size: 9px; }
 .audio-progress { overflow: hidden; height: 3px; margin: 10px 0; border-radius: 999px; background: #e8edf1; }
 .audio-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--orange)); transition: width 0.25s ease; }
-.player-controls { display: grid; grid-template-columns: auto minmax(0,1fr) minmax(0,1.1fr) minmax(0,1fr) auto; align-items: end; gap: 7px; }
+.player-controls { display: grid; grid-template-columns: auto minmax(0,1fr) minmax(0,1fr) auto; align-items: end; gap: 7px; }
 .player-controls > button:not(.player-main) { min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 0 9px; color: var(--muted); background: #f8fafb; font-size: 9px; font-weight: 700; }
 .player-controls > button.active { border-color: #a9c4db; color: var(--blue); background: var(--blue-soft); }
 .player-controls label { display: grid; gap: 2px; color: var(--muted); font-size: 8px; }
 .player-controls select { min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 0 5px; color: var(--ink); background: #f8fafb; font-size: 9px; }
-.player-controls label.voice-select small { overflow: hidden; max-width: 100%; color: #5d6b78; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .player-main { display: grid; width: 44px; height: 44px; place-items: center; border: 0; border-radius: 50%; color: #fff; background: var(--blue); font-size: 12px; font-weight: 900; }
 .audio-floating-player { position: fixed; right: auto; bottom: calc(78px + env(safe-area-inset-bottom)); left: 50%; z-index: 29; display: grid; width: min(calc(100% - 28px), 512px); grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 9px; transform: translateX(-50%); border: 1px solid rgba(188,205,220,.9); border-radius: 19px; padding: 10px 10px 10px 13px; background: rgba(255,255,255,.96); box-shadow: 0 16px 40px rgba(22,45,68,.22); backdrop-filter: blur(18px); }
 .audio-floating-player.playing { border-color: rgba(240,138,75,.44); }
@@ -2055,14 +2054,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .player-controls label,
 .player-controls select,
 .player-controls > button:not(.player-main) { font-size: 11px; }
-.player-controls label.voice-select small {
-  overflow: visible;
-  font-size: 10px;
-  line-height: 1.4;
-  text-overflow: clip;
-  white-space: normal;
-}
-
 .practice-summary-stats > div,
 .practice-summary-stats > span,
 .session-summary-stats > div { font-size: 11px; line-height: 1.4; }
@@ -2195,7 +2186,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .candidate-grid label.wide { grid-column: auto; }
   .event-form-grid label.wide { grid-column: auto; }
   .player-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .player-controls .player-main { width: 100%; border-radius: 12px; grid-column: 1 / -1; }
+  .player-controls .player-main { width: 100%; border-radius: 12px; grid-column: auto; }
   .three-day-report-grid { grid-template-columns: repeat(2, 1fr); }
   .three-day-report-footer { align-items: stretch; flex-direction: column; }
   .three-day-report-footer small { max-width: none; }

@@ -5,7 +5,6 @@ import type { Question } from "./data/content";
 import type { AudioTrack } from "./data/audio";
 
 type Filter = string;
-type VoicePreset = "newsMale" | "newsFemale" | "youngMale" | "youngFemale";
 type PlaybackEngine = "audio" | "speech" | null;
 const AUDIO_CACHE_NAME = "gongkao-audio-v3";
 
@@ -61,34 +60,35 @@ function canCacheOffline(track: AudioTrack) {
   return track.accessLevel === "free" && managedAudioUrl(track.audioUrl);
 }
 
-const voiceOptions: Array<{ id: VoicePreset; label: string; tone: string; pitch: number; rateOffset: number; hints: string[] }> = [
-  { id: "newsMale", label: "新闻男", tone: "稳重播报", pitch: 0.82, rateOffset: -0.04, hints: ["yunyang", "yunxi", "kangkang", "male", "男"] },
-  { id: "newsFemale", label: "新闻女", tone: "清晰播报", pitch: 1.02, rateOffset: -0.02, hints: ["xiaoxiao", "xiaoyi", "huihui", "female", "女"] },
-  { id: "youngMale", label: "青年男", tone: "轻快讲解", pitch: 0.94, rateOffset: 0.03, hints: ["yunxi", "yunyang", "male", "男"] },
-  { id: "youngFemale", label: "青年女", tone: "自然讲解", pitch: 1.14, rateOffset: 0.04, hints: ["xiaoyi", "xiaoxiao", "female", "女"] },
-];
-
-function getVoiceOption(id: VoicePreset) {
-  return voiceOptions.find((option) => option.id === id) ?? voiceOptions[1];
-}
+const NEWS_MALE_VOICE = {
+  id: "newsMale",
+  label: "新闻男声",
+  tone: "稳重磁性播报",
+  pitch: 0.88,
+  rateOffset: -0.03,
+  preferredHints: ["yunyang", "kangkang", "yunxi", "male", "男"],
+  avoidedHints: ["xiaoxiao", "xiaoyi", "huihui", "female", "女"],
+};
 
 function clampSpeechRate(rate: number) {
   return Math.max(0.75, Math.min(1.5, rate));
 }
 
-function resolveSpeechVoice(preset: VoicePreset, voices: SpeechSynthesisVoice[]) {
-  const option = getVoiceOption(preset);
+function pickNewsMaleVoice(voices: SpeechSynthesisVoice[]) {
   const chineseVoices = voices.filter((voice) => /zh|cmn|yue|中文|普通话|mandarin|chinese/i.test(`${voice.lang} ${voice.name}`));
   const candidates = chineseVoices.length ? chineseVoices : voices;
-  const matchedVoice = candidates.find((voice) => {
-    const haystack = `${voice.name} ${voice.lang}`.toLowerCase();
-    return option.hints.some((hint) => haystack.includes(hint.toLowerCase()));
-  });
-  return { voice: matchedVoice ?? candidates[0] ?? null, matchedPreset: Boolean(matchedVoice) };
-}
-
-function pickSpeechVoice(preset: VoicePreset, voices: SpeechSynthesisVoice[]) {
-  return resolveSpeechVoice(preset, voices).voice;
+  const ranked = candidates
+    .map((voice, index) => {
+      const haystack = `${voice.name} ${voice.lang}`.toLowerCase();
+      const preferredIndex = NEWS_MALE_VOICE.preferredHints.findIndex((hint) => haystack.includes(hint.toLowerCase()));
+      const avoided = NEWS_MALE_VOICE.avoidedHints.some((hint) => haystack.includes(hint.toLowerCase()));
+      return {
+        voice,
+        score: (preferredIndex >= 0 ? 100 - preferredIndex * 10 : 0) - (avoided ? 100 : 0) - index / 100,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+  return ranked[0]?.voice ?? null;
 }
 
 function splitForSpeech(text: string) {
@@ -184,8 +184,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const [sleepMinutes, setSleepMinutes] = useState(0);
   const [cachedIds, setCachedIds] = useState<string[]>([]);
   const [speechFallbackIds, setSpeechFallbackIds] = useState<string[]>([]);
-  const [voicePreset, setVoicePreset] = useState<VoicePreset>("newsFemale");
-  const [speechVoices, setSpeechVoices] = useState<SpeechSynthesisVoice[]>([]);
   const online = useSyncExternalStore(subscribeOnlineStatus, readOnlineStatus, readServerOnlineStatus);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const sessionRef = useRef(0);
@@ -201,7 +199,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   const progressRef = useRef(progress);
   const loopRef = useRef(loop);
   const speechFallbackIdsRef = useRef<string[]>([]);
-  const voicePresetRef = useRef<VoicePreset>(voicePreset);
   const speechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const timerRef = useRef<number | null>(null);
 
@@ -276,15 +273,10 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
   }, [loop]);
 
   useEffect(() => {
-    voicePresetRef.current = voicePreset;
-  }, [voicePreset]);
-
-  useEffect(() => {
     if (!("speechSynthesis" in window)) return undefined;
     const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices();
       speechVoicesRef.current = voices;
-      setSpeechVoices(voices);
     };
     loadVoices();
     window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
@@ -441,14 +433,12 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
       const cursor: SpeechCursor = { trackId: track.id, chunks, chunkIndex: index, charIndex: safeCharIndex };
       speechCursorRef.current = cursor;
       const utterance = new SpeechSynthesisUtterance(currentChunk.slice(safeCharIndex));
-      const option = getVoiceOption(voicePresetRef.current);
-      const voice = pickSpeechVoice(
-        voicePresetRef.current,
+      const voice = pickNewsMaleVoice(
         speechVoicesRef.current.length ? speechVoicesRef.current : window.speechSynthesis.getVoices(),
       );
       utterance.lang = "zh-CN";
-      utterance.rate = clampSpeechRate(speedRef.current + option.rateOffset);
-      utterance.pitch = option.pitch;
+      utterance.rate = clampSpeechRate(speedRef.current + NEWS_MALE_VOICE.rateOffset);
+      utterance.pitch = NEWS_MALE_VOICE.pitch;
       if (voice) utterance.voice = voice;
       utterance.onstart = () => {
         if (sessionRef.current === session) setBuffering(false);
@@ -490,7 +480,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
         engine: "speech",
         fallbackFromFixedAudio: Boolean(track.audioUrl),
         speed: speedRef.current,
-        voicePreset: voicePresetRef.current,
+        voicePreset: NEWS_MALE_VOICE.id,
         loop: loopRef.current,
       });
     }
@@ -729,22 +719,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     }
   };
 
-  const changeVoicePreset = (nextPreset: VoicePreset) => {
-    voicePresetRef.current = nextPreset;
-    setVoicePreset(nextPreset);
-    const resolution = resolveSpeechVoice(nextPreset, speechVoicesRef.current);
-    if (!resolution.matchedPreset) notify(`当前设备暂不提供独立“${getVoiceOption(nextPreset).label}”音色，已使用默认中文音色呈现`);
-    if (playing && selectedTrack && engineRef.current === "speech") {
-      if (paused) {
-        sessionRef.current += 1;
-        window.speechSynthesis.cancel();
-        speechNeedsRestartRef.current = true;
-      } else startSpeech(selectedTrack, true);
-      return;
-    }
-    if (selectedTrack?.audioUrl) notify("录制音频保留原声；切换为系统朗读后将使用所选音色");
-  };
-
   const toggleLoop = () => {
     const next = !loop;
     loopRef.current = next;
@@ -817,13 +791,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
 
   const miniPlayerVisible = Boolean(selectedTrack && (playing || paused));
   const playbackStatus = buffering ? "正在缓冲" : playing ? (paused ? "已暂停" : "正在播放") : progress >= 100 ? "播放完成" : "待播放";
-  const currentVoiceOption = getVoiceOption(voicePreset);
-  const currentVoiceResolution = resolveSpeechVoice(voicePreset, speechVoices);
-  const voiceAvailability = currentVoiceResolution.matchedPreset && currentVoiceResolution.voice
-    ? `本机音色：${currentVoiceResolution.voice.name}`
-    : speechVoices.length
-      ? `当前设备暂不提供独立${currentVoiceOption.label}，将使用默认中文音色`
-      : "当前设备未提供独立中文音色，将使用默认语音";
   const selectedUsesSpeech = Boolean(selectedTrack && (playbackEngine === "speech" || !selectedTrack.audioUrl || speechFallbackIds.includes(selectedTrack.id)));
 
   return (
@@ -843,7 +810,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
             {Array.from({ length: 22 }).map((_, index) => <i key={index} style={{ "--bar": `${16 + (index * 13) % 34}px`, animationDelay: `-${index * 37}ms` } as React.CSSProperties} />)}
           </div>
           <button onClick={togglePlayback}>{buffering ? "× 取消加载" : playing && !paused ? "Ⅱ 暂停播放" : paused ? "▶ 继续播放" : "▶ 开始收听"}</button>
-          <small className="audio-voice-tip">{selectedUsesSpeech ? `当前音色：${currentVoiceOption.label} · ${currentVoiceOption.tone}；实际效果取决于当前设备` : "录制音频保留原声；播放受限时将自动切换为系统朗读"}</small>
+          <small className="audio-voice-tip">{selectedUsesSpeech ? `${NEWS_MALE_VOICE.label} · ${NEWS_MALE_VOICE.tone}；实际效果以当前设备支持为准` : "录制音频保留原声；播放受限时将自动切换为新闻男声朗读"}</small>
           {selectedTrack.category === "wrong" && <small className="audio-recall-tip">听到“暂停十秒”时先独立作答，再继续听答案。</small>}
         </section>
       ) : null}
@@ -933,7 +900,6 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
           <div className="player-controls">
             <button className={loop ? "active" : ""} aria-pressed={loop} onClick={toggleLoop}>↻ {loop ? "循环中" : "循环"}</button>
             <label>倍速<select aria-label="播放倍速" value={speed} onChange={(event) => changeSpeed(Number(event.target.value))}><option value={0.75}>0.75×</option><option value={1}>1.0×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></label>
-            <label className="voice-select">音色<select aria-label="朗读音色" value={voicePreset} onChange={(event) => changeVoicePreset(event.target.value as VoicePreset)}>{voiceOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>{voiceAvailability}</small></label>
             <label>定时<select aria-label="定时关闭" value={sleepMinutes} onChange={(event) => setSleepTimer(Number(event.target.value))}><option value={0}>关闭</option><option value={10}>10分钟</option><option value={20}>20分钟</option><option value={30}>30分钟</option><option value={60}>60分钟</option></select></label>
             <button className="player-main" onClick={togglePlayback} aria-label={buffering ? "取消加载" : playing && !paused ? "暂停" : "播放"}>{buffering ? "×" : playing && !paused ? "Ⅱ" : "▶"}</button>
           </div>

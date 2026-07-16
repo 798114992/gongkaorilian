@@ -341,10 +341,13 @@ test("content reports are user-scoped, deduplicated, rate-limited and auditable"
   assert.match(adminContent, /标记已修正/);
 });
 
-test("audio player exposes four voice presets and recoverable playback state", async () => {
+test("audio player uses one news male voice and preserves recoverable playback state", async () => {
   const audio = await readFile(files.audio, "utf8");
-  for (const preset of ["新闻男", "新闻女", "青年男", "青年女"]) assert.match(audio, new RegExp(preset));
-  assert.match(audio, /pickSpeechVoice/);
+  assert.match(audio, /新闻男声/);
+  assert.match(audio, /稳重磁性播报/);
+  assert.match(audio, /pickNewsMaleVoice/);
+  assert.match(audio, /NEWS_MALE_VOICE/);
+  assert.doesNotMatch(audio, /新闻女|青年男|青年女|aria-label="朗读音色"/);
   assert.match(audio, /speechSynthesis\.pause\(\)/);
   assert.match(audio, /speechSynthesis\.resume\(\)/);
   assert.match(audio, /speechSynthesis\.cancel\(\)/);

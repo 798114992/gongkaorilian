@@ -343,11 +343,10 @@ test("the 日练电台 supports dynamic series, protected audio fallback and the
   assert.match(hub, /1\.5/);
   assert.match(hub, /循环中/);
   assert.match(hub, /定时/);
-  assert.match(hub, /新闻男/);
-  assert.match(hub, /新闻女/);
-  assert.match(hub, /青年男/);
-  assert.match(hub, /青年女/);
-  assert.match(hub, /pickSpeechVoice/);
+  assert.match(hub, /新闻男声/);
+  assert.match(hub, /稳重磁性播报/);
+  assert.match(hub, /pickNewsMaleVoice/);
+  assert.doesNotMatch(hub, /新闻女|青年男|青年女|aria-label="朗读音色"/);
   assert.match(hub, /speechFallbackIds/);
   assert.match(hub, /录制音频未能播放，已自动切换为系统朗读/);
   assert.match(hub, /native-audio-control/);

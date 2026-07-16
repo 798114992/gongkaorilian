@@ -50,7 +50,7 @@ const LEGACY_DEVICE_SESSION_PREFIX = "device1";
 let processAnonymousSecret: Uint8Array | null = null;
 let defaultsReady = false;
 let defaultsPromise: Promise<void> | null = null;
-const DEFAULT_SEED_VERSION = "2026-07-15-v2";
+const DEFAULT_SEED_VERSION = "2026-07-15-v3";
 const passiveBootstrapWindows = new Map<string, { startedAt: number; count: number }>();
 const publicWriteWindows = new Map<string, { startedAt: number; count: number }>();
 const PUBLIC_ACTIONS = new Set([
@@ -155,38 +155,38 @@ const DEFAULT_QUIZ_RESULTS = [
     maxScore: 0,
     theme: "neon",
     badgeLabel: "隐藏结果",
-    description: "恭喜你，精准避开了全部正确答案。你不是听不懂，只是每次都坚定地选择了更快乐的答案。办公室暂时装不下你。",
-    shareText: "我精准避开了10道正确答案，这种成绩你很难复制。",
+    description: "恭喜你，精准避开了全部正确答案。你不是听不懂，只是每次都坚定地选择了更快乐的答案。",
+    shareText: "我精准避开了全部正确答案，测出了体制外自由灵魂。",
   },
   {
     key: "staff",
-    title: "科员你肯定稳了",
+    title: "科员段位·稳了",
     minScore: 1,
     maxScore: 4,
     theme: "blue",
-    badgeLabel: "稳住基本盘",
-    description: "已经能听懂一部分要求，剩下的主要依靠会议纪要和热心同事。",
-    shareText: "我先把科员稳住了，你能混到哪一级？",
+    badgeLabel: "1—4题",
+    description: "你已经能听懂大部分要求，剩下的主要靠会议纪要保命。",
+    shareText: "我测出了科员段位·稳了，你能到哪一级？",
   },
   {
     key: "section_chief",
-    title: "科长你肯定稳了",
+    title: "科长段位·有点稳",
     minScore: 5,
     maxScore: 7,
     theme: "orange",
-    badgeLabel: "会听话也会办事",
-    description: "能听懂话，也知道什么时候应该假装没听懂。距离局长思维，只差两道题和一个保温杯。",
-    shareText: "我差一点就局长了，你来试试？",
+    badgeLabel: "5—7题",
+    description: "能接任务、会抓重点，还知道什么时候必须汇报。",
+    shareText: "我测出了科长段位·有点稳，你来试试？",
   },
   {
     key: "director",
-    title: "局长你肯定稳了",
+    title: "局长段位·建议低调",
     minScore: 8,
     maxScore: 10,
     theme: "gold",
-    badgeLabel: "统筹能力暴露",
-    description: "领导刚说完上半句，你已经开始统筹下半年的工作了。建议低调，不要过早暴露统筹能力。",
-    shareText: "我测出了局长思维，你敢用同一套题挑战吗？",
+    badgeLabel: "8—10题",
+    description: "领导刚说上半句，你已经开始安排下半年的工作了。",
+    shareText: "我测出了局长段位·建议低调，你敢用同一套题挑战吗？",
   },
 ];
 const DEFAULT_QUIZ_QUESTIONS = [
@@ -1448,18 +1448,25 @@ async function seedDefaultContentOnce() {
 async function seedDefaultQuizOnce() {
   const db = getD1();
   const marker = await db.prepare("SELECT value FROM configs WHERE key = 'default_quiz_seed_version'").first<{ value: string }>();
-  if (marker) return;
+  if (marker?.value === "2") return;
   const statements: D1PreparedStatement[] = [
-    db.prepare(`INSERT OR IGNORE INTO quiz_tests
+    db.prepare(`INSERT INTO quiz_tests
       (id, slug, title, description, question_count, status, share_title, disclaimer)
       VALUES (?, ?, '测测你有没有“局长”思维？', '随机10道办公室语境判断题，测一测你的体制内语感。', ?, 'published',
-        '我测了测自己的局长思维，你也来试试？', '纯属趣味测试，不构成公务员录用、任职或晋升预测。')`)
+        '我测了测自己的局长思维，你也来试试？', '纯属趣味测试，不构成公务员录用、任职或晋升预测。')
+      ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
+        question_count = excluded.question_count, status = excluded.status, share_title = excluded.share_title,
+        disclaimer = excluded.disclaimer, updated_at = CURRENT_TIMESTAMP`)
       .bind(DEFAULT_QUIZ_ID, DEFAULT_QUIZ_SLUG, DEFAULT_QUIZ_QUESTION_COUNT),
   ];
   DEFAULT_QUIZ_RESULTS.forEach((level, index) => {
-    statements.push(db.prepare(`INSERT OR IGNORE INTO quiz_result_levels
+    statements.push(db.prepare(`INSERT INTO quiz_result_levels
       (id, quiz_id, level_key, title, min_score, max_score, theme, description, share_text, badge_label, sort_order, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+      ON CONFLICT(quiz_id, level_key) DO UPDATE SET title = excluded.title, min_score = excluded.min_score,
+        max_score = excluded.max_score, theme = excluded.theme, description = excluded.description,
+        share_text = excluded.share_text, badge_label = excluded.badge_label, sort_order = excluded.sort_order,
+        status = excluded.status, updated_at = CURRENT_TIMESTAMP`)
       .bind(`${DEFAULT_QUIZ_ID}-${level.key}`, DEFAULT_QUIZ_ID, level.key, level.title,
         level.minScore, level.maxScore, level.theme, level.description, level.shareText, level.badgeLabel, index * 10));
   });
@@ -1470,7 +1477,8 @@ async function seedDefaultQuizOnce() {
       .bind(DEFAULT_QUIZ_ID, question.code, question.stem, JSON.stringify(question.options), question.correctIndex,
         question.explanation, question.category, question.difficulty, index * 10));
   });
-  statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_quiz_seed_version', '1')"));
+  statements.push(db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('default_quiz_seed_version', '2', CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`));
   await db.batch(statements);
 }
 

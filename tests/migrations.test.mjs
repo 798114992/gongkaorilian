@@ -60,13 +60,17 @@ test("all migrations build a fresh database with the current durable schema", ()
     assert.ok(tableColumns(db, table).includes("access_level"), `missing ${table}.access_level`);
 
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "19");
-  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_system_seed_version'").get().value, "2026-07-15-v2");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_system_seed_version'").get().value, "2026-07-15-v3");
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_content_seed_version'").get().value, "1");
-  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_quiz_seed_version'").get().value, "1");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_quiz_seed_version'").get().value, "2");
   assert.equal(db.prepare("SELECT price_cents FROM products WHERE id='gkrl-lifetime-2980'").get().price_cents, 2980);
   assert.equal(db.prepare("SELECT question_count FROM quiz_tests WHERE id='quiz-juzhang-thinking'").get().question_count, 10);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id='quiz-juzhang-thinking' AND status='published' AND review_status='approved'").get().n, 12);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM quiz_result_levels WHERE quiz_id='quiz-juzhang-thinking' AND status='active'").get().n, 4);
+  assert.deepEqual(
+    db.prepare("SELECT title FROM quiz_result_levels WHERE quiz_id='quiz-juzhang-thinking' ORDER BY min_score").all().map((row) => row.title),
+    ["体制外自由灵魂", "科员段位·稳了", "科长段位·有点稳", "局长段位·建议低调"],
+  );
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM question_banks WHERE status='draft'").get().n, 8);
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM question_banks qb WHERE qb.status='published' AND NOT EXISTS (
     SELECT 1 FROM question_bank_items qbi JOIN questions q ON q.id=qbi.question_id

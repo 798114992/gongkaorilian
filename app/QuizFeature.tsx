@@ -84,8 +84,9 @@ async function quizApi<T>(payload: Record<string, unknown>) {
 }
 
 function shareTitleFor(result: QuizResult) {
-  if (result.correctCount === 0) return "我精准避开了全部正确答案，你能复制吗？";
-  if (result.result.key === "director") return `我答对${result.correctCount}题，测出了“局长”思维，你能超过我吗？`;
+  const isDirectorQuiz = result.quiz?.slug === "juzhang-thinking";
+  if (isDirectorQuiz && result.correctCount === 0) return "我精准避开了全部正确答案，你能复制吗？";
+  if (isDirectorQuiz && result.result.key === "director") return `我答对${result.correctCount}题，测出了“局长”思维，你能超过我吗？`;
   return result.result.shareText || `我测出了${result.result.title}，你来试试？`;
 }
 
@@ -97,6 +98,12 @@ function safeChallengeUrl(attemptId: string, slug = "juzhang-thinking") {
 }
 
 function avatarClassFor(result: QuizResult) {
+  if (result.quiz?.slug !== "juzhang-thinking") {
+    if (result.scorePercent >= 80) return "director";
+    if (result.scorePercent >= 50) return "section-chief";
+    if (result.scorePercent > 0) return "staff";
+    return "free-soul";
+  }
   if (result.result.key === "director") return "director";
   if (result.result.key === "section_chief") return "section-chief";
   if (result.result.key === "staff") return "staff";
@@ -105,6 +112,7 @@ function avatarClassFor(result: QuizResult) {
 }
 
 function avatarTitleFor(result: QuizResult) {
+  if (result.quiz?.slug !== "juzhang-thinking") return result.result.badgeLabel || result.result.title;
   const key = avatarClassFor(result);
   if (key === "director") return "低调，统筹感已经藏不住了";
   if (key === "section-chief") return "会听话，也会把事办明白";
@@ -113,6 +121,7 @@ function avatarTitleFor(result: QuizResult) {
 }
 
 function resultTaglineFor(result: QuizResult) {
+  if (result.quiz?.slug !== "juzhang-thinking") return result.result.shareText || result.result.description;
   const key = avatarClassFor(result);
   if (key === "director") return "你不是来答题的，你像是来主持会议的。";
   if (key === "section-chief") return "差一点就开始安排别人写材料了。";
@@ -168,6 +177,7 @@ export default function QuizFeature({
   const currentQuestion = attempt?.questions[currentIndex] ?? null;
   const progressText = attempt ? `${Math.min(currentIndex + 1, attempt.questions.length)}/${attempt.questions.length}` : "10题";
   const answeredCount = useMemo(() => attempt ? Object.keys(attempt.answered ?? {}).length : 0, [attempt]);
+  const isDirectorQuiz = (result?.quiz?.slug ?? meta?.slug ?? activeSlug) === "juzhang-thinking";
 
   const loadMeta = useCallback(async (incomingChallengeId = "", incomingSlug = quizSlug) => {
     setError("");
@@ -371,8 +381,8 @@ export default function QuizFeature({
           {view === "question" && attempt && currentQuestion && <div className="quiz-question-view">
             <div className="quiz-progress-line"><span>{progressText}</span><i style={{ width: `${((currentIndex + 1) / attempt.questions.length) * 100}%` }} /></div>
             <div className="quiz-question-bubble">
-              <b>办公室暗号识别中</b>
-              <span>{answeredCount} 道已锁定，看看你的语感能不能一路稳住</span>
+              <b>{isDirectorQuiz ? "办公室暗号识别中" : "趣味测评进行中"}</b>
+              <span>{answeredCount} 道已锁定，{isDirectorQuiz ? "看看你的语感能不能一路稳住" : "完成全部题目后生成专属结果卡"}</span>
             </div>
             <div className="quiz-question-head">
               <span>{currentQuestion.category}</span>
@@ -414,7 +424,7 @@ export default function QuizFeature({
               <span>{result.result.badgeLabel || "测试结果"}</span>
               <h1>{result.result.title}</h1>
               <p className="quiz-result-tagline">{resultTaglineFor(result)}</p>
-              <div className="quiz-score-ring"><b>{result.scorePercent}%</b><small>局长思维指数</small></div>
+              <div className="quiz-score-ring"><b>{result.scorePercent}%</b><small>{isDirectorQuiz ? "局长思维指数" : "本次测评指数"}</small></div>
               <p>{result.result.description}</p>
               <div className="quiz-result-mini-stats">
                 <div><b>{result.correctCount}/{result.total}</b><span>答对题数</span></div>
@@ -423,7 +433,7 @@ export default function QuizFeature({
               <button className="quiz-card-share-button" onClick={() => void shareResult()}>一键分享结果</button>
               <small className="quiz-share-hint">发给朋友后，对方会进入同一套题的挑战页</small>
               <em>{result.notableChoice}</em>
-              <small>公考日练 · 测测你有没有“局长”思维？</small>
+              <small>公考日练 · {result.quiz?.title ?? meta?.title ?? "今日趣味测评"}</small>
             </div>
             {challenge && <div className="quiz-duel-row">
               <div><span>好友</span><b>{challenge.correctCount}/10</b><small>{challenge.resultTitle}</small></div>

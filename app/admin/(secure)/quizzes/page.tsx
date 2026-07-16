@@ -314,7 +314,7 @@ export default function QuizAdminPage() {
             children: <>
               <Space wrap style={{ marginBottom: 16 }}>
                 {canWrite && <Upload {...uploadProps}><Button icon={<UploadOutlined />} loading={saving}>Excel/CSV导入题目</Button></Upload>}
-                <Typography.Text type="secondary">表头支持：题目编码、题干、A、B、C、正确答案、解析、分类、难度、状态。</Typography.Text>
+                <Typography.Text type="secondary">表头支持：题目编码、题干、A、B、C、正确答案、解析、分类、难度、状态。多个主题请使用不同的题目编码前缀。</Typography.Text>
               </Space>
               <Table
                 rowKey="question_code"

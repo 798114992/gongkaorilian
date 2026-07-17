@@ -26,10 +26,14 @@ type DashboardMetrics = {
   activeUsers7d: number;
   publishedContent: number;
   pendingReview: number;
+  pendingQuestions: number;
   questionBanks: number;
   questions: number;
   redemptions7d: number;
 };
+
+type Funnel7d = { goals: number; banks: number; practiceStarted: number; practiceCompleted: number; paywallViewed: number; redeemed: number };
+type FrameworkConfig = Record<"resource_card" | "campaign_slot" | "paywall_policy", { published: number; pending: number; draft: number }>;
 
 type DashboardNotice = {
   id: string | number;
@@ -55,6 +59,8 @@ type DashboardData = {
   todos: DashboardNotice[];
   anomalies: DashboardNotice[];
   recentActivity: ActivityItem[];
+  funnel7d: Funnel7d;
+  frameworkConfig: FrameworkConfig;
 };
 
 const EMPTY_METRICS: DashboardMetrics = {
@@ -62,6 +68,7 @@ const EMPTY_METRICS: DashboardMetrics = {
   activeUsers7d: 0,
   publishedContent: 0,
   pendingReview: 0,
+  pendingQuestions: 0,
   questionBanks: 0,
   questions: 0,
   redemptions7d: 0,
@@ -111,6 +118,7 @@ function normalizeDashboard(raw: Record<string, unknown>): DashboardData {
       activeUsers7d: number(source.activeUsers7d ?? source.active_users_7d),
       publishedContent: number(source.publishedContent ?? source.published_content),
       pendingReview: number(source.pendingReview ?? source.pending_review),
+      pendingQuestions: number(source.pendingQuestions ?? source.pending_questions),
       questionBanks: number(source.questionBanks ?? source.question_banks),
       questions: number(source.questions),
       redemptions7d: number(source.redemptions7d ?? source.redemptions_7d),
@@ -118,6 +126,12 @@ function normalizeDashboard(raw: Record<string, unknown>): DashboardData {
     todos: normalizeNotices(raw.todos),
     anomalies: normalizeNotices(raw.anomalies),
     recentActivity: normalizeActivities(raw.recentActivity ?? raw.recent_activity),
+    funnel7d: (() => { const value = (raw.funnel7d && typeof raw.funnel7d === "object" ? raw.funnel7d : {}) as Record<string, unknown>; return { goals: number(value.goals), banks: number(value.banks), practiceStarted: number(value.practiceStarted), practiceCompleted: number(value.practiceCompleted), paywallViewed: number(value.paywallViewed), redeemed: number(value.redeemed) }; })(),
+    frameworkConfig: (() => {
+      const value = (raw.frameworkConfig && typeof raw.frameworkConfig === "object" ? raw.frameworkConfig : {}) as Record<string, unknown>;
+      const row = (key: string) => { const item = (value[key] && typeof value[key] === "object" ? value[key] : {}) as Record<string, unknown>; return { published: number(item.published), pending: number(item.pending), draft: number(item.draft) }; };
+      return { resource_card: row("resource_card"), campaign_slot: row("campaign_slot"), paywall_policy: row("paywall_policy") };
+    })(),
   };
 }
 
@@ -143,7 +157,7 @@ function formatActivityTime(value: string) {
 export default function AdminDashboardPage() {
   const { admin, can } = useAdminSession();
   const { message } = App.useApp();
-  const [data, setData] = useState<DashboardData>({ metrics: EMPTY_METRICS, todos: [], anomalies: [], recentActivity: [] });
+  const [data, setData] = useState<DashboardData>({ metrics: EMPTY_METRICS, todos: [], anomalies: [], recentActivity: [], funnel7d: { goals: 0, banks: 0, practiceStarted: 0, practiceCompleted: 0, paywallViewed: 0, redeemed: 0 }, frameworkConfig: { resource_card: { published: 0, pending: 0, draft: 0 }, campaign_slot: { published: 0, pending: 0, draft: 0 }, paywall_policy: { published: 0, pending: 0, draft: 0 } } });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -197,6 +211,13 @@ export default function AdminDashboardPage() {
     can("radar.read") && { label: "更新公考雷达", description: "公告、节点与职位数据", href: "/admin/radar", icon: <RadarChartOutlined /> },
     can("growth.read") && { label: "生成兑换码", description: "配置会员时长与批次", href: "/admin/growth", icon: <GiftOutlined /> },
   ].filter(Boolean) as Array<{ label: string; description: string; href: string; icon: React.ReactNode }>;
+  const funnelStages = [
+    ["完成目标配置", data.funnel7d.goals], ["加入可练题库", data.funnel7d.banks], ["开始首次训练", data.funnel7d.practiceStarted],
+    ["完成至少5题", data.funnel7d.practiceCompleted], ["查看权益", data.funnel7d.paywallViewed], ["兑换激活", data.funnel7d.redeemed],
+  ] as Array<[string, number]>;
+  const configRows = [
+    ["资料入口", "resource_card"], ["营销活动", "campaign_slot"], ["权益策略", "paywall_policy"],
+  ] as Array<[string, keyof FrameworkConfig]>;
 
   return (
     <div className="admin-dashboard">
@@ -229,6 +250,19 @@ export default function AdminDashboardPage() {
             <StatisticCard statistic={{ title: "待审核", value: data.metrics.pendingReview, valueStyle: data.metrics.pendingReview > 0 ? { color: "#d46b08" } : undefined, icon: <AlertOutlined /> }} />
             <StatisticCard statistic={{ title: "真题总量", value: data.metrics.questions, icon: <BookOutlined /> }} />
             <StatisticCard statistic={{ title: "7日兑换", value: data.metrics.redemptions7d, suffix: <small>次</small>, icon: <GiftOutlined /> }} />
+          </div>
+
+          <div className="admin-dashboard-grid primary admin-framework-overview">
+            <ProCard className="admin-work-card" title="关键转化漏斗" extra={<Text type="secondary">近7日去重用户</Text>}>
+              <div className="admin-funnel-row">{funnelStages.map(([label, value], index) => {
+                const previous = index > 0 ? funnelStages[index - 1][1] : value;
+                const rate = previous > 0 ? Math.min(100, Math.round(value / previous * 100)) : 0;
+                return <article key={label}><span>{index + 1}</span><b>{value}</b><small>{label}</small>{index > 0 && <em>{rate}%</em>}</article>;
+              })}</div>
+            </ProCard>
+            <ProCard className="admin-work-card" title="框架配置运行状态" extra={<Link href="/admin/content">进入配置</Link>}>
+              <div className="admin-config-health">{configRows.map(([label, key]) => { const item = data.frameworkConfig[key]; return <article key={key}><div><strong>{label}</strong><small>已发布 {item.published} · 待审核 {item.pending} · 草稿 {item.draft}</small></div><Tag color={item.published ? "success" : "warning"}>{item.published ? "运行中" : "待配置"}</Tag></article>; })}</div>
+            </ProCard>
           </div>
 
           <div className="admin-dashboard-grid primary">

@@ -123,6 +123,8 @@ const EVENT_NAMES = new Set([
   "trial_start",
   "invite_bound",
   "invite_rewarded",
+  "campaign_impression",
+  "campaign_click",
 ]);
 
 const STARTER_BANK_CODE = "starter-gk";
@@ -145,6 +147,9 @@ const CONTENT_TYPES = new Set([
   "job_position",
   "drill_preset",
   "strategy_config",
+  "resource_card",
+  "campaign_slot",
+  "paywall_policy",
 ]);
 const CONTENT_STATUSES = new Set(["draft", "pending_review", "rejected", "scheduled", "published", "archived"]);
 const DEFAULT_STRATEGY = {
@@ -1414,6 +1419,9 @@ async function ensureDefaults() {
       const marker = await getD1().prepare("SELECT value FROM configs WHERE key = 'default_system_seed_version'")
         .first<{ value: string }>();
       if (marker?.value !== DEFAULT_SEED_VERSION) await seedDefaults();
+      // Framework configuration has its own small, versioned seed so adding a
+      // new configurable surface never replays the much larger system seed.
+      await seedDefaultContentOnce();
       defaultsReady = true;
     })().catch((error) => {
       defaultsPromise = null;
@@ -1426,7 +1434,7 @@ async function ensureDefaults() {
 async function seedDefaultContentOnce() {
   const db = getD1();
   const marker = await db.prepare("SELECT value FROM configs WHERE key = 'default_content_seed_version'").first<{ value: string }>();
-  if (marker) return;
+  if (marker?.value === "2") return;
   const presets = [
     { id: "data-analysis", title: "资料分析速算", subtitle: "5—10分钟一组", icon: "📊", color: "blue", subject: "行测", module: "资料分析", subTypes: [], questionCount: 5, minutes: 8, sortOrder: 10, enabled: true },
     { id: "graphic-reasoning", title: "图形推理", subtitle: "高频规律专项训练", icon: "🧩", color: "purple", subject: "行测", module: "判断推理", subTypes: ["图形推理"], questionCount: 5, minutes: 8, sortOrder: 20, enabled: true },
@@ -1457,7 +1465,27 @@ async function seedDefaultContentOnce() {
     (content_type, content_key, title, payload_json, access_level, status, version)
     VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'free', 'published', 1)`)
     .bind(JSON.stringify(DEFAULT_STRATEGY)));
-  statements.push(db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('default_content_seed_version', '1')"));
+  const frameworkContent = [
+    { type: "resource_card", key: "resource-essay-reference", title: "申论真题答案对比", payload: { placement: "primary", eyebrow: "免费开放", summary: "按地区、年份和题型查询同一道申论真题的不同来源参考答案。", meta: "按地区年份筛选｜同题切换来源｜材料与题目对应", actionLabel: "进入答案对比", actionType: "essay_library", actionTarget: "essayLibrary", icon: "对", tone: "blue", sortOrder: 10, enabled: true } },
+    { type: "resource_card", key: "resource-radar", title: "公考雷达", payload: { placement: "support", eyebrow: "报考工具", summary: "集中查询公告、考试节点与职位筛选。", meta: "公告｜节点｜职位", actionLabel: "查看雷达", actionType: "tab", actionTarget: "calendar", icon: "雷", tone: "green", sortOrder: 20, enabled: true } },
+    { type: "campaign_slot", key: "campaign-director-quiz", title: "测测你有没有“局长”思维？", payload: { slot: "today_after_alerts", eyebrow: "轻松测一测 · 可分享", summary: "独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。", actionLabel: "开始测试", actionType: "quiz", actionTarget: "director-thinking", audience: "all", priority: 100, maxPerDay: 1, cooldownHours: 24, hideAfterCompleteDays: 30, tone: "orange", enabled: true } },
+    ...[
+      ["free-daily-limit", "free_daily_limit_hit", "daily_limit", "继续完成今日训练"],
+      ["second-bank", "second_bank_attempt", "second_bank", "扩展多考试备考组合"],
+      ["essay-practice", "essay_practice_attempt", "essay", "继续申论真题微练"],
+      ["radar-save", "radar_position_save_attempt", "radar", "使用完整职位筛选与收藏"],
+      ["radar-compare", "radar_position_compare_attempt", "radar", "使用完整职位横向对比"],
+      ["manual-benefits", "manual_benefits_open", "value_loop", "查看公考日练完整权益"],
+    ].map(([key, triggerEvent, reason, title]) => ({ type: "paywall_policy", key: `paywall-${key}`, title, payload: { triggerEvent, reason, eyebrow: "公考日练会员", detail: "当前学习记录和操作进度均会保留，激活权益后可从原位置继续。", audience: "non_member", priority: 100, maxPerDay: 1, cooldownHours: triggerEvent === "manual_benefits_open" ? 0 : 24, enabled: true } })),
+  ];
+  for (const item of frameworkContent) {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO content_items
+      (content_type, content_key, title, payload_json, access_level, status, version)
+      VALUES (?, ?, ?, ?, 'free', 'published', 1)`)
+      .bind(item.type, item.key, item.title, JSON.stringify(item.payload)));
+  }
+  statements.push(db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('default_content_seed_version', '2', CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`));
   await db.batch(statements);
 }
 
@@ -2547,6 +2575,9 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
   const currentAffairsContent: Array<Record<string, unknown>> = [];
   const essayMicros: Array<Record<string, unknown>> = [];
   const drillPresets: Array<Record<string, unknown>> = [];
+  const resourceCards: Array<Record<string, unknown>> = [];
+  const campaignSlots: Array<Record<string, unknown>> = [];
+  const paywallPolicies: Array<Record<string, unknown>> = [];
   let strategyConfig: Record<string, unknown> = clone(DEFAULT_STRATEGY);
   const activeTargetCodes = new Set(profile?.targets.map((target) => target.code) ?? []);
   const matchesTargets = (item: Record<string, unknown>) => {
@@ -2586,6 +2617,73 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
       if (row.content_type === "current_affairs" && matchesTargets(envelope)) currentAffairsContent.push(envelope);
       if (row.content_type === "essay_micro" && matchesTargets(envelope)) essayMicros.push(envelope);
       if (row.content_type === "drill_preset" && envelope.enabled !== false && matchesTargets(envelope)) drillPresets.push(envelope);
+      if (row.content_type === "resource_card" && envelope.enabled !== false && matchesTargets(envelope)) {
+        const actionType = new Set(["tab", "essay_library", "quiz", "paywall"]).has(trimmed(envelope.actionType, 24))
+          ? trimmed(envelope.actionType, 24) : "tab";
+        const actionTarget = actionType === "tab" && new Set(["today", "banks", "resources", "audio", "review", "report", "calendar", "me"]).has(trimmed(envelope.actionTarget, 40))
+          ? trimmed(envelope.actionTarget, 40)
+          : actionType === "essay_library" ? "essayLibrary"
+            : actionType === "quiz" ? "director-thinking"
+              : actionType === "paywall" && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop"]).has(trimmed(envelope.actionTarget, 40))
+                ? trimmed(envelope.actionTarget, 40) : "resources";
+        resourceCards.push({
+          id: row.content_key,
+          title: trimmed(envelope.title, 80),
+          eyebrow: trimmed(envelope.eyebrow, 24),
+          summary: trimmed(envelope.summary, 220),
+          meta: trimmed(envelope.meta, 160),
+          actionLabel: trimmed(envelope.actionLabel, 24) || "查看资料",
+          actionType,
+          actionTarget,
+          icon: trimmed(envelope.icon, 2) || "资",
+          tone: new Set(["blue", "green", "orange", "purple"]).has(trimmed(envelope.tone, 16)) ? trimmed(envelope.tone, 16) : "blue",
+          placement: trimmed(envelope.placement, 30) === "primary" ? "primary" : "support",
+          sortOrder: Math.max(0, Math.min(9999, Math.floor(Number(envelope.sortOrder ?? 100)))),
+          accessLevel: row.access_level,
+        });
+      }
+      if (row.content_type === "campaign_slot" && envelope.enabled !== false && matchesTargets(envelope)) {
+        const slot = new Set(["today_after_alerts", "resources_after_primary", "me_benefits"]).has(trimmed(envelope.slot, 40))
+          ? trimmed(envelope.slot, 40) : "today_after_alerts";
+        const actionType = new Set(["quiz", "tab", "paywall"]).has(trimmed(envelope.actionType, 24))
+          ? trimmed(envelope.actionType, 24) : "quiz";
+        campaignSlots.push({
+          id: row.content_key,
+          slot,
+          title: trimmed(envelope.title, 80),
+          eyebrow: trimmed(envelope.eyebrow, 24),
+          summary: trimmed(envelope.summary, 180),
+          actionLabel: trimmed(envelope.actionLabel, 24) || "立即参与",
+          actionType,
+          actionTarget: trimmed(envelope.actionTarget, 40),
+          audience: new Set(["all", "new_user", "member", "non_member", "multi_exam", "first_practice_done"]).has(trimmed(envelope.audience, 32)) ? trimmed(envelope.audience, 32) : "all",
+          priority: Math.max(0, Math.min(999, Math.floor(Number(envelope.priority ?? 100)))),
+          maxPerDay: Math.max(1, Math.min(10, Math.floor(Number(envelope.maxPerDay ?? 1)))),
+          cooldownHours: Math.max(0, Math.min(720, Math.floor(Number(envelope.cooldownHours ?? 24)))),
+          hideAfterCompleteDays: Math.max(0, Math.min(365, Math.floor(Number(envelope.hideAfterCompleteDays ?? 30)))),
+          endAt: trimmed(envelope.endAt, 40),
+          tone: new Set(["blue", "green", "orange", "purple"]).has(trimmed(envelope.tone, 16)) ? trimmed(envelope.tone, 16) : "orange",
+        });
+      }
+      if (row.content_type === "paywall_policy" && envelope.enabled !== false) {
+        const triggerEvent = trimmed(envelope.triggerEvent, 48);
+        const reason = trimmed(envelope.reason, 24);
+        if (new Set(["free_daily_limit_hit", "second_bank_attempt", "essay_practice_attempt", "radar_position_save_attempt", "radar_position_compare_attempt", "audio_member_attempt", "manual_benefits_open"]).has(triggerEvent)
+          && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop"]).has(reason)) {
+          paywallPolicies.push({
+            id: row.content_key,
+            triggerEvent,
+            reason,
+            eyebrow: trimmed(envelope.eyebrow, 32),
+            title: trimmed(envelope.title, 90),
+            detail: trimmed(envelope.detail, 260),
+            priority: Math.max(0, Math.min(999, Math.floor(Number(envelope.priority ?? 100)))),
+            cooldownHours: Math.max(0, Math.min(720, Math.floor(Number(envelope.cooldownHours ?? 24)))),
+            maxPerDay: Math.max(1, Math.min(10, Math.floor(Number(envelope.maxPerDay ?? 1)))),
+            audience: new Set(["all", "member", "non_member", "new_user"]).has(trimmed(envelope.audience, 24)) ? trimmed(envelope.audience, 24) : "non_member",
+          });
+        }
+      }
       if (row.content_type === "strategy_config") {
         const incoming = parsed as Record<string, unknown>;
         strategyConfig = mergeStrategyConfig(strategyConfig, incoming);
@@ -2777,6 +2875,9 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
     essayMicros: [],
     drillPresets: drillPresets.sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0)),
     strategyConfig,
+    resourceCards: resourceCards.sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0)),
+    campaignSlots: campaignSlots.sort((a, b) => Number(b.priority ?? 0) - Number(a.priority ?? 0)),
+    paywallPolicies: paywallPolicies.sort((a, b) => Number(b.priority ?? 0) - Number(a.priority ?? 0)),
   };
   if (membershipActive) return { ...common, access: "premium" as const };
 
@@ -2954,6 +3055,7 @@ async function bootstrap(request: Request) {
       },
       wrongAudioQuestions: [],
       dueEssayRewrites: [],
+      firstCompletedPractice: null,
       todayKey: chinaDateKey(),
       ledger: [],
       inviteStats: { total: 0, rewarded: 0, pending: 0 },
@@ -3022,10 +3124,23 @@ async function bootstrap(request: Request) {
     loadDueEssayRewrites(identity.userId),
     db.prepare("SELECT date_key FROM daily_checkins WHERE user_id = ? ORDER BY date_key")
       .bind(identity.userId).all<{ date_key: string }>(),
-    db.prepare(`SELECT 1 AS completed FROM practice_sessions
-      WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
-        AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
-      LIMIT 1`).bind(identity.userId, todayKey).first<{ completed: number }>(),
+    db.prepare(`SELECT
+      EXISTS(SELECT 1 FROM practice_sessions today_session
+        WHERE today_session.user_id = ? AND today_session.date_key = ? AND today_session.kind = 'daily' AND today_session.mode = 'mixed'
+          AND today_session.status = 'completed' AND today_session.target_count >= 5
+          AND today_session.answered_count >= today_session.target_count) AS completed,
+      (SELECT first_session.id FROM practice_sessions first_session
+        WHERE first_session.user_id = ? AND first_session.kind IN ('daily','diagnostic')
+          AND first_session.status = 'completed' AND first_session.target_count >= 5
+          AND first_session.answered_count >= first_session.target_count
+        ORDER BY COALESCE(first_session.completed_at, first_session.created_at) ASC LIMIT 1) AS first_session_id,
+      (SELECT first_session.kind FROM practice_sessions first_session
+        WHERE first_session.user_id = ? AND first_session.kind IN ('daily','diagnostic')
+          AND first_session.status = 'completed' AND first_session.target_count >= 5
+          AND first_session.answered_count >= first_session.target_count
+        ORDER BY COALESCE(first_session.completed_at, first_session.created_at) ASC LIMIT 1) AS first_session_kind`)
+      .bind(identity.userId, todayKey, identity.userId, identity.userId)
+      .first<{ completed: number; first_session_id: string | null; first_session_kind: string | null }>(),
     contentPromise,
     dailyReadinessPromise,
   ]);
@@ -3054,6 +3169,10 @@ async function bootstrap(request: Request) {
     questionBanks,
     dailyReadiness,
     dailyPracticeCompleted: Boolean(dailyPractice?.completed),
+    firstCompletedPractice: dailyPractice?.first_session_id ? {
+      sessionId: String(dailyPractice.first_session_id),
+      kind: dailyPractice.first_session_kind === "daily" ? "daily" : "diagnostic",
+    } : null,
     studyInsights,
     wrongAudioQuestions,
     dueEssayRewrites,
@@ -4639,8 +4758,9 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
   const sessionId = trimmed(payload.practiceSessionId, 80);
   if (!sessionId) return json({ error: "训练记录不能为空" }, 400);
   const db = getD1();
-  const session = await db.prepare("SELECT id, date_key, kind, mode FROM practice_sessions WHERE id = ? AND user_id = ?")
-    .bind(sessionId, userId).first<{ id: string; date_key: string; kind: string; mode: string }>();
+  const session = await db.prepare(`SELECT id, date_key, kind, mode, answered_count, correct_count,
+    review_added, elapsed_seconds, bank_codes_json FROM practice_sessions WHERE id = ? AND user_id = ?`)
+    .bind(sessionId, userId).first<{ id: string; date_key: string; kind: string; mode: string; answered_count: number; correct_count: number; review_added: number; elapsed_seconds: number; bank_codes_json: string }>();
   if (!session) return json({ error: "未找到本次训练记录" }, 404);
   const wholeDaily = session.kind === "daily" && session.mode === "mixed";
   const attemptScope = wholeDaily
@@ -4690,6 +4810,14 @@ async function getPracticeSessionSummary(userId: string, payload: Record<string,
       .bind(...scopeBindings).all<{ knowledge_point: string; total: number; correct: number; wrong: number; uncertain: number; repaired_due: number }>(),
   ]);
   return json({
+    sessionId: session.id,
+    kind: session.kind,
+    mode: session.mode,
+    answered: Number(session.answered_count ?? stats?.total ?? 0),
+    correct: Number(session.correct_count ?? stats?.correct ?? 0),
+    reviewAdded: Number(session.review_added ?? 0),
+    elapsedSeconds: Number(session.elapsed_seconds ?? 0),
+    bankCodes: parseStringArrayJson(session.bank_codes_json).slice(0, 12),
     wrong: Number(stats?.wrong ?? 0),
     hesitant: Number(stats?.hesitant ?? 0),
     guessed: Number(stats?.guessed ?? 0),
@@ -5020,11 +5148,34 @@ function commerceTestMode(request: Request) {
 function safeReturnContext(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const source = value as Record<string, unknown>;
+  const safeStringArray = (input: unknown) => Array.isArray(input) ? input.map((item) => trimmed(item, 100)).filter(Boolean).slice(0, 12) : [];
+  const practice = source.practiceOptions && typeof source.practiceOptions === "object" && !Array.isArray(source.practiceOptions)
+    ? source.practiceOptions as Record<string, unknown> : {};
+  const essay = source.essayOptions && typeof source.essayOptions === "object" && !Array.isArray(source.essayOptions)
+    ? source.essayOptions as Record<string, unknown> : {};
   return {
     reason: trimmed(source.reason, 40),
     tab: trimmed(source.tab, 20),
     bankCode: trimmed(source.bankCode, 80),
     sessionKind: trimmed(source.sessionKind, 80),
+    resumeAction: new Set(["toggle_bank", "start_practice", "resume_practice", "start_essay", "play_audio", "save_position", "compare_position"]).has(trimmed(source.resumeAction, 40)) ? trimmed(source.resumeAction, 40) : "",
+    positionId: trimmed(source.positionId, 100),
+    trackId: trimmed(source.trackId, 100),
+    mode: trimmed(source.mode, 20),
+    radarMode: trimmed(source.radarMode, 20),
+    paywallEvent: trimmed(source.paywallEvent, 60),
+    policyId: trimmed(source.policyId, 100),
+    bankCodes: safeStringArray(source.bankCodes),
+    practiceOptions: {
+      kind: trimmed(practice.kind, 20), limit: Math.max(0, Math.min(20, Math.floor(Number(practice.limit ?? 0)))),
+      forceNew: practice.forceNew === true, focusModule: trimmed(practice.focusModule, 40),
+      focusSubTypes: safeStringArray(practice.focusSubTypes), strictFocus: practice.strictFocus === true,
+      focusLabel: trimmed(practice.focusLabel, 80),
+    },
+    essayOptions: {
+      bankCodes: safeStringArray(essay.bankCodes), daily: essay.daily !== false, focusModule: trimmed(essay.focusModule, 40),
+      focusSubTypes: safeStringArray(essay.focusSubTypes), questionCode: trimmed(essay.questionCode, 100),
+    },
   };
 }
 
@@ -10366,7 +10517,8 @@ async function adminDashboard(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "dashboard.read")) return adminForbidden("dashboard.read");
   const db = getD1();
   const [users, activeUsers, publishedContent, pendingReview, banks, questionsCount, redemptions7d,
-    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, sourceIncomplete, recent] = await Promise.all([
+    failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, sourceIncomplete, recent,
+    pendingQuestions, funnel7d, frameworkConfig] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status IN ('published','scheduled')").first<{ count: number }>(),
@@ -10374,8 +10526,12 @@ async function adminDashboard(payload: Record<string, unknown>) {
     db.prepare("SELECT COUNT(*) AS count FROM question_banks").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM questions WHERE status = 'active'").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM redemptions WHERE redeemed_at >= datetime('now','-7 days')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('failed','completed_with_errors')").first<{ count: number }>(),
-    db.prepare("SELECT COUNT(*) AS count FROM question_imports WHERE status IN ('uploading','queued','processing','cancelling')").first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT status FROM question_imports WHERE status IN ('failed','completed_with_errors')
+      UNION ALL SELECT status FROM content_imports WHERE status IN ('failed','completed_with_errors'))`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT status FROM question_imports WHERE status IN ('uploading','queued','processing','cancelling')
+      UNION ALL SELECT status FROM content_imports WHERE status IN ('uploading','queued','processing','cancelling'))`).first<{ count: number }>(),
     db.prepare(`SELECT COUNT(*) AS count FROM question_banks qb WHERE qb.status = 'published'
       AND NOT ${QUESTION_BANK_CAN_PUBLISH_SQL}`).first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status = 'pending_review' AND submitted_at < datetime('now','-2 days')").first<{ count: number }>(),
@@ -10397,11 +10553,25 @@ async function adminDashboard(payload: Record<string, unknown>) {
       )`).first<{ count: number }>(),
     db.prepare(`SELECT id, username, role, action, resource_type, resource_id, summary, result, created_at
       FROM admin_audit_logs ORDER BY id DESC LIMIT 12`).all(),
+    db.prepare("SELECT COUNT(*) AS count FROM questions WHERE review_status = 'pending'").first<{ count: number }>(),
+    db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN event_name = 'profile_save' THEN user_id END) AS goals,
+      COUNT(DISTINCT CASE WHEN event_name = 'bank_toggle' AND json_extract(event_data,'$.added') = 1 THEN user_id END) AS banks,
+      COUNT(DISTINCT CASE WHEN event_name = 'practice_batch' THEN user_id END) AS practice_started,
+      (SELECT COUNT(DISTINCT user_id) FROM practice_sessions WHERE status = 'completed' AND target_count >= 5
+        AND answered_count >= target_count AND completed_at >= datetime('now','-7 days')) AS practice_completed,
+      COUNT(DISTINCT CASE WHEN event_name = 'paywall_view' THEN user_id END) AS paywall_viewed,
+      COUNT(DISTINCT CASE WHEN event_name = 'redeem_success' THEN user_id END) AS redeemed
+      FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')`).first<Record<string, unknown>>(),
+    db.prepare(`SELECT content_type, status, COUNT(*) AS count FROM content_items
+      WHERE content_type IN ('resource_card','campaign_slot','paywall_policy')
+      GROUP BY content_type, status`).all<{ content_type: string; status: string; count: number }>(),
   ]);
   const number = (value: { count: number } | null) => Number(value?.count ?? 0);
   const todos: Array<Record<string, unknown>> = [];
   const anomalies: Array<Record<string, unknown>> = [];
   if (number(pendingReview)) todos.push({ id: "pending-review", type: "review", title: "待审核内容", description: "内容已提交，等待审核后发布", count: number(pendingReview), href: "/admin/content?status=pending_review", priority: "high" });
+  if (number(pendingQuestions)) todos.push({ id: "pending-questions", type: "question_review", title: "待审核真题", description: "真题通过审核后才能进入用户日练", count: number(pendingQuestions), href: "/admin/question-banks?reviewStatus=pending", priority: "high" });
   if (number(pendingReports)) todos.push({ id: "content-reports", type: "content_report", title: "用户内容报错", description: "核对题目、答案、解析或题源标签", count: number(pendingReports), href: "/admin/content?queue=reports", priority: "high" });
   if (number(sourceIncomplete)) todos.push({ id: "source-incomplete", type: "source", title: "来源/数据版本不完整", description: "发布内容必须补齐权威来源、HTTPS原文和来源日期", count: number(sourceIncomplete), href: "/admin/content", priority: "high" });
   if (number(processingImports)) todos.push({ id: "processing-imports", type: "import", title: "导入任务进行中", description: "题库文件仍在处理", count: number(processingImports), href: "/admin/imports", priority: "medium" });
@@ -10410,13 +10580,28 @@ async function adminDashboard(payload: Record<string, unknown>) {
   if (number(emptyPublishedBanks)) anomalies.push({ id: "empty-banks", type: "question_bank", title: "已发布但不可练题库", description: "题目为空、审核失效、范围冲突或导入状态异常，请立即下架复核", count: number(emptyPublishedBanks), href: "/admin/question-banks", severity: "error" });
   if (number(staleReview)) anomalies.push({ id: "stale-review", type: "review", title: "审核超过48小时", description: "待审核内容已积压", count: number(staleReview), href: "/admin/content?status=pending_review", severity: "warning" });
   if (number(sourceIncomplete)) anomalies.push({ id: "source-gate", type: "source", title: "线上内容来源不完整", description: "已被发布门禁阻断；历史线上内容需补录后再发版", count: number(sourceIncomplete), href: "/admin/content", severity: "error" });
+  const configCounts = Object.fromEntries(["resource_card", "campaign_slot", "paywall_policy"].map((type) => [type, { published: 0, pending: 0, draft: 0 }]));
+  for (const row of frameworkConfig.results) {
+    const entry = configCounts[row.content_type];
+    if (!entry) continue;
+    if (["published", "scheduled"].includes(row.status)) entry.published += Number(row.count);
+    else if (row.status === "pending_review") entry.pending += Number(row.count);
+    else if (["draft", "rejected"].includes(row.status)) entry.draft += Number(row.count);
+  }
+  if (!configCounts.resource_card.published) anomalies.push({ id: "resource-config-empty", type: "framework", title: "资料页没有生效入口", description: "请发布至少一个资料入口，避免用户端出现空资料页", count: 0, href: "/admin/content?type=resource_card", severity: "warning" });
+  if (!configCounts.paywall_policy.published) anomalies.push({ id: "paywall-policy-empty", type: "framework", title: "权益触发策略未生效", description: "权益门禁仍会使用内置安全文案，但无法按事件精细运营", count: 0, href: "/admin/content?type=paywall_policy", severity: "warning" });
   return json({
     metrics: {
       users: number(users), activeUsers7d: number(activeUsers), publishedContent: number(publishedContent),
-      pendingReview: number(pendingReview), pendingContentReports: number(pendingReports), sourceIncomplete: number(sourceIncomplete), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
+      pendingReview: number(pendingReview), pendingQuestions: number(pendingQuestions), pendingContentReports: number(pendingReports), sourceIncomplete: number(sourceIncomplete), questionBanks: number(banks), questions: number(questionsCount), redemptions7d: number(redemptions7d),
     },
-    pendingCount: number(pendingReview) + number(processingImports) + number(scheduledSoon) + number(pendingReports) + number(sourceIncomplete),
-    pendingCounts: { review: number(pendingReview), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports), sources: number(sourceIncomplete) },
+    pendingCount: number(pendingReview) + number(pendingQuestions) + number(processingImports) + number(scheduledSoon) + number(pendingReports) + number(sourceIncomplete),
+    pendingCounts: { review: number(pendingReview), questions: number(pendingQuestions), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports), sources: number(sourceIncomplete) },
+    funnel7d: {
+      goals: Number(funnel7d?.goals ?? 0), banks: Number(funnel7d?.banks ?? 0), practiceStarted: Number(funnel7d?.practice_started ?? 0),
+      practiceCompleted: Number(funnel7d?.practice_completed ?? 0), paywallViewed: Number(funnel7d?.paywall_viewed ?? 0), redeemed: Number(funnel7d?.redeemed ?? 0),
+    },
+    frameworkConfig: configCounts,
     todos,
     anomalies,
     recentActivity: recent.results,

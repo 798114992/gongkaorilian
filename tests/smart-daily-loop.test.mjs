@@ -11,12 +11,14 @@ test("today page prioritizes urgent exam actions and evidence-based point recomm
   ]);
 
   assert.match(app, /criticalReminder/);
-  assert.match(app, /critical-exam-reminder/);
+  assert.match(app, /resolveDailyPrimaryTask/);
+  assert.match(app, /primaryTodayState === "critical_exam"/);
   assert.match(app, /recommendationPoint/);
   assert.match(app, /recommendationEvidence/);
   assert.match(app, /today-gain-disclosure/);
   assert.doesNotMatch(app, />加练一下</);
-  assert.match(app, /<QuizFeature notify=\{notify\} trackEvent=\{trackEvent\} variant="teaser" \/>/);
+  assert.match(app, /entryVisible=\{Boolean\(todayCampaign/);
+  assert.match(app, /campaign_impression/);
   assert.doesNotMatch(app, /unlocked=\{allDailyDone\}/);
 
   assert.match(quiz, /独立趣味测试，不计入日练进度/);

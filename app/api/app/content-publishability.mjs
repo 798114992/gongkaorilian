@@ -107,6 +107,26 @@ export function validatePublishableContent(contentType, content) {
         }
       }
     }
+  } else if (contentType === "resource_card") {
+    requiredText("title", "资料名称");
+    requiredText("summary", "资料说明");
+    requiredText("actionLabel", "操作按钮");
+    if (!["tab", "essay_library", "quiz", "paywall"].includes(text(content.actionType))) issues.push("资料动作类型不受支持");
+  } else if (contentType === "campaign_slot") {
+    requiredText("title", "活动标题");
+    requiredText("summary", "活动说明");
+    requiredText("actionLabel", "活动按钮");
+    if (!["today_after_alerts", "resources_after_primary", "me_benefits"].includes(text(content.slot))) issues.push("营销槽位不受支持");
+    if (!["quiz", "tab", "paywall"].includes(text(content.actionType))) issues.push("活动动作类型不受支持");
+    requiredInteger("maxPerDay", "每日最多展示", 1, 10);
+    requiredInteger("cooldownHours", "关闭冷却小时", 0, 720);
+  } else if (contentType === "paywall_policy") {
+    requiredText("title", "权益提示标题");
+    requiredText("detail", "权益提示说明");
+    if (!["free_daily_limit_hit", "second_bank_attempt", "essay_practice_attempt", "radar_position_save_attempt", "radar_position_compare_attempt", "audio_member_attempt", "manual_benefits_open"].includes(text(content.triggerEvent))) issues.push("付费触发事件不受支持");
+    if (!["daily_limit", "second_bank", "essay", "radar", "value_loop"].includes(text(content.reason))) issues.push("付费原因不受支持");
+    requiredInteger("maxPerDay", "每日最多展示", 1, 10);
+    requiredInteger("cooldownHours", "关闭冷却小时", 0, 720);
   }
   return issues;
 }

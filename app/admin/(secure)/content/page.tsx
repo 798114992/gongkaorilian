@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Button, Card, Col, Empty, Input, List, Modal, Row, Space, Statistic, Tag, Typography } from "antd";
 import AdminContentManager, { type AdminContentItem, type ContentImportItem } from "../../AdminContentManager";
 import { useAdminSession } from "../../AdminShell";
@@ -52,6 +52,17 @@ function reportContext(value: string) {
 }
 
 export default function ContentPage() {
+  const [entryQuery] = useState(() => {
+    if (typeof window === "undefined") return { type: "all", status: "all", queue: "" };
+    const query = new URLSearchParams(window.location.search);
+    const type = query.get("type") ?? "all";
+    const status = query.get("status") ?? "all";
+    return {
+      type: ["morning_read", "current_affairs", "essay_micro", "audio_track", "drill_preset", "strategy_config", "resource_card", "campaign_slot", "paywall_policy"].includes(type) ? type : "all",
+      status: ["draft", "pending_review", "rejected", "scheduled", "published", "archived"].includes(status) ? status : "all",
+      queue: query.get("queue") ?? "",
+    };
+  });
   const { can } = useAdminSession();
   const { data, loading, error, reload } = useAdminDomain<ContentDomain>("adminListContent", initialData);
   const [notice, setNotice] = useState("");
@@ -66,6 +77,12 @@ export default function ContentPage() {
   const summary = data.summary ?? {};
   const statusCount = (status: string) => Number(summary.statusCounts?.find((item) => item.status === status)?.count ?? 0);
   const pendingReports = (data.reports ?? []).filter((item) => item.status === "pending");
+
+  useEffect(() => {
+    if (loading || entryQuery.queue !== "reports") return;
+    const timer = window.setTimeout(() => document.getElementById("content-report-queue")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+    return () => window.clearTimeout(timer);
+  }, [entryQuery.queue, loading]);
 
   const resolveReport = async () => {
     if (!handling || resolutionNote.trim().length < 2) return;
@@ -145,6 +162,8 @@ export default function ContentPage() {
           canReview={canReview}
           canPublish={canPublish}
           canUpload={can("media.upload")}
+          initialType={entryQuery.type as Parameters<typeof AdminContentManager>[0]["initialType"]}
+          initialStatus={entryQuery.status as Parameters<typeof AdminContentManager>[0]["initialStatus"]}
           onReload={reload}
           onMessage={setNotice}
         />

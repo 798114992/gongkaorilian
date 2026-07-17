@@ -2343,10 +2343,44 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .resource-support-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 14px; font-size: 14px; font-weight: 900; }
 .resource-support-card.audio .resource-support-icon { color: #7c5421; background: #fff2d9; }
 .resource-support-card.radar .resource-support-icon { color: #24654f; background: #e4f5ee; }
+.resource-support-card.tone-blue .resource-support-icon { color: #245c92; background: #e8f2fa; }
+.resource-support-card.tone-green .resource-support-icon { color: #24654f; background: #e4f5ee; }
+.resource-support-card.tone-orange .resource-support-icon { color: #9a5729; background: #fff0e3; }
+.resource-support-card.tone-purple .resource-support-icon { color: #76508e; background: #f1e9f7; }
 .resource-support-card div { min-width: 0; }
 .resource-support-card b { display: block; margin: 2px 0 6px; color: #1b3142; font-size: 15px; }
 .resource-support-card p { display: -webkit-box; overflow: hidden; margin: 0; color: #657987; font-size: 11px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .resource-support-card em { grid-column: 2; justify-self: start; color: #27658b; font-size: 11px; font-style: normal; font-weight: 800; }
+
+.configured-campaign-card { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 16px; padding: 17px 18px; border: 1px solid #ead8c4; border-radius: 20px; background: linear-gradient(135deg,#fffaf4,#fff); box-shadow: 0 10px 26px rgba(74,50,31,.06); }
+.configured-campaign-card span { color: #bc642d; font-size: 10px; font-weight: 900; letter-spacing: .08em; }
+.configured-campaign-card h2 { margin: 5px 0; color: var(--navy); font-size: 17px; }
+.configured-campaign-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.configured-campaign-card button { min-height: 42px; border: 0; border-radius: 13px; padding: 0 16px; color: #fff; background: #c86931; font-weight: 800; }
+.configured-campaign-card.tone-blue { border-color: #cbddea; background: linear-gradient(135deg,#f2f8fc,#fff); }
+.configured-campaign-card.tone-blue button { background: #245c92; }
+.configured-campaign-card.tone-green { border-color: #c9e1d7; background: linear-gradient(135deg,#f1faf6,#fff); }
+.configured-campaign-card.tone-green button { background: #2f8067; }
+.configured-campaign-card.tone-purple { border-color: #ded0e8; background: linear-gradient(135deg,#f8f3fb,#fff); }
+.configured-campaign-card.tone-purple button { background: #76508e; }
+
+.admin-framework-overview { margin-bottom: 18px; }
+.admin-funnel-row { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 10px; }
+.admin-funnel-row article { position: relative; min-width: 0; padding: 14px 10px; border: 1px solid #e5edf2; border-radius: 14px; background: #f8fbfd; text-align: center; }
+.admin-funnel-row article > span { display: grid; width: 22px; height: 22px; margin: 0 auto 7px; place-items: center; border-radius: 50%; color: #fff; background: #176b87; font-size: 11px; font-weight: 800; }
+.admin-funnel-row b { display: block; color: #17364b; font-size: 22px; }
+.admin-funnel-row small { display: block; overflow: hidden; margin-top: 3px; color: #6d7f8c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-funnel-row em { position: absolute; top: 8px; right: 8px; color: #9a6a35; font-size: 10px; font-style: normal; }
+.admin-config-health { display: grid; gap: 10px; }
+.admin-config-health article { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 13px; border: 1px solid #e5edf2; border-radius: 13px; }
+.admin-config-health strong,.admin-config-health small { display: block; }
+.admin-config-health small { margin-top: 3px; color: #7b8b96; font-size: 11px; }
+
+@media (max-width: 720px) {
+  .configured-campaign-card { grid-template-columns: 1fr; }
+  .configured-campaign-card button { width: 100%; }
+  .admin-funnel-row { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
 .resource-scope-note { margin: 12px 2px 0; color: #6d808c; font-size: 11px; line-height: 1.65; }
 
 /* 答案对比也保留在题库的申论筛选中，便于原有用户发现。 */

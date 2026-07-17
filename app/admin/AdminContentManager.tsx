@@ -13,6 +13,9 @@ export type AdminContentType =
   | "job_position"
   | "drill_preset"
   | "strategy_config"
+  | "resource_card"
+  | "campaign_slot"
+  | "paywall_policy"
   | "practice_day";
 
 export type AdminContentItem = {
@@ -75,6 +78,8 @@ type Props = {
   canReview?: boolean;
   canPublish?: boolean;
   canUpload?: boolean;
+  initialType?: AdminContentType | "all";
+  initialStatus?: AdminContentItem["status"] | "all";
 };
 
 type PublishMode = "draft" | "review" | "now" | "scheduled";
@@ -123,6 +128,9 @@ const CONTENT_TYPES: Array<{ type: Exclude<AdminContentType, "practice_day">; la
   { type: "job_position", label: "职位数据", short: "单条维护或Excel批量导入", tone: "green" },
   { type: "drill_preset", label: "专项微练", short: "动态配置专项、题量与筛选规则", tone: "purple" },
   { type: "strategy_config", label: "训练策略", short: "时长、题量与选题权重", tone: "blue" },
+  { type: "resource_card", label: "资料入口", short: "配置资料页板块、顺序与动作", tone: "green" },
+  { type: "campaign_slot", label: "营销活动", short: "配置展示位置、人群与频控", tone: "orange" },
+  { type: "paywall_policy", label: "权益策略", short: "按用户事件配置权益提示", tone: "purple" },
 ];
 
 const TYPE_LABEL = Object.fromEntries(CONTENT_TYPES.map((item) => [item.type, item.label])) as Record<AdminContentType, string>;
@@ -146,6 +154,9 @@ const defaultPayload = (type: ContentDraft["contentType"]): Record<string, unkno
   if (type === "exam_event") return { targetCode: "national", targetLabel: "国考", eventType: "报名开始", eventDate: "", reminderDays: 3, sourceUrl: "" };
   if (type === "job_position") return { targetCode: "national", targetLabel: "国考", examName: "", department: "", unit: "", code: "", region: "", recruitCount: 1, education: "本科及以上", degree: "不限", majors: "", freshLimit: "不限", politicalStatus: "不限", household: "不限", grassrootsYears: "不限", gender: "不限", certificates: "不限", remarks: "", phone: "", sourceUrl: "", dataVersion: 1, updatedAt: chinaDateInput() };
   if (type === "drill_preset") return { icon: "练", color: "blue", subject: "行测", module: "资料分析", subType: "", bankCodes: "", questionCount: 5, minutes: 8, targetCodes: "", frequency: "高频", importanceStars: 4, scoreRateMin: 40, scoreRateMax: 80, sort: 10, enabled: true };
+  if (type === "resource_card") return { placement: "support", eyebrow: "资料工具", summary: "", meta: "", icon: "资", tone: "blue", actionLabel: "查看资料", actionType: "tab", actionTarget: "resources", sortOrder: 100, targetCodes: "", enabled: true };
+  if (type === "campaign_slot") return { slot: "today_after_alerts", eyebrow: "轻松一下", summary: "", actionLabel: "立即参与", actionType: "quiz", actionTarget: "director-thinking", audience: "all", priority: 100, maxPerDay: 1, cooldownHours: 24, hideAfterCompleteDays: 30, endAt: "", targetCodes: "", tone: "orange", enabled: true };
+  if (type === "paywall_policy") return { triggerEvent: "manual_benefits_open", reason: "value_loop", eyebrow: "公考日练会员", detail: "", audience: "non_member", priority: 100, maxPerDay: 1, cooldownHours: 24, enabled: true };
   return {
     morning10: 0, practice10: 10, essay10: 0, questions10: 5,
     morning30: 5, practice30: 20, essay30: 5, questions30: 10,
@@ -162,7 +173,7 @@ const emptyDraft = (type: ContentDraft["contentType"] = "morning_read"): Content
   title: "",
   publishMode: "draft",
   publishAt: "",
-  accessLevel: "member",
+  accessLevel: ["resource_card", "campaign_slot", "paywall_policy"].includes(type) ? "free" : "member",
   payload: defaultPayload(type),
 });
 
@@ -288,12 +299,15 @@ export default function AdminContentManager({
   canReview = false,
   canPublish = true,
   canUpload = true,
+  initialType = "all",
+  initialStatus = "all",
 }: Props) {
   const [draft, setDraft] = useState<ContentDraft>(() => emptyDraft(scope === "radar" ? "exam_notice" : "morning_read"));
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingVersion, setEditingVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
-  const [filterType, setFilterType] = useState<"all" | AdminContentType>("all");
+  const [filterType, setFilterType] = useState<"all" | AdminContentType>(initialType);
+  const [filterStatus, setFilterStatus] = useState<"all" | AdminContentItem["status"]>(initialStatus);
   const [search, setSearch] = useState("");
   const [preview, setPreview] = useState<AdminContentItem | ContentDraft | null>(null);
   const [versionItem, setVersionItem] = useState<AdminContentItem | null>(null);
@@ -319,7 +333,7 @@ export default function AdminContentManager({
 
   const scopedTypes = useMemo(() => CONTENT_TYPES.filter((item) => scope === "radar"
     ? ["exam_notice", "exam_event", "job_position"].includes(item.type)
-    : ["morning_read", "current_affairs", "essay_micro", "audio_track", "drill_preset", "strategy_config"].includes(item.type)), [scope]);
+    : ["morning_read", "current_affairs", "essay_micro", "audio_track", "drill_preset", "strategy_config", "resource_card", "campaign_slot", "paywall_policy"].includes(item.type)), [scope]);
   const scopedTypeNames = useMemo(() => new Set(scopedTypes.map((item) => item.type)), [scopedTypes]);
 
   const api = async (payload: Record<string, unknown>) => {
@@ -376,10 +390,11 @@ export default function AdminContentManager({
       if (item.content_type !== "practice_day" && !scopedTypeNames.has(item.content_type)) return false;
       if (item.content_type === "practice_day" && scope === "radar") return false;
       if (filterType !== "all" && item.content_type !== filterType) return false;
+      if (filterStatus !== "all" && item.status !== filterStatus) return false;
       if (!keyword) return true;
       return `${TYPE_LABEL[item.content_type] ?? item.content_type} ${item.content_key} ${item.title}`.toLowerCase().includes(keyword);
     });
-  }, [filterType, items, scope, scopedTypeNames, search]);
+  }, [filterStatus, filterType, items, scope, scopedTypeNames, search]);
 
   const setField = (name: string, value: unknown) => setDraft((current) => ({
     ...current,
@@ -449,6 +464,7 @@ export default function AdminContentManager({
     if (draft.contentType === "exam_event" && !asText(draft.payload.eventDate)) throw new Error("请填写节点日期");
     if (draft.contentType === "exam_notice" && !asText(draft.payload.sourceUrl)) throw new Error("公告必须填写官方来源链接");
     if (draft.contentType === "job_position" && !asText(draft.payload.code)) throw new Error("请填写职位代码");
+    if (["resource_card", "campaign_slot", "paywall_policy"].includes(draft.contentType) && !asText(draft.payload.title || draft.title)) throw new Error("请填写前端展示标题");
   };
 
   const save = async () => {
@@ -958,6 +974,22 @@ export default function AdminContentManager({
       {numberInput("questionCount", "每组题量", 1, 30)}{numberInput("minutes", "预计分钟", 3, 30)}{textInput("targetCodes", "适用考试", "留空表示全部")}{textInput("bankCodes", "限定题库编码", "多个编码用逗号分隔，可留空")}{selectInput("frequency", "最低考频", [["高频", "高频"], ["中频", "中频"], ["低频", "低频"]])}
       {numberInput("importanceStars", "最低重要星级", 1, 5)}{numberInput("scoreRateMin", "最低拿分率%", 0, 100)}{numberInput("scoreRateMax", "最高拿分率%", 0, 100)}{numberInput("sort", "展示顺序", 0, 999)}
     </>;
+    if (draft.contentType === "resource_card") return <>
+      {selectInput("placement", "展示层级", [["primary", "主资料入口"], ["support", "辅助资料入口"]])}{textInput("eyebrow", "栏目角标", "免费开放")}{textInput("icon", "图标文字", "资")}{selectInput("tone", "主题颜色", [["blue", "公考蓝"], ["green", "成长绿"], ["orange", "活力橙"], ["purple", "进阶紫"]])}
+      {selectInput("actionType", "点击动作", [["tab", "打开站内板块"], ["essay_library", "打开申论答案对比"], ["quiz", "打开趣味测试"], ["paywall", "打开权益说明"]])}{textInput("actionTarget", "动作目标", "resources / calendar / radar")}{textInput("actionLabel", "按钮文案", "查看资料")}{numberInput("sortOrder", "展示顺序", 0, 9999)}
+      {textInput("targetCodes", "适用考试", "留空表示全部")}{textArea("summary", "入口说明", "说明用户进入后能获得什么")}{textArea("meta", "辅助信息", "筛选维度、资料范围或使用提示")}
+    </>;
+    if (draft.contentType === "campaign_slot") return <>
+      {selectInput("slot", "展示位置", [["today_after_alerts", "今日页·提醒后"], ["resources_after_primary", "资料页·主入口后"], ["me_benefits", "我的·权益区"]])}{textInput("eyebrow", "活动角标", "轻松一下")}{selectInput("tone", "主题颜色", [["blue", "公考蓝"], ["green", "成长绿"], ["orange", "活力橙"], ["purple", "进阶紫"]])}
+      {selectInput("actionType", "点击动作", [["quiz", "打开趣味测试"], ["tab", "打开站内板块"], ["paywall", "打开权益说明"]])}{textInput("actionTarget", "动作目标", "director-thinking")}{textInput("actionLabel", "按钮文案", "立即参与")}{selectInput("audience", "展示人群", [["all", "全部用户"], ["new_user", "未完成首练"], ["member", "会员"], ["non_member", "非会员"], ["multi_exam", "多考试组合"], ["first_practice_done", "已完成首练"]])}
+      {numberInput("priority", "同槽位优先级", 0, 999)}{numberInput("maxPerDay", "每日最多展示", 1, 10)}{numberInput("cooldownHours", "关闭冷却小时", 0, 720)}{numberInput("hideAfterCompleteDays", "完成后隐藏天数", 0, 365)}{textInput("endAt", "活动结束时间", "可选：2026-12-31T23:59:59+08:00")}{textInput("targetCodes", "适用考试", "留空表示全部")}
+      {textArea("summary", "活动说明", "一句话说明参与价值")}
+    </>;
+    if (draft.contentType === "paywall_policy") return <>
+      {selectInput("triggerEvent", "触发事件", [["free_daily_limit_hit", "免费题量已用完"], ["second_bank_attempt", "添加第二套题库"], ["essay_practice_attempt", "进入会员申论练习"], ["radar_position_save_attempt", "收藏会员职位"], ["radar_position_compare_attempt", "对比会员职位"], ["audio_member_attempt", "播放会员音频"], ["manual_benefits_open", "主动查看权益"]])}
+      {selectInput("reason", "权益类型", [["daily_limit", "日练题量"], ["second_bank", "多题库"], ["essay", "申论练习"], ["radar", "公考雷达"], ["value_loop", "完整会员权益"]])}{textInput("eyebrow", "权益角标", "公考日练会员")}{selectInput("audience", "适用人群", [["non_member", "非会员"], ["new_user", "新用户"], ["all", "全部用户"], ["member", "会员"]])}
+      {numberInput("priority", "策略优先级", 0, 999)}{numberInput("maxPerDay", "每日最多弹出", 1, 10)}{numberInput("cooldownHours", "关闭冷却小时", 0, 720)}{textArea("detail", "权益说明", "说明当前进度会保留，以及激活后可继续的能力")}
+    </>;
     return <>
       {numberInput("questions10", "10分钟题量", 1, 20)}{numberInput("questions30", "30分钟题量", 1, 30)}{numberInput("questions45", "45分钟题量", 1, 40)}{numberInput("questions60", "60分钟题量", 1, 50)}
       {numberInput("morning30", "30分钟·晨读", 0, 30)}{numberInput("practice30", "30分钟·刷题", 0, 30)}{numberInput("essay30", "30分钟·申论", 0, 30)}
@@ -1048,7 +1080,7 @@ export default function AdminContentManager({
 
     <section className="admin-panel table-panel">
       <div className="admin-panel-title"><div><span>内容库</span><h2>全部运营内容</h2><small>支持回填编辑、复制、预览、下架、重发与历史版本回滚。</small></div><button onClick={() => void onReload()}>刷新</button></div>
-      <div className={styles.libraryFilters}><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或内容标识" /><select value={filterType} onChange={(event) => setFilterType(event.target.value as "all" | AdminContentType)}><option value="all">全部类型</option>{scopedTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}{scope === "content" && <option value="practice_day">旧版日练包</option>}</select></div>
+      <div className={styles.libraryFilters}><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题或内容标识" /><select value={filterType} onChange={(event) => setFilterType(event.target.value as "all" | AdminContentType)}><option value="all">全部类型</option>{scopedTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}{scope === "content" && <option value="practice_day">旧版日练包</option>}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value as "all" | AdminContentItem["status"])}><option value="all">全部状态</option><option value="draft">草稿</option><option value="pending_review">待审核</option><option value="rejected">已驳回</option><option value="scheduled">定时发布</option><option value="published">已发布</option><option value="archived">已下线</option></select></div>
       <div className="admin-table-wrap"><table><thead><tr><th>类型</th><th>内容</th><th>权益</th><th>状态</th><th>发布时间</th><th>版本</th><th>操作</th></tr></thead><tbody>{filteredItems.length ? filteredItems.map((item) => {
         const scheduled = item.status === "scheduled";
         const statusLabel = scheduled ? "待发布" : item.status === "pending_review" ? "待审核" : item.status === "rejected" ? "已驳回" : item.status === "published" ? "已发布" : item.status === "archived" ? "已下架" : "草稿";

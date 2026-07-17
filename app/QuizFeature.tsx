@@ -69,6 +69,10 @@ type Props = {
   trackEvent: (eventName: string, eventData?: Record<string, unknown>) => void;
   variant?: "teaser" | "tool";
   quizSlug?: string;
+  teaserConfig?: { eyebrow?: string; title?: string; summary?: string; actionLabel?: string };
+  entryVisible?: boolean;
+  onEntryOpen?: () => void;
+  onComplete?: () => void;
 };
 
 async function quizApi<T>(payload: Record<string, unknown>) {
@@ -158,6 +162,10 @@ export default function QuizFeature({
   trackEvent,
   variant = "teaser",
   quizSlug = "juzhang-thinking",
+  teaserConfig,
+  entryVisible = true,
+  onEntryOpen,
+  onComplete,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"intro" | "question" | "result" | "review">("intro");
@@ -197,7 +205,8 @@ export default function QuizFeature({
     }
   }, [quizSlug, trackEvent]);
 
-  const openQuiz = useCallback((incomingChallengeId = "", incomingSlug = quizSlug) => {
+  const openQuiz = useCallback((incomingChallengeId = "", incomingSlug = quizSlug, fromEntry = true) => {
+    if (fromEntry) onEntryOpen?.();
     setOpen(true);
     setView("intro");
     setAttempt(null);
@@ -207,14 +216,14 @@ export default function QuizFeature({
     setChallengeId(incomingChallengeId);
     setActiveSlug(incomingSlug);
     void loadMeta(incomingChallengeId, incomingSlug);
-  }, [loadMeta, quizSlug]);
+  }, [loadMeta, onEntryOpen, quizSlug]);
 
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const queryChallenge = String(query.get("challenge") ?? "").slice(0, 80);
     const queryQuiz = String(query.get("quiz") ?? "").slice(0, 80);
     if (!queryChallenge && !queryQuiz) return;
-    const timer = window.setTimeout(() => openQuiz(queryChallenge, queryQuiz || quizSlug), 0);
+    const timer = window.setTimeout(() => openQuiz(queryChallenge, queryQuiz || quizSlug, false), 0);
     return () => window.clearTimeout(timer);
   }, [openQuiz, quizSlug]);
 
@@ -273,6 +282,7 @@ export default function QuizFeature({
         setResult(completed);
         setView("result");
         trackEvent("quiz_complete", { correctCount: completed.correctCount, resultKey: completed.result.key });
+        onComplete?.();
       } else {
         setCurrentIndex((value) => value + 1);
         setSelectedIndex(nextAttempt.questions[currentIndex + 1]?.selectedIndex ?? null);
@@ -328,7 +338,7 @@ export default function QuizFeature({
 
   return (
     <>
-      {variant === "tool" ? <button
+      {variant === "tool" ? entryVisible && <button
         type="button"
         className="quiz-tool-entry unlocked"
         aria-label="打开局长思维小测"
@@ -340,19 +350,19 @@ export default function QuizFeature({
           <small>趣味测试 · 免费开放</small>
         </span>
         <em aria-hidden="true">›</em>
-      </button> : <section className="quiz-teaser-card" aria-label="趣味测试">
+      </button> : entryVisible ? <section className="quiz-teaser-card" aria-label="趣味测试">
         <div>
-          <span>轻松测一测 · 可分享</span>
-          <h2>测测你有没有“局长”思维？</h2>
-          <p>独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。</p>
+          <span>{teaserConfig?.eyebrow || "轻松测一测 · 可分享"}</span>
+          <h2>{teaserConfig?.title || "测测你有没有“局长”思维？"}</h2>
+          <p>{teaserConfig?.summary || "独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。"}</p>
         </div>
         <div className="quiz-teaser-visual" aria-hidden="true">
           <i />
           <b>局</b>
           <em />
         </div>
-        <button onClick={() => openQuiz()}>开始测试</button>
-      </section>}
+        <button onClick={() => openQuiz()}>{teaserConfig?.actionLabel || "开始测试"}</button>
+      </section> : null}
 
       {open && <div className="quiz-overlay" role="dialog" aria-modal="true" aria-labelledby="quiz-title">
         <section className={`quiz-panel ${result ? `theme-${result.result.theme}` : ""}`}>

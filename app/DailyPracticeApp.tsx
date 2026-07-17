@@ -11,6 +11,7 @@ import CommercePaywall, { type PaywallReason } from "./CommercePaywall";
 import EssayReferenceLibrary, { type EssayLibraryPaper, type EssayReferencePaper } from "./EssayReferenceLibrary";
 import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
+import { prioritizeTodayItems, resolveCampaignDisplay, resolveDailyPrimaryTask, type DailyPrimaryState } from "./daily-orchestration.mjs";
 
 type Tab = "today" | "banks" | "resources" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "copyright";
 type Module = "morning" | "practice" | "affairs" | "essay" | null;
@@ -87,7 +88,7 @@ function readPaywallLoginIntent(): PaywallLoginIntent | null {
     const parsed = JSON.parse(window.sessionStorage.getItem(PAYWALL_LOGIN_INTENT_KEY) ?? "null") as Partial<PaywallLoginIntent> | null;
     if (!parsed || parsed.version !== 1 || !Number.isFinite(parsed.createdAt)
       || Date.now() - Number(parsed.createdAt) > LOGIN_INTENT_TTL_MS
-      || !["daily_limit", "second_bank", "essay", "value_loop"].includes(String(parsed.reason))
+      || !["daily_limit", "second_bank", "essay", "radar", "value_loop"].includes(String(parsed.reason))
       || !parsed.returnContext || typeof parsed.returnContext !== "object") return null;
     return parsed as PaywallLoginIntent;
   } catch {
@@ -162,6 +163,27 @@ type StrategyConfig = {
   dueShare?: number;
   urgentDays?: number;
   essayRubric?: string[];
+};
+
+type ResourceCard = {
+  id: string; title: string; eyebrow: string; summary: string; meta: string; actionLabel: string;
+  actionType: "tab" | "essay_library" | "quiz" | "paywall"; actionTarget: string;
+  icon: string; tone: "blue" | "green" | "orange" | "purple"; placement: "primary" | "support";
+  sortOrder: number; accessLevel: "free" | "member";
+};
+
+type CampaignSlot = {
+  id: string; slot: "today_after_alerts" | "resources_after_primary" | "me_benefits";
+  title: string; eyebrow: string; summary: string; actionLabel: string;
+  actionType: "quiz" | "tab" | "paywall"; actionTarget: string;
+  audience: "all" | "new_user" | "member" | "non_member" | "multi_exam" | "first_practice_done";
+  priority: number; maxPerDay: number; cooldownHours: number; hideAfterCompleteDays: number; endAt: string;
+  tone: "blue" | "green" | "orange" | "purple";
+};
+
+type PaywallPolicy = {
+  id: string; triggerEvent: string; reason: PaywallReason; eyebrow: string; title: string; detail: string;
+  priority: number; cooldownHours: number; maxPerDay: number; audience: "all" | "member" | "non_member" | "new_user";
 };
 
 type ContentEntry<T = Record<string, unknown>> = {
@@ -325,6 +347,7 @@ type Progress = {
   candidateProfile: CandidateProfile;
   savedPositionIds: string[];
   radarTodoDone: Record<string, boolean>;
+  firstResultSeenSessionId: string;
 };
 
 type ExamTarget = {
@@ -501,6 +524,7 @@ type EssayReferenceLibraryResponse = {
 };
 
 type PracticeSummary = {
+  sessionId?: string;
   kind: PracticeKind;
   mode: PracticeMode;
   answered: number;
@@ -539,6 +563,9 @@ type Bootstrap = {
     essayMicros?: Array<ContentEntry>;
     drillPresets?: Array<ContentEntry<Partial<DrillPreset>>>;
     strategyConfig?: StrategyConfig;
+    resourceCards?: ResourceCard[];
+    campaignSlots?: CampaignSlot[];
+    paywallPolicies?: PaywallPolicy[];
     access: "premium" | "preview";
   };
   progress: Partial<Progress>;
@@ -561,6 +588,7 @@ type Bootstrap = {
     bankName: string;
   }>;
   dailyPracticeCompleted?: boolean;
+  firstCompletedPractice?: { sessionId: string; kind: "diagnostic" | "daily" } | null;
   todayKey: string;
 };
 
@@ -605,6 +633,7 @@ const emptyProgress: Progress = {
   candidateProfile: emptyCandidateProfile,
   savedPositionIds: [],
   radarTodoDone: {},
+  firstResultSeenSessionId: "",
 };
 
 const emptyInsights: StudyInsights = {
@@ -791,6 +820,7 @@ function mergeProgress(input?: Partial<Progress>): Progress {
     candidateProfile: safeCandidateProfile(input?.candidateProfile),
     savedPositionIds: safeStringList(input?.savedPositionIds, 120),
     radarTodoDone: { ...emptyProgress.radarTodoDone, ...(input?.radarTodoDone ?? {}) },
+    firstResultSeenSessionId: typeof input?.firstResultSeenSessionId === "string" ? input.firstResultSeenSessionId.slice(0, 100) : "",
   };
 }
 
@@ -1365,7 +1395,7 @@ export default function DailyPracticeApp() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [redeemCode, setRedeemCode] = useState("");
-  const [paywall, setPaywall] = useState<{ reason: PaywallReason; returnContext: Record<string, unknown> } | null>(null);
+  const [paywall, setPaywall] = useState<{ reason: PaywallReason; returnContext: Record<string, unknown>; policyId?: string; triggerEvent?: string; copy?: { eyebrow?: string; title?: string; detail?: string } } | null>(null);
   const [essayReference, setEssayReference] = useState(false);
   const [hideKeywords, setHideKeywords] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
@@ -1375,6 +1405,7 @@ export default function DailyPracticeApp() {
   const [bonusExpanded, setBonusExpanded] = useState(false);
   const [bonusDrillOffset, setBonusDrillOffset] = useState(0);
   const [todayGainExpanded, setTodayGainExpanded] = useState(false);
+  const [campaignVisibility, setCampaignVisibility] = useState<Record<string, boolean>>({});
   const [bankFilter, setBankFilter] = useState("适合我");
   const [essayLibraryPapers, setEssayLibraryPapers] = useState<EssayLibraryPaper[]>([]);
   const [essayLibraryLoading, setEssayLibraryLoading] = useState(false);
@@ -1445,6 +1476,8 @@ export default function DailyPracticeApp() {
   const inviteBindingRef = useRef("");
   const bootstrapRetryAttemptRef = useRef(0);
   const bootstrapRetryTimerRef = useRef<number | null>(null);
+  const campaignEvaluationRef = useRef<Record<string, string>>({});
+  const campaignVisibilityRef = useRef<Record<string, boolean>>({});
   const loadBootstrapRef = useRef<() => Promise<void>>(async () => undefined);
 
   const practiceDays = bootstrap?.content.practiceDays ?? [];
@@ -1456,6 +1489,10 @@ export default function DailyPracticeApp() {
   const examNotices = bootstrap?.content.examNotices ?? [];
   const strategyConfig = bootstrap?.content.strategyConfig;
   const drillPresets = normalizeDrillPresets(bootstrap?.content.drillPresets);
+  const resourceCards = bootstrap?.content.resourceCards ?? [];
+  const primaryResourceCard = resourceCards.find((card) => card.placement === "primary") ?? null;
+  const supportResourceCards = resourceCards.filter((card) => card.placement === "support");
+  const campaignSlots = bootstrap?.content.campaignSlots ?? [];
   const activeTargetCodes = new Set(profile.targets.map((target) => target.code));
   const relevantNotices = examNotices
     .filter((notice) => !profile.targets.length || activeTargetCodes.has(notice.targetCode))
@@ -1486,6 +1523,21 @@ export default function DailyPracticeApp() {
   const hasEssayContent = activeEssayBanks.some((bank) => (bank.availableEssayCount ?? bank.questionCount) > 0)
     || Boolean(bootstrap?.dueEssayRewrites?.length);
   const primaryTarget = profile.targets[0] ?? null;
+  const campaignAudienceMatches = (campaign: CampaignSlot) => campaign.audience === "all"
+    || (campaign.audience === "new_user" && !bootstrap?.firstCompletedPractice)
+    || (campaign.audience === "member" && Boolean(bootstrap?.user.membershipActive))
+    || (campaign.audience === "non_member" && !bootstrap?.user.membershipActive)
+    || (campaign.audience === "multi_exam" && profile.targets.length > 1)
+    || (campaign.audience === "first_practice_done" && Boolean(bootstrap?.firstCompletedPractice));
+  const todayCampaign = campaignSlots.find((campaign) => campaign.slot === "today_after_alerts"
+    && campaignAudienceMatches(campaign)
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
+  const resourcesCampaign = campaignSlots.find((campaign) => campaign.slot === "resources_after_primary"
+    && campaignAudienceMatches(campaign)
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
+  const meCampaign = campaignSlots.find((campaign) => campaign.slot === "me_benefits"
+    && campaignAudienceMatches(campaign)
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
   const validLearningBanks = activeLearningBanks.filter((bank) => profile.targets.some((target) => bankCanPowerDailyPractice(target, bank)));
   const savedPrimaryBank = validLearningBanks.find((bank) => bank.code === progress.primaryBankCode);
   const primaryBank = savedPrimaryBank
@@ -1730,6 +1782,39 @@ export default function DailyPracticeApp() {
     }
   }, [api]);
 
+  useEffect(() => {
+    const visibleSlots: Array<[CampaignSlot["slot"], CampaignSlot | null]> = [
+      ["today_after_alerts", tab === "today" ? todayCampaign : null],
+      ["resources_after_primary", tab === "resources" ? resourcesCampaign : null],
+      ["me_benefits", tab === "me" ? meCampaign : null],
+    ];
+    for (const [slot, campaign] of visibleSlots) {
+      if (!campaign) {
+        // Clear only the slot signature. The cached decision is intentionally
+        // retained so the same campaign can reappear when its audience becomes
+        // eligible again without being counted as a second impression.
+        campaignEvaluationRef.current[slot] = "";
+        continue;
+      }
+      const visibilityKey = campaign.id;
+      const signature = [campaign.id, campaign.maxPerDay, campaign.cooldownHours, campaign.hideAfterCompleteDays, campaign.endAt, campaign.audience].join(":");
+      if (campaignEvaluationRef.current[slot] === signature) continue;
+      campaignEvaluationRef.current[slot] = signature;
+      if (Object.prototype.hasOwnProperty.call(campaignVisibilityRef.current, visibilityKey)) continue;
+      let visible = true;
+      try {
+        const storageKey = `gongkao-rilian:campaign:${campaign.id}`;
+        const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as { day?: string; dayCount?: number; lastAt?: number; completedAt?: number };
+        const decision = resolveCampaignDisplay(stored, campaign, Date.now(), localChinaDateKey());
+        visible = decision.visible;
+        if (visible) window.localStorage.setItem(storageKey, JSON.stringify(decision.nextRecord));
+      } catch { visible = true; }
+      campaignVisibilityRef.current = { ...campaignVisibilityRef.current, [visibilityKey]: visible };
+      setCampaignVisibility(campaignVisibilityRef.current);
+      if (visible) trackEvent("campaign_impression", { campaignId: campaign.id, slot: campaign.slot, audience: campaign.audience });
+    }
+  }, [meCampaign, resourcesCampaign, tab, todayCampaign, trackEvent]);
+
   const clearEssayPaperLink = useCallback(() => {
     setEssayLibraryInitialPaperId(undefined);
     const url = new URL(window.location.href);
@@ -1950,9 +2035,80 @@ export default function DailyPracticeApp() {
     resume?: () => void | Promise<void>,
     returnContext: Record<string, unknown> = {},
   ) => {
+    const triggerEvent = String(returnContext.paywallEvent ?? ({
+      daily_limit: "free_daily_limit_hit",
+      second_bank: "second_bank_attempt",
+      essay: "essay_practice_attempt",
+      radar: "radar_position_save_attempt",
+      value_loop: "manual_benefits_open",
+    } satisfies Record<PaywallReason, string>)[reason]);
+    const policy = (bootstrap?.content.paywallPolicies ?? []).find((item) => item.triggerEvent === triggerEvent
+      && (item.audience === "all" || item.audience === "non_member" || (item.audience === "new_user" && !bootstrap?.firstCompletedPractice)));
+    let policyWithinFrequency = Boolean(policy);
+    if (policy && typeof window !== "undefined" && triggerEvent !== "manual_benefits_open") {
+      const key = `gongkao-rilian:paywall-policy:${policy.id}`;
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(key) ?? "{}") as { day?: string; count?: number; lastAt?: number };
+        const today = localChinaDateKey();
+        const dayCount = stored.day === today ? Math.max(0, Number(stored.count ?? 0)) : 0;
+        const cooling = Number(stored.lastAt ?? 0) > 0 && Date.now() - Number(stored.lastAt) < policy.cooldownHours * 3_600_000;
+        policyWithinFrequency = dayCount < policy.maxPerDay && !cooling;
+        if (policyWithinFrequency) window.localStorage.setItem(key, JSON.stringify({ day: today, count: dayCount + 1, lastAt: Date.now() }));
+      } catch { /* hard entitlement gates still use their safe built-in copy */ }
+    }
     resumeAfterPaywallRef.current = resume ?? null;
-    setPaywall({ reason, returnContext });
+    setPaywall({
+      reason: policy?.reason ?? reason,
+      returnContext: { ...returnContext, paywallEvent: triggerEvent, policyId: policy?.id ?? "" },
+      policyId: policy?.id,
+      triggerEvent,
+      copy: policy && policyWithinFrequency ? { eyebrow: policy.eyebrow, title: policy.title, detail: policy.detail } : undefined,
+    });
+    trackEvent("paywall_action", { action: "policy_trigger", triggerEvent, policyId: policy?.id ?? "fallback", frequencyCopyApplied: policyWithinFrequency });
+  }, [bootstrap?.content.paywallPolicies, bootstrap?.firstCompletedPractice, trackEvent]);
+
+  const recordCampaignClick = useCallback((campaign: CampaignSlot) => {
+    trackEvent("campaign_click", { campaignId: campaign.id, slot: campaign.slot, actionType: campaign.actionType, actionTarget: campaign.actionTarget });
+  }, [trackEvent]);
+
+  const markCampaignComplete = useCallback((campaign: CampaignSlot) => {
+    try {
+      const key = `gongkao-rilian:campaign:${campaign.id}`;
+      const stored = JSON.parse(window.localStorage.getItem(key) ?? "{}") as Record<string, unknown>;
+      window.localStorage.setItem(key, JSON.stringify({ ...stored, completedAt: Date.now() }));
+    } catch { /* completion still belongs to the quiz attempt on the server */ }
+    campaignVisibilityRef.current = { ...campaignVisibilityRef.current, [campaign.id]: false };
+    setCampaignVisibility(campaignVisibilityRef.current);
   }, []);
+
+  const isCampaignVisible = (campaign: CampaignSlot | null) => Boolean(campaign && campaignVisibility[campaign.id]);
+
+  const runConfiguredAction = useCallback((actionType: ResourceCard["actionType"] | CampaignSlot["actionType"], actionTarget: string, source: string) => {
+    if (actionType === "essay_library") { openEssayReferenceLibrary("resources"); return; }
+    if (actionType === "tab" && ["today", "banks", "resources", "audio", "review", "report", "calendar", "me"].includes(actionTarget)) {
+      trackEvent("module_open", { module: actionTarget, entry: source });
+      setTab(actionTarget as Tab);
+      return;
+    }
+    if (actionType === "paywall") {
+      const reason: PaywallReason = ["daily_limit", "second_bank", "essay", "radar", "value_loop"].includes(actionTarget)
+        ? actionTarget as PaywallReason : "value_loop";
+      openPaywall(reason, undefined, { tab, paywallEvent: reason === "value_loop" ? "manual_benefits_open" : undefined, source });
+      return;
+    }
+    if (actionType === "quiz") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("quiz", actionTarget === "director-thinking" ? "juzhang-thinking" : actionTarget);
+      if (source.startsWith("campaign:")) url.searchParams.set("campaign", source.slice("campaign:".length, 120));
+      window.location.assign(url.toString());
+    }
+  }, [openEssayReferenceLibrary, openPaywall, tab, trackEvent]);
+
+  const activateCampaign = useCallback((campaign: CampaignSlot) => {
+    recordCampaignClick(campaign);
+    if (campaign.actionType !== "quiz") markCampaignComplete(campaign);
+    runConfiguredAction(campaign.actionType, campaign.actionTarget, `campaign:${campaign.id}`);
+  }, [markCampaignComplete, recordCampaignClick, runConfiguredAction]);
 
   const closePaywall = useCallback(() => {
     resumeAfterPaywallRef.current = null;
@@ -1965,7 +2121,7 @@ export default function DailyPracticeApp() {
       return true;
     } catch (error) {
       if (apiErrorCode(error) === "PAYWALL_AUDIO") {
-        openPaywall("value_loop", undefined, { tab: "audio", trackId: track.id, resumeAction: "play_audio" });
+        openPaywall("value_loop", undefined, { tab: "audio", trackId: track.id, resumeAction: "play_audio", paywallEvent: "audio_member_attempt" });
       }
       notify(error instanceof Error ? error.message : "节目暂时无法播放");
       return false;
@@ -2372,9 +2528,9 @@ export default function DailyPracticeApp() {
     notify("报考条件档案已保存，职位匹配会按它重新判断");
   };
 
-  const toggleSavedPosition = async (position: JobPosition) => {
-    if (radarLimited) {
-      openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions", resumeAction: "save_position", positionId: position.id });
+  const toggleSavedPosition = async (position: JobPosition, entitlementConfirmed = false) => {
+    if (radarLimited && !entitlementConfirmed) {
+      openPaywall("radar", () => toggleSavedPosition(position, true), { tab: "calendar", radarMode: "positions", resumeAction: "save_position", positionId: position.id, paywallEvent: "radar_position_save_attempt" });
       return;
     }
     const current = progressRef.current;
@@ -2387,9 +2543,9 @@ export default function DailyPracticeApp() {
     notify(exists ? "已从备选岗位移除" : "已加入备选岗位，报名待办会提醒你核对");
   };
 
-  const toggleComparedPosition = (position: JobPosition) => {
-    if (radarLimited) {
-      openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions", resumeAction: "compare_position", positionId: position.id });
+  const toggleComparedPosition = (position: JobPosition, entitlementConfirmed = false) => {
+    if (radarLimited && !entitlementConfirmed) {
+      openPaywall("radar", () => toggleComparedPosition(position, true), { tab: "calendar", radarMode: "positions", resumeAction: "compare_position", positionId: position.id, paywallEvent: "radar_position_compare_attempt" });
       return;
     }
     setComparePositions((current) => current.some((item) => item.id === position.id)
@@ -2487,6 +2643,7 @@ export default function DailyPracticeApp() {
     setPracticeKind(session.kind);
     setPracticeBankCodes(session.bankCodes);
     setPracticeSummary({
+      sessionId: session.serverSessionId,
       kind: session.kind,
       mode: session.mode,
       answered: session.answered,
@@ -2525,9 +2682,9 @@ export default function DailyPracticeApp() {
       mode = activeSession.mode;
       bankCodes = activeSession.bankCodes;
     }
-    activeSession = !options.forceNew && kind === "daily" && activeSession?.kind === "daily" && activeSession.dateKey === dayKey
-      ? activeSession
-      : null;
+    activeSession = !options.forceNew && activeSession?.dateKey === dayKey
+      && ((kind === "daily" && activeSession.kind === "daily") || (kind === "diagnostic" && activeSession.kind === "diagnostic"))
+      ? activeSession : null;
     if (activeSession && activeSession.cursor >= activeSession.questionIds.length) {
       openPracticeSummary(activeSession);
       const current = progressRef.current;
@@ -2548,7 +2705,7 @@ export default function DailyPracticeApp() {
       }
       const requestedLimit = activeSession?.questionTarget
         ?? options.limit
-        ?? (kind === "diagnostic" ? 10 : kind === "bonus" ? 5 : kind === "review" ? Math.min(dailyPlan.questionCount, Math.max(1, insights.dueCount)) : dailyPlan.questionCount);
+        ?? (kind === "diagnostic" ? 5 : kind === "bonus" ? 5 : kind === "review" ? Math.min(dailyPlan.questionCount, Math.max(1, insights.dueCount)) : dailyPlan.questionCount);
       const clientSessionId = activeSession?.clientSessionId ?? createClientSessionId();
       const serverSessionKind = activeSession?.serverSessionKind
         ?? (kind === "daily" ? "daily" : kind === "diagnostic" ? "diagnostic" : kind === "review" ? `review:${dayKey}` : `${kind}:${clientSessionId}`);
@@ -2903,6 +3060,7 @@ export default function DailyPracticeApp() {
       }
     }
     const summary: PracticeSummary = activeSession ? {
+      sessionId: activeSession.serverSessionId,
       kind: activeSession.kind,
       mode: activeSession.mode,
       answered: activeSession.answered,
@@ -2912,6 +3070,7 @@ export default function DailyPracticeApp() {
       bankCodes: activeSession.bankCodes,
       ...details,
     } : {
+      sessionId: undefined,
       kind: practiceKind,
       mode: practiceMode,
       answered: sessionAnswered,
@@ -3195,7 +3354,10 @@ export default function DailyPracticeApp() {
       const result = await api<{ grantType: "duration" | "lifetime"; days: number | null }>({ action: "redeem", code: redeemCode });
       setRedeemCode("");
       notify(result.grantType === "lifetime" ? "激活成功，已升级为终身会员" : `激活成功，会员时长增加 ${result.days} 天`);
+      const resume = resumeAfterPaywallRef.current;
+      resumeAfterPaywallRef.current = null;
       await loadBootstrap();
+      if (resume) window.setTimeout(() => void resume(), 0);
     } catch (error) { notify(error instanceof Error ? error.message : "兑换失败"); }
     finally { setBusy(false); }
   };
@@ -3225,6 +3387,22 @@ export default function DailyPracticeApp() {
     if (context.resumeAction === "toggle_bank") {
       const bank = bootstrap.questionBanks.find((item) => item.code === String(context.bankCode ?? ""));
       if (bank) resume = () => toggleBank(bank);
+    } else if (context.resumeAction === "save_position") {
+      const positionId = String(context.positionId ?? "").slice(0, 100);
+      if (positionId) resume = async () => {
+        const current = progressRef.current;
+        if (!current.savedPositionIds.includes(positionId)) await persist({ ...current, savedPositionIds: [...current.savedPositionIds, positionId].slice(-120) });
+        notify("已恢复刚才的操作，职位已加入备选");
+      };
+    } else if (context.resumeAction === "compare_position") {
+      const positionId = String(context.positionId ?? "").slice(0, 100);
+      const position = radarPositions.find((item) => item.id === positionId) ?? bootstrap.content.jobPositions.find((item) => item.id === positionId);
+      resume = () => {
+        setRadarMode("positions");
+        setTab("calendar");
+        if (position) toggleComparedPosition(position, true);
+        else notify("权益已同步，请在职位列表中再次点击“加入对比”");
+      };
     } else if (context.resumeAction === "start_practice") {
       const rawOptions = context.practiceOptions && typeof context.practiceOptions === "object" ? context.practiceOptions as Record<string, unknown> : {};
       const options: PracticeStartOptions = {
@@ -3272,33 +3450,89 @@ export default function DailyPracticeApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootstrap?.user.id, bootstrap?.user.signedIn, bootstrap?.user.membershipActive, openPaywall]);
 
-  const dailyActionLabel = activeDailySession
-    ? activeDailySession.cursor >= activeDailySession.questionIds.length
-      ? "查看今日总结"
-      : `继续今日日练 · 还剩${dailyRemaining}题`
-    : dailyConfigurationBlocking
-      ? "先补全可练题库"
-    : dailyCheckinPending
-      ? "同步今日打卡"
-    : nextDailyStep === "morning"
-      ? `开始今日${dailyPlan.minutes}分钟训练`
-      : nextDailyStep === "practice"
-        ? `继续今日训练 · 行测${dailyPlan.questionCount}题`
-        : nextDailyStep === "essay"
-          ? "继续今日训练 · 申论微练"
-          : "今日任务已完成 · 查看明日安排";
+  const firstCompletedPractice = bootstrap.firstCompletedPractice ?? null;
+  const primaryTodayResolution = resolveDailyPrimaryTask({
+    onboarded: profile.onboarded,
+    targetCount: profile.targets.length,
+    dailyReady: !dailyConfigurationBlocking,
+    criticalReminderId: criticalReminder?.id ?? null,
+    activeSessionKind: progress.activePractice && ["daily", "diagnostic"].includes(progress.activePractice.kind)
+      ? progress.activePractice.kind as "daily" | "diagnostic" : null,
+    activeSessionDateKey: progress.activePractice?.dateKey ?? null,
+    todayKey: dayKey,
+    firstCompletedSessionId: firstCompletedPractice?.sessionId ?? null,
+    firstResultSeenSessionId: progress.firstResultSeenSessionId,
+    dailyTasksDone,
+    checkinDone: dailyCheckinDone,
+    dueCount: insights.dueCount,
+    morningEnabled: enabledDailySteps.includes("morning"),
+    morningDone: stepDone.morning,
+    practiceEnabled: enabledDailySteps.includes("practice"),
+    practiceDone: stepDone.practice,
+    essayEnabled: enabledDailySteps.includes("essay"),
+    essayDone: stepDone.essay,
+  });
+  const primaryTodayState = primaryTodayResolution.state as DailyPrimaryState;
+
+  const viewFirstPracticeResult = async () => {
+    if (!firstCompletedPractice?.sessionId) return;
+    setBusy(true);
+    try {
+      const result = await api<PracticeSummary>({ action: "getPracticeSessionSummary", practiceSessionId: firstCompletedPractice.sessionId });
+      setPracticeSummary({
+        ...result,
+        sessionId: result.sessionId || firstCompletedPractice.sessionId,
+        kind: result.kind === "daily" ? "daily" : "diagnostic",
+        mode: result.mode === "review" ? "review" : "mixed",
+        bankCodes: Array.isArray(result.bankCodes) ? result.bankCodes : [],
+        weakModules: Array.isArray(result.weakModules) ? result.weakModules : [],
+        points: Array.isArray(result.points) ? result.points : [],
+      });
+      setActiveModule("practice");
+    } catch (error) { notify(error instanceof Error ? error.message : "首次训练结果暂时无法读取"); }
+    finally { setBusy(false); }
+  };
+
+  const primaryTodayCopy = (() => {
+    switch (primaryTodayState) {
+      case "needs_target": return { eyebrow: "开始使用", title: "先设置你的报考目标", detail: "可同时选择国考和多个省考，系统据此匹配题库、节点与每日训练。", actionLabel: "设置报考目标" };
+      case "needs_bank": return { eyebrow: "备考组合待补全", title: bootstrap.dailyReadiness ? `不重复真题仅${dailyReadinessCount}/${dailyReadinessRequired}道` : "加入一套可参与日练的真题库", detail: "只统计地区、年份匹配且当前可用的已核验真题；跨题库重复题只算1道。", actionLabel: "补全可练题库" };
+      case "critical_exam": return { eyebrow: criticalReminder?.days === 0 ? "今日需处理" : "报考事项临近", title: `${criticalReminder?.targetLabel ?? "报考目标"} · ${criticalReminder?.title ?? "核对报考节点"}`, detail: `${criticalReminder ? shortDate(criticalReminder.eventDate) : ""} · 错过可能影响报考，请优先核对官方来源。`, actionLabel: "立即核对报考事项" };
+      case "resume_session": return { eyebrow: primaryTodayResolution.activeSessionKind === "diagnostic" ? "首次体验未完成" : "训练进度已保存", title: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续完成首次5题体验" : `继续行测日练，还剩${dailyRemaining}题`, detail: "已作答进度保留，继续后不会重复计算已完成题目。", actionLabel: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续首次体验" : "继续今日训练" };
+      case "sync_checkin": return { eyebrow: "任务已完成", title: "同步今日打卡", detail: "学习任务已经完成；云端同步成功后计入连续打卡。", actionLabel: "同步今日打卡" };
+      case "first_practice": return { eyebrow: "首次体验", title: "先完成5道真题，建立学习基线", detail: "约5分钟；完成后根据真实作答生成薄弱点与复习安排。", actionLabel: "开始5题体验" };
+      case "first_result": return { eyebrow: "首次结果已生成", title: "查看首份学习诊断", detail: "查看本轮正确率、薄弱模块和已经纳入复习的题目。", actionLabel: "查看首次诊断" };
+      case "due_review": return { eyebrow: "到期复习优先", title: `${insights.dueCount}道题今日到期`, detail: `先完成到期题，再安排${primaryBank?.name ?? "主攻题库"}的新题训练。`, actionLabel: "开始到期复习" };
+      case "morning": return { eyebrow: `晨读 ${dailyPlan.morningMinutes}分钟`, title: "先完成今日晨读", detail: `阅读《${day.morning.title}》，提取规范表达后继续真题训练。`, actionLabel: `开始今日${dailyPlan.minutes}分钟训练` };
+      case "practice": return { eyebrow: `行测日练 ${dailyPlan.practiceMinutes}分钟`, title: `完成${dailyPlan.questionCount}道真题`, detail: `${primaryBank ? `主攻${primaryBank.name}` : "按已加入题库"} · 到期题优先 · 主攻与兼顾均衡。`, actionLabel: `开始行测日练 · ${dailyPlan.questionCount}题` };
+      case "essay": return { eyebrow: `申论真题 ${dailyPlan.essayMinutes}分钟`, title: "完成今日申论真题微练", detail: "根据材料独立作答，再按采分点与规范表达进行自评。", actionLabel: "开始申论微练" };
+      default: return { eyebrow: "今日已完成", title: "今日学习任务已完成", detail: "作答结果与复习时间已保存，可查看学习报告与明日安排。", actionLabel: "查看学习报告" };
+    }
+  })();
+  const dailyActionLabel = primaryTodayCopy.actionLabel;
+  const primaryActionMeta = primaryTodayState === "needs_target" ? "约1分钟 · 可同时选择多个考试"
+    : primaryTodayState === "needs_bank" ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道 · 补足后自动编排`
+      : primaryTodayState === "critical_exam" ? "报考事项优先于今日学习任务"
+        : primaryTodayState === "first_practice" || (primaryTodayState === "resume_session" && primaryTodayResolution.activeSessionKind === "diagnostic") ? "5道真题 · 约5分钟"
+          : primaryTodayState === "first_result" ? "结果依据实际作答生成"
+            : primaryTodayState === "sync_checkin" ? "学习任务已完成 · 点击重新同步"
+              : primaryTodayState === "complete" ? "查看报告与明日安排"
+                : `预计${dailyPlan.minutes}分钟 · 完成后自动打卡`;
 
   const runDailyAction = () => {
-    if (activeDailySession) return void startPractice("mixed", undefined, { kind: "daily" });
-    if (dailyConfigurationBlocking) {
-      setBankFilter("适合我");
-      setTab("banks");
-      return;
+    if (primaryTodayState === "needs_target") { setProfileDraft(profile); setOnboardingOpen(true); return; }
+    if (primaryTodayState === "needs_bank") { setBankFilter("适合我"); setTab("banks"); return; }
+    if (primaryTodayState === "critical_exam") {
+      if (criticalReminder) { setFocusedEventId(criticalReminder.id); setRadarMode("tasks"); }
+      setTab("calendar"); return;
     }
-    if (dailyCheckinPending) return void syncDailyCheckin();
-    if (nextDailyStep === "morning") return setActiveModule("morning");
-    if (nextDailyStep === "practice") return void startPractice("mixed", undefined, { kind: "daily" });
-    if (nextDailyStep === "essay") return void startEssayPractice({ daily: true });
+    if (primaryTodayState === "resume_session") return void startPractice("mixed", undefined, { kind: primaryTodayResolution.activeSessionKind ?? "daily", limit: primaryTodayResolution.activeSessionKind === "diagnostic" ? 5 : undefined });
+    if (primaryTodayState === "sync_checkin") return void syncDailyCheckin();
+    if (primaryTodayState === "first_practice") return void startPractice("mixed", undefined, { kind: "diagnostic", limit: 5 });
+    if (primaryTodayState === "first_result") return void viewFirstPracticeResult();
+    if (primaryTodayState === "due_review" || primaryTodayState === "practice") return void startPractice("mixed", undefined, { kind: "daily" });
+    if (primaryTodayState === "morning") return setActiveModule("morning");
+    if (primaryTodayState === "essay") return void startEssayPractice({ daily: true });
     setTab("report");
   };
 
@@ -3317,7 +3551,13 @@ export default function DailyPracticeApp() {
       const closeLabel = practiceSummary.kind === "daily"
         ? nextDailyStep === "morning" ? "继续晨读" : nextDailyStep === "essay" ? "继续申论微练" : "完成今日学习"
         : practiceSummary.kind === "review" ? "完成到期复习" : "结束本轮";
-      const closeSummary = () => {
+      const closeSummary = async () => {
+        if (practiceSummary.sessionId && (practiceSummary.sessionId === bootstrap.firstCompletedPractice?.sessionId
+          || (!bootstrap.firstCompletedPractice && practiceSummary.kind === "diagnostic" && practiceSummary.answered >= 5))
+          && progressRef.current.firstResultSeenSessionId !== practiceSummary.sessionId) {
+          const current = progressRef.current;
+          await persist({ ...current, firstResultSeenSessionId: practiceSummary.sessionId });
+        }
         setPracticeSummary(null);
         setActiveModule(null);
         if (practiceSummary.kind === "daily" && nextDailyStep === "morning") return setActiveModule("morning");
@@ -3547,9 +3787,9 @@ export default function DailyPracticeApp() {
     : null;
   const recommendedDrill = recommendedDrillEntry?.drill ?? null;
   const bonusAlternativeCount = recommendationPoint ? insights.weakPoints.length : rankedBonusDrills.length;
-  const needsDiagnostic = insights.total === 0;
+  const needsDiagnostic = !bootstrap?.firstCompletedPractice;
   const bonusRecommendationTitle = needsDiagnostic
-    ? "完成10题能力诊断，建立初始基线"
+    ? "完成5题首次体验，建立初始基线"
     : recommendationPoint
       ? `${recommendationPoint.point}专项强化`
       : recommendedDrill?.title ?? "主攻题库综合强化";
@@ -3569,7 +3809,7 @@ export default function DailyPracticeApp() {
         ? `当前薄弱模块为${weakestModule.module}；暂未匹配对应专项，将优先安排已发布的重点真题。`
         : "根据主攻考试和已发布真题生成一组专项训练。";
   const bonusRecommendationMeta = needsDiagnostic
-    ? "10道真题 · 约10分钟"
+    ? "5道真题 · 约5分钟"
     : recommendationPoint
       ? "5道针对性真题 · 约8分钟"
     : recommendedDrill
@@ -3583,7 +3823,7 @@ export default function DailyPracticeApp() {
   ].filter(Boolean) : [];
   const startRecommendedBonus = () => {
     if (needsDiagnostic) {
-      void startPractice("mixed", undefined, { kind: "diagnostic", limit: 10, forceNew: true });
+      void startPractice("mixed", undefined, { kind: "diagnostic", limit: 5, forceNew: true });
       return;
     }
     if (recommendationPoint) {
@@ -3605,55 +3845,27 @@ export default function DailyPracticeApp() {
     runBonusPractice();
   };
   const tomorrowPlan = insights.tomorrowPlan;
-  const nextStepText = dailyConfigurationBlocking ? "备考组合待补全" : dailyCheckinPending ? "任务已完成，打卡待同步" : nextDailyStep === "morning" ? `晨读 ${dailyPlan.morningMinutes}分钟` : nextDailyStep === "practice" ? `行测日练 ${dailyPlan.practiceMinutes}分钟` : nextDailyStep === "essay" ? `申论真题 ${dailyPlan.essayMinutes}分钟` : "今日已完成";
-  const primaryTaskTitle = dailyConfigurationBlocking
-    ? bootstrap?.dailyReadiness
-      ? `不重复真题仅${dailyReadinessCount}/${dailyReadinessRequired}道，先补足题量`
-      : `先为${bankConfigGaps[0]?.label ?? primaryTarget?.label ?? "报考目标"}加入可练题库`
-    : dailyCheckinPending
-    ? "今日任务已完成，同步最后一步"
-    : allDailyDone
-    ? "今日学习任务已完成"
-    : activeDailySession
-      ? `继续行测日练，还剩${dailyRemaining}题`
-      : nextDailyStep === "morning"
-        ? "先完成晨读，进入学习状态"
-        : nextDailyStep === "practice"
-          ? `行测训练${dailyPlan.questionCount}道`
-          : nextDailyStep === "essay"
-          ? "申论真题微练"
-            : "今日已完成";
-  const primaryTaskDetail = dailyConfigurationBlocking
-    ? bootstrap?.dailyReadiness
-      ? `只统计当前可用且已核验的行测真题；跨题库重复题只算1道，还需${Math.max(0, dailyReadinessRequired - dailyReadinessCount)}道。`
-      : "需同时满足：已加入、地区匹配、年份适用、当前可用且至少有5道不重复真题。配置完成后才会生成今日行测。"
-    : dailyCheckinPending
-    ? "学习任务已完成；云端同步成功后计入连续打卡。"
-    : allDailyDone
-    ? `已完成${doneCount}/${enabledDailySteps.length}项学习任务，明日建议：${tomorrowPlan.taskText}`
-    : nextDailyStep === "morning"
-      ? `读完《${day.morning.title}》，记住3个规范表达。`
-      : nextDailyStep === "practice"
-        ? `${primaryBank ? `主攻${primaryBank.name}` : "按已加入题库"} · 到期复习优先 · 主攻与兼顾均衡。`
-        : nextDailyStep === "essay"
-          ? "根据材料独立作答，再按采分点与标准自评。"
-          : "完成今日全部训练。";
+  const nextStepText = primaryTodayCopy.eyebrow;
+  const primaryTaskTitle = primaryTodayCopy.title;
+  const primaryTaskDetail = primaryTodayCopy.detail;
   const dailyStepItems = [
     ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? [{ key: "morning" as const, icon: "读", title: "晨读", minutes: dailyPlan.morningMinutes, detail: "记住3个规范表达", done: stepDone.morning, action: () => setActiveModule("morning") }] : []),
     ...(!dailyConfigurationBlocking ? [{ key: "practice" as const, icon: "练", title: "行测日练", minutes: dailyPlan.practiceMinutes, detail: activeDailySession ? `进度已保存，还剩${dailyRemaining}题` : `${dailyPlan.questionCount}道 · 到期错题优先`, done: stepDone.practice, action: () => void startPractice("mixed", undefined, { kind: "daily" }) }] : []),
     ...(dailyPlan.essayMinutes > 0 && hasEssayContent ? [{ key: "essay" as const, icon: "写", title: "申论真题", minutes: dailyPlan.essayMinutes, detail: activeEssayBanks.length ? "材料作答 · 采分点自评" : "今日表达练习", done: stepDone.essay, action: () => void startEssayPractice({ daily: true }) }] : []),
   ];
-  const todayAlertItems = [
+  const todayAlertCandidates = [
     ...((bootstrap?.dueEssayRewrites ?? []).slice(0, 1).map((item) => ({
       id: `essay-rewrite:${item.questionCode}`,
+      priority: "review" as const,
       label: "申论重写",
       title: `${item.truthLabel} · ${item.module}`,
       detail: "3天后独立重写已到期，请重新作答以检验掌握情况",
       action: () => void startEssayPractice({ bankCodes: [item.bankCode], daily: false, questionCode: item.questionCode, attemptDateKey: item.originalDateKey }),
     }))),
-    ...(dueReminder && dueReminder !== criticalReminder ? [{ id: "radar", label: "报名提醒", title: `${dueReminder.targetLabel} · ${dueReminder.title}`, detail: dueReminder.days === 0 ? "今天处理" : `还有${dueReminder.days}天 · ${shortDate(dueReminder.eventDate)}`, action: () => setTab("calendar") }] : []),
-    ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", label: "到期复习", title: `${insights.dueCount}道到期题等待复习`, detail: `今日优先完成${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余任务自动顺延`, action: () => setTab("review") }] : []),
-  ].slice(0, 3);
+    ...(dueReminder && dueReminder !== criticalReminder ? [{ id: "radar", priority: "urgent" as const, label: "报名提醒", title: `${dueReminder.targetLabel} · ${dueReminder.title}`, detail: dueReminder.days === 0 ? "今天处理" : `还有${dueReminder.days}天 · ${shortDate(dueReminder.eventDate)}`, action: () => setTab("calendar") }] : []),
+    ...(insights.dueCount > dailyPlan.questionCount ? [{ id: "review-backlog", priority: "review" as const, label: "到期复习", title: `${insights.dueCount}道到期题等待复习`, detail: `今日优先完成${Math.min(insights.dueCount, dailyPlan.questionCount)}道，其余任务自动顺延`, action: () => setTab("review") }] : []),
+  ];
+  const todayAlertItems = prioritizeTodayItems(todayAlertCandidates, primaryTodayState === "due_review" ? "review-backlog" : "", 2);
   const todayInsight = insights.recent.find((item) => item.day === dayKey || item.day.slice(0, 10) === dayKey);
   const todayAnswered = Math.max(todayInsight?.total ?? 0, sessionAnswered, activeDailySession?.answered ?? 0);
   const todayAccuracy = sessionAnswered > 0
@@ -3709,19 +3921,13 @@ export default function DailyPracticeApp() {
               </button>}
             </section>
 
-            {criticalReminder && <button className="critical-exam-reminder" onClick={() => { setFocusedEventId(criticalReminder.id); setRadarMode("tasks"); setTab("calendar"); }}>
-              <span>{criticalReminder.days === 0 ? "今日需处理" : "明日截止"}</span>
-              <div><b>{criticalReminder.targetLabel} · {criticalReminder.title}</b><small>{shortDate(criticalReminder.eventDate)} · 错过可能影响报考，请优先核对官方来源</small></div>
-              <em>立即处理 ›</em>
-            </button>}
-
             <section className={`today-command-card${allDailyDone ? " completed" : ""}`}>
               <div className="today-command-top"><span>{dailyPlan.minutes === 10 ? "10分钟精简计划" : "今日重点任务"}</span><em>{new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "long", day: "numeric", weekday: "short" }).format(new Date())}</em></div>
               <div className="today-command-main">
                 <div><p>{nextStepText}</p><h1>{primaryTaskTitle}</h1><small>{primaryTaskDetail}</small><div className="today-mission-tags"><span>{dailyPlan.questionCount ? `${dailyPlan.questionCount}道真题` : "晨读优先"}</span><span>{validLearningBanks.length ? `${validLearningBanks.length}本题库参与` : "待选题库"}</span><span>{nextExam ? `${nextExam.days}天后考试` : "先建目标"}</span></div></div>
                 <div className="today-progress-orb" style={{ "--progress": `${doneCount * (360 / Math.max(1, enabledDailySteps.length))}deg` } as React.CSSProperties}><strong>{dailyConfigurationBlocking ? "—" : `${doneCount}/${enabledDailySteps.length}`}</strong><span>{dailyConfigurationBlocking ? "待配置" : "完成"}</span></div>
               </div>
-              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{dailyConfigurationBlocking ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道，补足后生成今日训练` : dailyCheckinPending ? "学习任务已完成 · 点击重新同步" : allDailyDone ? "可查看明日安排" : `预计${dailyPlan.minutes}分钟 · 完成后自动打卡`}</span></button>
+              <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{primaryActionMeta}</span></button>
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟计划` : "切换为10分钟精简计划"}</button>}</div>
             </section>
 
@@ -3766,7 +3972,19 @@ export default function DailyPracticeApp() {
               <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className="urgent" onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
             </section>}
 
-            <QuizFeature notify={notify} trackEvent={trackEvent} variant="teaser" />
+            <QuizFeature
+              notify={notify}
+              trackEvent={trackEvent}
+              variant="teaser"
+              entryVisible={Boolean(todayCampaign && todayCampaign.actionType === "quiz" && isCampaignVisible(todayCampaign))}
+              teaserConfig={todayCampaign ? { eyebrow: todayCampaign.eyebrow, title: todayCampaign.title, summary: todayCampaign.summary, actionLabel: todayCampaign.actionLabel } : undefined}
+              onEntryOpen={todayCampaign ? () => recordCampaignClick(todayCampaign) : undefined}
+              onComplete={todayCampaign ? () => markCampaignComplete(todayCampaign) : undefined}
+            />
+            {todayCampaign && todayCampaign.actionType !== "quiz" && isCampaignVisible(todayCampaign) && <section className={`configured-campaign-card tone-${todayCampaign.tone}`}>
+              <div><span>{todayCampaign.eyebrow}</span><h2>{todayCampaign.title}</h2><p>{todayCampaign.summary}</p></div>
+              <button onClick={() => { recordCampaignClick(todayCampaign); runConfiguredAction(todayCampaign.actionType, todayCampaign.actionTarget, `campaign:${todayCampaign.id}`); }}>{todayCampaign.actionLabel}</button>
+            </section>}
 
             <section className={`quick-practice-card smart-bonus-card${allDailyDone ? " ready" : ""}`}>
               <div className="compact-section-heading"><div><span>专项强化（约10分钟）</span><h2>{allDailyDone ? "优先完成系统推荐训练" : "完成今日任务后可进行专项强化"}</h2></div></div>
@@ -3826,28 +4044,27 @@ export default function DailyPracticeApp() {
           {tab === "resources" && <div className="page-content subpage resources-page">
             <div className="subpage-heading resources-heading"><div><span>备考资料</span><h1>高频资料集中查询</h1><p>将需要反复查阅的资料与辅助工具集中在一处，优先解决申论真题答案分散、对照不便的问题。</p></div></div>
 
-            <section className="resource-primary-card" aria-labelledby="essay-comparison-title">
-              <div className="resource-primary-topline"><span>免费开放</span><small>申论核心工具</small></div>
+            {primaryResourceCard ? <section className={`resource-primary-card tone-${primaryResourceCard.tone}`} aria-labelledby={`resource-${primaryResourceCard.id}`}>
+              <div className="resource-primary-topline"><span>{primaryResourceCard.eyebrow || "资料入口"}</span><small>{primaryResourceCard.accessLevel === "free" ? "免费开放" : "会员资料"}</small></div>
               <div className="resource-primary-copy">
-                <div className="resource-primary-icon">对</div>
-                <div><h2 id="essay-comparison-title">申论真题答案对比</h2><p>同一道题，多来源参考答案集中查看。按地区、年份和卷种筛选，减少在多个页面之间反复查找。</p></div>
+                <div className="resource-primary-icon">{primaryResourceCard.icon}</div>
+                <div><h2 id={`resource-${primaryResourceCard.id}`}>{primaryResourceCard.title}</h2><p>{primaryResourceCard.summary}</p></div>
               </div>
-              <div className="resource-feature-list" aria-label="答案对比功能">
-                <span>按地区年份筛选</span><span>同题切换来源</span><span>材料与题目对应</span>
-              </div>
-              <div className="resource-primary-actions"><button type="button" onClick={() => openEssayReferenceLibrary("resources")}>进入答案对比</button><small>第三方参考答案，不属于官方标准答案</small></div>
-            </section>
+              {primaryResourceCard.meta && <div className="resource-feature-list" aria-label="资料功能">{primaryResourceCard.meta.split(/[｜|]/).filter(Boolean).slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div>}
+              <div className="resource-primary-actions"><button type="button" onClick={() => runConfiguredAction(primaryResourceCard.actionType, primaryResourceCard.actionTarget, `resource:${primaryResourceCard.id}`)}>{primaryResourceCard.actionLabel}</button><small>运营后台可调整入口、排序与开放范围</small></div>
+            </section> : <div className="empty-state compact"><span>资</span><h3>资料入口暂未发布</h3><p>管理员发布资料入口后将自动显示在此处。</p></div>}
+
+            {resourcesCampaign && isCampaignVisible(resourcesCampaign) && <section className={`configured-campaign-card tone-${resourcesCampaign.tone}`}>
+              <div><span>{resourcesCampaign.eyebrow}</span><h2>{resourcesCampaign.title}</h2><p>{resourcesCampaign.summary}</p></div>
+              <button onClick={() => { recordCampaignClick(resourcesCampaign); runConfiguredAction(resourcesCampaign.actionType, resourcesCampaign.actionTarget, `campaign:${resourcesCampaign.id}`); }}>{resourcesCampaign.actionLabel}</button>
+            </section>}
 
             <section className="resource-support-section">
               <div className="compact-section-heading"><div><span>辅助工具</span><h2>按实际场景使用</h2></div><small>不列入今日必做</small></div>
-              <div className="resource-support-grid">
-                <button type="button" className="resource-support-card audio" onClick={() => { trackEvent("module_open", { module: "audio", entry: "resources_support" }); setTab("audio"); }}>
-                  <span className="resource-support-icon">听</span><div><b>通勤听练</b><p>仅在走路、通勤等不便看屏幕时使用。</p></div><em>进入</em>
-                </button>
-                <button type="button" className="resource-support-card radar" onClick={() => { trackEvent("module_open", { module: "calendar", entry: "resources_support" }); setTab("calendar"); }}>
-                  <span className="resource-support-icon">报</span><div><b>公考雷达</b><p>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "管理公告、职位表与报名节点"}</p></div><em>{nextCalendarEvent?.days === 0 ? "今日办理" : nextCalendarEvent && nextCalendarEvent.days <= 7 ? `还有${nextCalendarEvent.days}天` : "查看"}</em>
-                </button>
-              </div>
+              <div className="resource-support-grid">{supportResourceCards.map((card) => <button key={card.id} type="button" className={`resource-support-card tone-${card.tone}`} onClick={() => runConfiguredAction(card.actionType, card.actionTarget, `resource:${card.id}`)}>
+                <span className="resource-support-icon">{card.icon}</span><div><b>{card.title}</b><p>{card.summary}</p></div><em>{card.actionLabel}</em>
+              </button>)}</div>
+              {!supportResourceCards.length && <div className="empty-state compact"><span>+</span><h3>暂无辅助资料入口</h3><p>可在后台按实际运营需要新增。</p></div>}
               <p className="resource-scope-note">报名、缴费、准考证打印等临近事项仍会在“今日”主动提醒，无需每天进入公考雷达查询。</p>
             </section>
           </div>}
@@ -4042,6 +4259,7 @@ export default function DailyPracticeApp() {
             <article className="panel-card account-panel synced"><div><span>学习诊断</span><h3>{insights.total ? `已分析 ${insights.total} 道有效作答` : "完成首轮后生成训练建议"}</h3><p>查看正确率、作答用时、掌握状态和下一步训练方向。</p></div><button className="profile-edit" onClick={() => setTab("report")}>查看报告</button></article>
             <article className={bootstrap?.user.signedIn ? "panel-card account-panel synced" : "panel-card account-panel"}><div><span>{bootstrap?.user.signedIn ? "账号同步已开启" : "当前仅保存在本设备"}</span><h3>{bootstrap?.user.signedIn ? "换设备也能继续学习" : "登录后同步学习记录"}</h3><p>{bootstrap?.user.signedIn ? "报考目标、题库、掌握状态和会员时长均已同步。" : "登录时会自动合并当前进度。"}</p></div>{bootstrap?.user.signedIn ? <b>✓ 已同步</b> : <a href={signInHref}>登录并同步</a>}</article>
             <article className={`membership-card${bootstrap?.user.membershipActive ? " active" : ""}`}><div><span>{bootstrap?.user.membershipActive ? "会员有效期" : "公考日练会员"}</span><h3>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : formatDate(bootstrap.user.membershipEnd) : "每天30分钟，聚焦高频考点"}</h3><p>{bootstrap?.user.membershipActive ? "题库、解析、错题复习与完整职位筛选功能已启用。" : "围绕真题、错题复习和报考节点，提供精简训练与提醒。"} </p>{!bootstrap?.user.membershipActive && <div className="membership-benefits"><span>多题库组合</span><span>高频真题微练</span><span>错题记忆复习</span><span>多考试职位筛选</span></div>}</div>{bootstrap?.user.membershipActive ? <b>VIP</b> : <button className="profile-edit" onClick={() => openPaywall("value_loop", undefined, { tab: "me" })}>查看权益</button>}</article>
+            {meCampaign && isCampaignVisible(meCampaign) && <section className={`configured-campaign-card tone-${meCampaign.tone}`}><div><span>{meCampaign.eyebrow}</span><h2>{meCampaign.title}</h2><p>{meCampaign.summary}</p></div><button onClick={() => { recordCampaignClick(meCampaign); runConfiguredAction(meCampaign.actionType, meCampaign.actionTarget, `campaign:${meCampaign.id}`); }}>{meCampaign.actionLabel}</button></section>}
             <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后会直接回到今日页，按你的备考组合生成下一步练习；时长码自动累计，终身码不会被覆盖。</small></article>
             <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证及首次有效日练后，双方会员时长自动发放；仅访问链接或完成注册不计入奖励条件。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
             <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
@@ -4079,6 +4297,9 @@ export default function DailyPracticeApp() {
 
         {paywall && bootstrap && <CommercePaywall
           reason={paywall.reason}
+          copyOverride={paywall.copy}
+          policyId={paywall.policyId}
+          triggerEvent={paywall.triggerEvent}
           signedIn={bootstrap.user.signedIn}
           returnContext={paywall.returnContext}
           value={{
@@ -4096,7 +4317,6 @@ export default function DailyPracticeApp() {
           loginHref={signInHref}
           onLogin={preparePaywallLogin}
           onOpenRedemption={() => {
-            resumeAfterPaywallRef.current = null;
             setPaywall(null);
             setActiveModule(null);
             setTab("me");
@@ -4185,7 +4405,7 @@ export default function DailyPracticeApp() {
             </section>
           </div>
         )}
-        {diagnosticPromptOpen && <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-labelledby="diagnostic-title" aria-describedby="diagnostic-description"><section className="onboarding-card diagnostic-prompt"><div className="onboarding-top"><span>首次能力诊断</span><h2 id="diagnostic-title">完成10道真题，评估当前基础</h2><p id="diagnostic-description">系统将根据答错、掌握不稳定、猜测作答和超时情况生成复习安排，也可稍后完成。</p></div><button className="primary-button full-button" onClick={() => { const bankCode = onboardingBankCode; setDiagnosticPromptOpen(false); void startPractice("mixed", bankCode ? [bankCode] : undefined, { kind: "diagnostic", limit: 10 }); }}>开始能力诊断</button><button className="onboarding-cancel" onClick={() => { setDiagnosticPromptOpen(false); setTab("today"); }}>稍后再做</button></section></div>}
+        {diagnosticPromptOpen && <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-labelledby="diagnostic-title" aria-describedby="diagnostic-description"><section className="onboarding-card diagnostic-prompt"><div className="onboarding-top"><span>首次体验</span><h2 id="diagnostic-title">完成5道真题，建立首份学习记录</h2><p id="diagnostic-description">系统将根据答错、掌握不稳定、猜测作答和超时情况生成后续复习安排，也可稍后从今日页开始。</p></div><button className="primary-button full-button" onClick={() => { const bankCode = onboardingBankCode; setDiagnosticPromptOpen(false); void startPractice("mixed", bankCode ? [bankCode] : undefined, { kind: "diagnostic", limit: 5 }); }}>开始5题体验</button><button className="onboarding-cancel" onClick={() => { setDiagnosticPromptOpen(false); setTab("today"); }}>稍后开始</button></section></div>}
         {toast && <div className="toast" role="status">{toast}</div>}
       </div>
     </main>

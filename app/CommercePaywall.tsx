@@ -61,6 +61,9 @@ type CommercePaywallProps = {
   onOpenRedemption: () => void;
   loginHref: string;
   onLogin: () => void;
+  copyOverride?: { eyebrow?: string; title?: string; detail?: string };
+  policyId?: string;
+  triggerEvent?: string;
 };
 
 const reasonCopy: Record<PaywallReason, { eyebrow: string; title: string; detail: string }> = {
@@ -116,6 +119,9 @@ export default function CommercePaywall({
   onOpenRedemption,
   loginHref,
   onLogin,
+  copyOverride,
+  policyId = "",
+  triggerEvent = "",
 }: CommercePaywallProps) {
   const [catalog, setCatalog] = useState<ProductsResponse | null>(null);
   const [order, setOrder] = useState<CommerceOrder | null>(null);
@@ -124,17 +130,22 @@ export default function CommercePaywall({
   const [error, setError] = useState("");
   const [idempotencyKey] = useState(() => clientKey("checkout"));
   const [callbackId] = useState(() => clientKey("callback"));
-  const copy = reasonCopy[reason];
+  const baseCopy = reasonCopy[reason];
+  const copy = {
+    eyebrow: copyOverride?.eyebrow?.trim() || baseCopy.eyebrow,
+    title: copyOverride?.title?.trim() || baseCopy.title,
+    detail: copyOverride?.detail?.trim() || baseCopy.detail,
+  };
 
   useEffect(() => {
     let active = true;
-    trackEvent("paywall_view", { reason, signedIn, source: "entitlement_gate" });
+    trackEvent("paywall_view", { reason, signedIn, source: "entitlement_gate", policyId, triggerEvent });
     void request<ProductsResponse>({ action: "getCommerceProducts" })
       .then((result) => { if (active) setCatalog(result); })
       .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "权益信息加载失败"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [reason, request, signedIn, trackEvent]);
+  }, [policyId, reason, request, signedIn, trackEvent, triggerEvent]);
 
   const product = catalog?.products.find((item) => item.grantType === "lifetime") ?? catalog?.products[0] ?? null;
   const createOrder = async () => {

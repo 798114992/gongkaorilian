@@ -2265,6 +2265,134 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .quiz-result-mini-stats { grid-template-columns: 1fr 1fr; }
 }
 
+/* 申论真题资料库：作为免费查询工具接入题库，不进入日练任务或会员链路。 */
+.essay-reference-entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  margin: 14px 0 18px;
+  padding: 20px;
+  border: 1px solid #bfd9e8;
+  border-radius: 22px;
+  background: linear-gradient(135deg, #f5fbff 0%, #edf7fc 56%, #f9fcfe 100%);
+  box-shadow: 0 10px 28px rgb(35 91 127 / 7%);
+}
+.essay-reference-entry-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: 17px;
+  background: #155d91;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 850;
+}
+.essay-reference-entry > div:nth-child(2) { min-width: 0; }
+.essay-reference-entry span { color: #216994; font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+.essay-reference-entry h2 { margin: 4px 0 6px; color: #142c3f; font-size: 19px; line-height: 1.35; }
+.essay-reference-entry p { margin: 0; color: #526b7d; font-size: 13px; line-height: 1.7; }
+.essay-reference-entry small { display: block; margin-top: 7px; color: #738896; font-size: 11px; }
+.essay-reference-entry > button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 13px;
+  background: #155d91;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.essay-reference-entry > button:hover { background: #104d78; }
+.essay-reference-loading { min-height: 62vh; }
+.essay-reference-loading .empty-state { margin-top: 72px; }
+.essay-reference-loading .secondary-button { margin-left: 8px; }
+
+/* “我的 → 关于公考日练 → 版权与内容来源说明”单一声明入口。 */
+.about-entry-card {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding: 18px 20px;
+  border: 1px solid #dce5eb;
+  border-radius: 20px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+.about-entry-card span { color: #6c8190; font-size: 12px; }
+.about-entry-card h3 { margin: 4px 0; color: #172d3f; font-size: 17px; }
+.about-entry-card p { margin: 0; color: #728592; font-size: 12px; line-height: 1.55; }
+.about-entry-card > strong { color: #8799a6; font-size: 30px; font-weight: 400; }
+.about-page, .legal-page { max-width: 760px; margin: 0 auto; }
+.subpage-back-heading {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr) 86px;
+  align-items: center;
+  min-height: 52px;
+  margin-bottom: 14px;
+}
+.subpage-back-heading button {
+  justify-self: start;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: #23658e;
+  font-size: 14px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.subpage-back-heading > span { overflow: hidden; color: #203648; font-size: 15px; font-weight: 800; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.about-intro-card {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 24px;
+  border: 1px solid #dbe6ed;
+  border-radius: 22px;
+  background: linear-gradient(145deg, #fff, #f4f9fc);
+}
+.about-intro-card h1 { margin: 0 0 4px; color: #132a3c; font-size: 22px; }
+.about-intro-card p { margin: 0; color: #6a7e8c; font-size: 13px; line-height: 1.65; }
+.about-menu { margin-top: 16px; overflow: hidden; border: 1px solid #dce5eb; border-radius: 18px; background: #fff; }
+.about-menu button { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 18px 20px; border: 0; background: #fff; text-align: left; cursor: pointer; }
+.about-menu button:hover { background: #f8fbfd; }
+.about-menu b { display: block; color: #1b3143; font-size: 15px; }
+.about-menu small { display: block; margin-top: 5px; color: #7b8d99; font-size: 12px; line-height: 1.5; }
+.about-menu strong { color: #8799a6; font-size: 28px; font-weight: 400; }
+.legal-copy {
+  padding: 26px;
+  border: 1px solid #dce5eb;
+  border-radius: 22px;
+  background: #fff;
+  color: #2d4353;
+}
+.legal-copy h1 { margin: 0 0 22px; color: #142b3d; font-size: 23px; line-height: 1.4; }
+.legal-copy p { margin: 0 0 16px; font-size: 14px; line-height: 1.9; }
+.legal-copy ul { margin: -2px 0 18px; padding-left: 22px; }
+.legal-copy li { margin: 7px 0; font-size: 14px; line-height: 1.75; }
+.legal-contact { display: grid; gap: 6px; margin-top: 22px; padding: 17px 18px; border-radius: 16px; background: #f1f7fa; }
+.legal-contact span { color: #577080; font-size: 12px; font-weight: 750; }
+.legal-contact b { overflow-wrap: anywhere; color: #184f75; font-size: 15px; }
+.legal-contact b a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.legal-contact small { color: #728692; font-size: 12px; }
+
+@media (max-width: 560px) {
+  .essay-reference-entry { grid-template-columns: 44px minmax(0, 1fr); gap: 12px; padding: 17px; }
+  .essay-reference-entry-icon { width: 44px; height: 44px; border-radius: 14px; font-size: 16px; }
+  .essay-reference-entry > button { grid-column: 1 / -1; width: 100%; }
+  .essay-reference-entry p { line-height: 1.6; }
+  .subpage-back-heading { grid-template-columns: 70px minmax(0, 1fr) 70px; }
+  .about-intro-card { padding: 20px; }
+  .legal-copy { padding: 21px 18px; border-radius: 18px; }
+  .legal-copy h1 { font-size: 21px; }
+  .legal-copy p, .legal-copy li { font-size: 13px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after {

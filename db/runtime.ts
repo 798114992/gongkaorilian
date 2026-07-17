@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
-const RUNTIME_SCHEMA_VERSION = "19";
+const RUNTIME_SCHEMA_VERSION = "20";
 
 export function getD1() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -110,6 +110,67 @@ function quizSchemaStatements(db: D1Database) {
     )`),
     db.prepare("CREATE INDEX IF NOT EXISTS quiz_share_events_quiz_time_idx ON quiz_share_events(quiz_id, created_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS quiz_share_events_attempt_idx ON quiz_share_events(attempt_id, event_name)"),
+  ];
+}
+
+function essayLibrarySchemaStatements(db: D1Database) {
+  return [
+    db.prepare(`CREATE TABLE IF NOT EXISTS essay_library_materials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bank_id INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS essay_library_materials_bank_label_uq ON essay_library_materials(bank_id, label)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS essay_library_materials_bank_sort_idx ON essay_library_materials(bank_id, status, sort_order)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS essay_library_question_materials (
+      question_id INTEGER NOT NULL,
+      material_id INTEGER NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS essay_library_question_materials_uq ON essay_library_question_materials(question_id, material_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS essay_library_question_materials_question_idx ON essay_library_question_materials(question_id, sort_order)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS essay_answer_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_key TEXT NOT NULL,
+      name TEXT NOT NULL,
+      homepage_url TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS essay_answer_sources_key_uq ON essay_answer_sources(source_key)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS essay_answer_sources_status_sort_idx ON essay_answer_sources(status, sort_order)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS essay_reference_answers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question_id INTEGER NOT NULL,
+      source_id INTEGER NOT NULL,
+      source_title TEXT NOT NULL DEFAULT '',
+      display_mode TEXT NOT NULL DEFAULT 'link_only',
+      content TEXT NOT NULL DEFAULT '',
+      excerpt TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      copyright_status TEXT NOT NULL DEFAULT 'pending_verification',
+      publication_status TEXT NOT NULL DEFAULT 'draft',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      original_published_at TEXT,
+      collected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by INTEGER,
+      updated_by INTEGER,
+      published_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS essay_reference_answers_question_source_uq ON essay_reference_answers(question_id, source_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS essay_reference_answers_question_status_idx ON essay_reference_answers(question_id, publication_status, sort_order)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS essay_reference_answers_source_idx ON essay_reference_answers(source_id, publication_status)"),
   ];
 }
 
@@ -581,6 +642,7 @@ async function initializeSchema() {
     )`),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS question_bank_items_bank_question_uq ON question_bank_items(bank_id, question_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS question_bank_items_bank_idx ON question_bank_items(bank_id, sort_order)"),
+    ...essayLibrarySchemaStatements(db),
     db.prepare(`CREATE TABLE IF NOT EXISTS question_imports (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       bank_id INTEGER NOT NULL,
@@ -906,6 +968,17 @@ async function initializeSchema() {
     { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "version", definition: "INTEGER NOT NULL DEFAULT 1" },
   ]);
+  await ensureColumns(db, "question_banks", [
+    { name: "paper_type", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
+  ]);
+  await ensureColumns(db, "question_bank_items", [
+    { name: "question_number", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "score", definition: "INTEGER" },
+  ]);
   await ensureColumns(db, "question_imports", [
     { name: "file_hash", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "duplicate_strategy", definition: "TEXT NOT NULL DEFAULT 'reject'" },
@@ -1032,14 +1105,42 @@ async function deployedSchemaIsCurrent() {
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS daily_steps,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS quiz_tests,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_questions') AS quiz_questions,
-      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_attempts') AS quiz_attempts`)
-      .first<{ version: string; content_access: number; content_review_columns: number; media_access: number; analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number; daily_steps: number; quiz_tests: number; quiz_questions: number; quiz_attempts: number }>();
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_attempts') AS quiz_attempts,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_library_materials') AS essay_materials,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_library_question_materials') AS essay_question_materials,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_answer_sources') AS essay_sources,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_reference_answers') AS essay_answers,
+      (SELECT COUNT(*) FROM pragma_table_info('question_banks')
+        WHERE name IN ('paper_type','source_url','resource_url','library_enabled','library_status')) AS essay_bank_columns,
+      (SELECT COUNT(*) FROM pragma_table_info('question_bank_items')
+        WHERE name IN ('question_number','score')) AS essay_item_columns,
+      (SELECT COUNT(*) FROM pragma_table_info('essay_library_materials')
+        WHERE name IN ('bank_id','label','content','sort_order','status')) AS essay_material_columns,
+      (SELECT COUNT(*) FROM pragma_table_info('essay_library_question_materials')
+        WHERE name IN ('question_id','material_id','sort_order')) AS essay_question_material_columns,
+      (SELECT COUNT(*) FROM pragma_table_info('essay_answer_sources')
+        WHERE name IN ('source_key','name','status','sort_order')) AS essay_source_columns,
+      (SELECT COUNT(*) FROM pragma_table_info('essay_reference_answers')
+        WHERE name IN ('question_id','source_id','display_mode','content','excerpt','source_url','copyright_status','publication_status','sort_order')) AS essay_answer_columns`)
+      .first<{
+        version: string; content_access: number; content_review_columns: number; media_access: number;
+        analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number;
+        daily_steps: number; quiz_tests: number; quiz_questions: number; quiz_attempts: number;
+        essay_materials: number; essay_question_materials: number; essay_sources: number; essay_answers: number;
+        essay_bank_columns: number; essay_item_columns: number; essay_material_columns: number;
+        essay_question_material_columns: number; essay_source_columns: number; essay_answer_columns: number;
+      }>();
     const current = Boolean(state && Number(state.content_access) === 1 && Number(state.media_access) === 1
       && Number(state.content_review_columns) === 5 && Number(state.analytics_eligible) === 1
       && Number(state.device_account_links) === 1
       && Number(state.content_imports) === 1 && Number(state.content_chunks) === 1
       && Number(state.daily_steps) === 1
       && Number(state.quiz_tests) === 1 && Number(state.quiz_questions) === 1 && Number(state.quiz_attempts) === 1
+      && Number(state.essay_materials) === 1 && Number(state.essay_question_materials) === 1
+      && Number(state.essay_sources) === 1 && Number(state.essay_answers) === 1
+      && Number(state.essay_bank_columns) === 5 && Number(state.essay_item_columns) === 2
+      && Number(state.essay_material_columns) === 5 && Number(state.essay_question_material_columns) === 3
+      && Number(state.essay_source_columns) === 4 && Number(state.essay_answer_columns) === 9
       && String(state.version ?? "") === RUNTIME_SCHEMA_VERSION);
     if (!current) return false;
     return true;
@@ -1055,6 +1156,17 @@ async function upgradeRuntimeSchemaFrom17() {
     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS prior_schema_ready`)
     .first<{ version: string; prior_schema_ready: number }>();
   if (String(state?.version ?? "") !== "17" || Number(state?.prior_schema_ready ?? 0) !== 1) return false;
+  await ensureColumns(db, "question_banks", [
+    { name: "paper_type", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
+  ]);
+  await ensureColumns(db, "question_bank_items", [
+    { name: "question_number", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "score", definition: "INTEGER" },
+  ]);
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS daily_step_completions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1069,6 +1181,7 @@ async function upgradeRuntimeSchemaFrom17() {
     db.prepare(`CREATE INDEX IF NOT EXISTS daily_step_completions_user_completed_idx
       ON daily_step_completions(user_id, completed_at)`),
     ...quizSchemaStatements(db),
+    ...essayLibrarySchemaStatements(db),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -1083,8 +1196,47 @@ async function upgradeRuntimeSchemaFrom18() {
     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS quiz_ready`)
     .first<{ version: string; prior_schema_ready: number; quiz_ready: number }>();
   if (String(state?.version ?? "") !== "18" || Number(state?.prior_schema_ready ?? 0) !== 1 || Number(state?.quiz_ready ?? 0) !== 0) return false;
+  await ensureColumns(db, "question_banks", [
+    { name: "paper_type", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
+  ]);
+  await ensureColumns(db, "question_bank_items", [
+    { name: "question_number", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "score", definition: "INTEGER" },
+  ]);
   await db.batch([
     ...quizSchemaStatements(db),
+    ...essayLibrarySchemaStatements(db),
+    db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
+  ]);
+  return true;
+}
+
+async function upgradeRuntimeSchemaFrom19() {
+  const db = getD1();
+  const state = await db.prepare(`SELECT
+    COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS prior_schema_ready,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_reference_answers') AS essay_ready`)
+    .first<{ version: string; prior_schema_ready: number; essay_ready: number }>();
+  if (String(state?.version ?? "") !== "19" || Number(state?.prior_schema_ready ?? 0) !== 1) return false;
+  await ensureColumns(db, "question_banks", [
+    { name: "paper_type", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
+  ]);
+  await ensureColumns(db, "question_bank_items", [
+    { name: "question_number", definition: "TEXT NOT NULL DEFAULT ''" },
+    { name: "score", definition: "INTEGER" },
+  ]);
+  await db.batch([
+    ...essayLibrarySchemaStatements(db),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -1102,7 +1254,7 @@ export async function ensureSchema() {
       // Sites deployments do not execute Drizzle SQL automatically. Keep each
       // production upgrade bounded and explicit so a cold request can advance
       // one known schema version without invoking the legacy full bootstrap.
-      if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18()) {
+      if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18() || await upgradeRuntimeSchemaFrom19()) {
         schemaReady = true;
         return;
       }

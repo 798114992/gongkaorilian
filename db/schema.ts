@@ -701,6 +701,11 @@ export const questionBanks = sqliteTable("question_banks", {
   subject: text("subject").notNull(),
   description: text("description").notNull().default(""),
   coverColor: text("cover_color").notNull().default("blue"),
+  paperType: text("paper_type").notNull().default(""),
+  sourceUrl: text("source_url").notNull().default(""),
+  resourceUrl: text("resource_url").notNull().default(""),
+  libraryEnabled: integer("library_enabled").notNull().default(0),
+  libraryStatus: text("library_status").notNull().default("draft"),
   status: text("status").notNull().default("draft"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -767,12 +772,94 @@ export const questionBankItems = sqliteTable(
     id: integer("id").primaryKey({ autoIncrement: true }),
     bankId: integer("bank_id").notNull(),
     questionId: integer("question_id").notNull(),
+    questionNumber: text("question_number").notNull().default(""),
+    score: integer("score"),
     sortOrder: integer("sort_order").notNull().default(0),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
     uniqueIndex("question_bank_items_bank_question_uq").on(table.bankId, table.questionId),
     index("question_bank_items_bank_idx").on(table.bankId, table.sortOrder),
+  ],
+);
+
+export const essayLibraryMaterials = sqliteTable(
+  "essay_library_materials",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    bankId: integer("bank_id").notNull(),
+    label: text("label").notNull(),
+    title: text("title").notNull().default(""),
+    content: text("content").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("essay_library_materials_bank_label_uq").on(table.bankId, table.label),
+    index("essay_library_materials_bank_sort_idx").on(table.bankId, table.status, table.sortOrder),
+  ],
+);
+
+export const essayLibraryQuestionMaterials = sqliteTable(
+  "essay_library_question_materials",
+  {
+    questionId: integer("question_id").notNull(),
+    materialId: integer("material_id").notNull(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("essay_library_question_materials_uq").on(table.questionId, table.materialId),
+    index("essay_library_question_materials_question_idx").on(table.questionId, table.sortOrder),
+  ],
+);
+
+export const essayAnswerSources = sqliteTable(
+  "essay_answer_sources",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sourceKey: text("source_key").notNull(),
+    name: text("name").notNull(),
+    homepageUrl: text("homepage_url").notNull().default(""),
+    status: text("status").notNull().default("active"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("essay_answer_sources_key_uq").on(table.sourceKey),
+    index("essay_answer_sources_status_sort_idx").on(table.status, table.sortOrder),
+  ],
+);
+
+export const essayReferenceAnswers = sqliteTable(
+  "essay_reference_answers",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    questionId: integer("question_id").notNull(),
+    sourceId: integer("source_id").notNull(),
+    sourceTitle: text("source_title").notNull().default(""),
+    displayMode: text("display_mode").notNull().default("link_only"),
+    content: text("content").notNull().default(""),
+    excerpt: text("excerpt").notNull().default(""),
+    sourceUrl: text("source_url").notNull().default(""),
+    copyrightStatus: text("copyright_status").notNull().default("pending_verification"),
+    publicationStatus: text("publication_status").notNull().default("draft"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    originalPublishedAt: text("original_published_at"),
+    collectedAt: text("collected_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdBy: integer("created_by"),
+    updatedBy: integer("updated_by"),
+    publishedAt: text("published_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("essay_reference_answers_question_source_uq").on(table.questionId, table.sourceId),
+    index("essay_reference_answers_question_status_idx").on(table.questionId, table.publicationStatus, table.sortOrder),
+    index("essay_reference_answers_source_idx").on(table.sourceId, table.publicationStatus),
   ],
 );
 

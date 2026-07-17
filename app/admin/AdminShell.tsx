@@ -135,6 +135,15 @@ const NAVIGATION: NavigationItem[] = [
     keywords: "题库 真题 题目 专项微练 训练策略",
   },
   {
+    key: "essay-library",
+    label: "申论真题资料库",
+    path: "/admin/essay-library",
+    permission: "content.read",
+    icon: <FileTextOutlined />,
+    section: "内容运营",
+    keywords: "申论 真题 材料 参考答案 来源 版权 资料库",
+  },
+  {
     key: "imports",
     label: "导入任务",
     path: "/admin/imports",

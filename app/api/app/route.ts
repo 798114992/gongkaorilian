@@ -36,6 +36,11 @@ import {
   COUNT_DAILY_FREE_AUDIO_SQL,
   dailyAudioPreviewIndex,
 } from "./audio-quota.mjs";
+import {
+  isEssayAnswerPubliclyVisible,
+  sanitizePublicEssayAnswer,
+  validateEssayAnswerPublication,
+} from "./essay-library-policy.mjs";
 
 export const dynamic = "force-dynamic";
 
@@ -59,9 +64,11 @@ const PUBLIC_ACTIONS = new Set([
   "submitContentReport", "getPracticeSessionSummary", "recordDailyStep", "recordDailyCheckin", "authorizeAudioPlayback", "bindInvite", "redeem",
   "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
   "getQuiz", "startQuizAttempt", "submitQuizAnswer", "completeQuizAttempt", "recordQuizShare",
+  "getEssayReferenceLibrary",
 ]);
 const PASSIVE_PUBLIC_ACTIONS = new Set([
   "searchJobPositions", "getEssayPracticeBatch", "getPracticeSessionSummary", "getCommerceProducts",
+  "getEssayReferenceLibrary",
 ]);
 const TRIAL_DAYS = 3;
 const TRIAL_SOURCE = "welcome-trial-v1";
@@ -105,6 +112,10 @@ const EVENT_NAMES = new Set([
   "essay_practice_open",
   "essay_draft_submit",
   "essay_revision_submit",
+  "essay_reference_library_open",
+  "essay_reference_paper_open",
+  "essay_reference_share",
+  "essay_reference_deep_link_open",
   "daily_practice_complete",
   "daily_gain_view",
   "three_day_report_view",
@@ -5773,6 +5784,823 @@ async function adminUpsertQuizResult(payload: Record<string, unknown>) {
   return json({ ok: true, id: `${quizId}-${levelKey}` });
 }
 
+type EssayPaperRow = {
+  id: number; bank_code: string; name: string; exam_type: string; province: string | null;
+  exam_year: number | null; paper_type: string; source_url: string; resource_url: string;
+  library_status: string; updated_at: string;
+};
+
+type EssayMaterialRow = {
+  id: number; bank_id: number; label: string; title: string; content: string; sort_order: number; status: string;
+};
+
+type EssayLibraryQuestionRow = {
+  id: number; bank_id: number; question_code: string; question_number: string; prompt: string;
+  score: number | null; word_limit: number | null; sub_type: string; sort_order: number; status: string;
+};
+
+type EssayAnswerRow = {
+  id: number; question_id: number; source_id: number; source_name: string; source_active: number;
+  source_title: string; display_mode: string; content: string; excerpt: string; source_url: string;
+  copyright_status: string; publication_status: string; sort_order: number;
+  original_published_at: string | null; updated_at: string;
+};
+
+function essayPaperConditions(payload: Record<string, unknown>, publicOnly: boolean, alias = "qb") {
+  const conditions = [`${alias}.library_enabled = 1`];
+  const binds: unknown[] = [];
+  if (publicOnly) {
+    conditions.push(`${alias}.library_status = 'published'`);
+    conditions.push(`${alias}.exam_year BETWEEN 2000 AND 2200`);
+  }
+  const examType = trimmed(payload.examType, 40);
+  const region = trimmed(payload.region, 40);
+  const paperType = trimmed(payload.paperType, 60);
+  const examYear = Math.floor(Number(payload.examYear));
+  const paperCode = trimmed(payload.paperCode, 80);
+  const paperId = Math.floor(Number(payload.paperId));
+  if (examType) { conditions.push(`${alias}.exam_type = ?`); binds.push(examType); }
+  if (region) { conditions.push(`COALESCE(${alias}.province, '') = ?`); binds.push(region); }
+  if (paperType) { conditions.push(`${alias}.paper_type = ?`); binds.push(paperType); }
+  if (Number.isInteger(examYear) && examYear >= 2000 && examYear <= 2200) {
+    conditions.push(`${alias}.exam_year = ?`);
+    binds.push(examYear);
+  }
+  if (paperCode) { conditions.push(`${alias}.bank_code = ?`); binds.push(paperCode); }
+  if (Number.isInteger(paperId) && paperId > 0) { conditions.push(`${alias}.id = ?`); binds.push(paperId); }
+  return { sql: conditions.join(" AND "), binds };
+}
+
+async function copyrightContactEmail() {
+  const row = await getD1().prepare("SELECT value FROM configs WHERE key = 'copyright_contact_email'")
+    .first<{ value: string }>();
+  const value = String(row?.value ?? "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : "";
+}
+
+async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
+  const db = getD1();
+  const contactEmail = await copyrightContactEmail();
+  if (payload.settingsOnly === true || String(payload.settingsOnly ?? "") === "true") {
+    return json({ contactEmail });
+  }
+  const paperIdProvided = payload.paperId !== undefined && payload.paperId !== null && String(payload.paperId).trim() !== "";
+  const requestedPaperId = Number(payload.paperId);
+  if (paperIdProvided && (!Number.isSafeInteger(requestedPaperId) || requestedPaperId <= 0)) {
+    return json({ error: "试卷编号无效", code: "INVALID_ESSAY_PAPER_ID" }, 400);
+  }
+  const filter = essayPaperConditions(payload, true);
+  const detailRequested = paperIdProvided || Boolean(trimmed(payload.paperCode, 80));
+  if (!detailRequested) {
+    const requestedPageSize = Number(payload.pageSize ?? 20);
+    const requestedPage = Number(payload.page ?? 1);
+    const pageSize = Number.isFinite(requestedPageSize) ? Math.max(1, Math.min(50, Math.floor(requestedPageSize) || 20)) : 20;
+    const page = Number.isFinite(requestedPage) ? Math.max(1, Math.floor(requestedPage) || 1) : 1;
+    const offset = (page - 1) * pageSize;
+    const [catalog, totalRow] = await Promise.all([
+      db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year,
+        qb.paper_type, qb.source_url, qb.resource_url, qb.updated_at,
+        (SELECT COUNT(*) FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
+          WHERE qbi.bank_id = qb.id AND q.status = 'active') AS question_count,
+        (SELECT COUNT(DISTINCT a.source_id) FROM question_bank_items qbi
+          JOIN essay_reference_answers a ON a.question_id = qbi.question_id
+          JOIN essay_answer_sources s ON s.id = a.source_id
+          WHERE qbi.bank_id = qb.id AND a.publication_status = 'published' AND s.status = 'active'
+            AND (trim(a.source_url) = '' OR a.source_url LIKE 'https://%')
+            AND (
+              (a.display_mode = 'full' AND a.copyright_status IN ('original','authorized') AND trim(a.content) <> '')
+              OR (a.display_mode = 'excerpt' AND a.copyright_status IN ('original','authorized','fair_quote')
+                AND trim(a.excerpt) <> '' AND (a.copyright_status <> 'fair_quote'
+                  OR (a.source_url LIKE 'https://%' AND length(trim(a.excerpt)) <= 1200)))
+              OR (a.display_mode = 'link_only' AND a.copyright_status IN ('original','authorized','link_only')
+                AND a.source_url LIKE 'https://%')
+            )) AS source_count
+        FROM question_banks qb WHERE ${filter.sql}
+        ORDER BY qb.exam_year DESC, qb.id DESC LIMIT ? OFFSET ?`).bind(...filter.binds, pageSize, offset)
+        .all<EssayPaperRow & { question_count: number; source_count: number }>(),
+      db.prepare(`SELECT COUNT(*) AS count FROM question_banks qb WHERE ${filter.sql}`)
+        .bind(...filter.binds).first<{ count: number }>(),
+    ]);
+    return json({
+      contactEmail,
+      page,
+      pageSize,
+      total: Number(totalRow?.count ?? 0),
+      papers: catalog.results.map((row) => ({
+        id: String(row.id),
+        code: row.bank_code,
+        title: row.name,
+        examType: row.exam_type,
+        region: row.province ?? "",
+        examYear: Number(row.exam_year),
+        paperType: row.paper_type,
+        sourceUrl: validOptionalHttpsUrl(row.source_url) ? row.source_url : "",
+        resourceUrl: validEssayResourceUrl(row.resource_url) ? row.resource_url : "",
+        updatedAt: row.updated_at,
+        questionCount: Number(row.question_count ?? 0),
+        sourceCount: Number(row.source_count ?? 0),
+      })),
+    });
+  }
+
+  const [paperResult, materialResult, questionResult, mappingResult, answerResult] = await Promise.all([
+    db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year,
+      qb.paper_type, qb.source_url, qb.resource_url, qb.library_status, qb.updated_at
+      FROM question_banks qb WHERE ${filter.sql}
+      ORDER BY qb.exam_year DESC, qb.id DESC LIMIT 200`).bind(...filter.binds).all<EssayPaperRow>(),
+    db.prepare(`SELECT m.id, m.bank_id, m.label, m.title, m.content, m.sort_order, m.status
+      FROM essay_library_materials m JOIN question_banks qb ON qb.id = m.bank_id
+      WHERE m.status = 'active' AND ${filter.sql}
+      ORDER BY m.bank_id, m.sort_order, m.id`).bind(...filter.binds).all<EssayMaterialRow>(),
+    db.prepare(`SELECT q.id, qbi.bank_id, q.question_code, qbi.question_number,
+      COALESCE(NULLIF(q.prompt, ''), q.stem) AS prompt, qbi.score, q.word_limit, q.sub_type,
+      qbi.sort_order, q.status
+      FROM question_bank_items qbi
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      JOIN questions q ON q.id = qbi.question_id
+      WHERE q.status = 'active' AND ${filter.sql}
+      ORDER BY qbi.bank_id, qbi.sort_order, q.id`).bind(...filter.binds).all<EssayLibraryQuestionRow>(),
+    db.prepare(`SELECT qm.question_id, qm.material_id, qm.sort_order
+      FROM essay_library_question_materials qm
+      JOIN essay_library_materials m ON m.id = qm.material_id AND m.status = 'active'
+      JOIN question_banks qb ON qb.id = m.bank_id
+      WHERE ${filter.sql}
+      ORDER BY qm.question_id, qm.sort_order`).bind(...filter.binds)
+      .all<{ question_id: number; material_id: number; sort_order: number }>(),
+    db.prepare(`SELECT a.id, a.question_id, a.source_id, s.name AS source_name,
+      CASE WHEN s.status = 'active' THEN 1 ELSE 0 END AS source_active,
+      a.source_title, a.display_mode, a.content, a.excerpt, a.source_url,
+      a.copyright_status, a.publication_status, a.sort_order, a.original_published_at, a.updated_at
+      FROM essay_reference_answers a
+      JOIN essay_answer_sources s ON s.id = a.source_id
+      WHERE a.publication_status = 'published' AND s.status = 'active'
+        AND EXISTS (
+          SELECT 1 FROM question_bank_items qbi
+          JOIN question_banks qb ON qb.id = qbi.bank_id
+          WHERE qbi.question_id = a.question_id AND ${filter.sql}
+        )
+      ORDER BY a.question_id, a.sort_order, s.sort_order, a.id`).bind(...filter.binds).all<EssayAnswerRow>(),
+  ]);
+
+  const materialIdsByQuestion = new Map<number, number[]>();
+  for (const row of mappingResult.results) {
+    const current = materialIdsByQuestion.get(Number(row.question_id)) ?? [];
+    current.push(Number(row.material_id));
+    materialIdsByQuestion.set(Number(row.question_id), current);
+  }
+
+  const sourcesByQuestion = new Map<number, ReturnType<typeof sanitizePublicEssayAnswer>[]>();
+  for (const row of answerResult.results) {
+    const candidate = {
+      id: row.id,
+      sourceName: row.source_name,
+      sourceActive: Number(row.source_active) === 1,
+      displayMode: row.display_mode,
+      copyrightStatus: row.copyright_status,
+      publicationStatus: row.publication_status,
+      content: row.content,
+      excerpt: row.excerpt,
+      sourceUrl: row.source_url,
+      sortOrder: row.sort_order,
+    };
+    if (!isEssayAnswerPubliclyVisible(candidate)) continue;
+    const current = sourcesByQuestion.get(Number(row.question_id)) ?? [];
+    current.push(sanitizePublicEssayAnswer(candidate));
+    sourcesByQuestion.set(Number(row.question_id), current);
+  }
+
+  const materialsByPaper = new Map<number, Array<Record<string, unknown>>>();
+  for (const row of materialResult.results) {
+    const current = materialsByPaper.get(Number(row.bank_id)) ?? [];
+    current.push({ id: String(row.id), label: row.label, title: row.title, content: row.content, sortOrder: Number(row.sort_order) });
+    materialsByPaper.set(Number(row.bank_id), current);
+  }
+
+  const questionsByPaper = new Map<number, Array<Record<string, unknown>>>();
+  for (const row of questionResult.results) {
+    const current = questionsByPaper.get(Number(row.bank_id)) ?? [];
+    current.push({
+      id: String(row.id),
+      code: row.question_code,
+      number: row.question_number || String(current.length + 1),
+      prompt: row.prompt,
+      ...(row.score === null ? {} : { score: Number(row.score) }),
+      ...(row.word_limit === null ? {} : { wordLimit: Number(row.word_limit) }),
+      questionType: row.sub_type,
+      materialIds: (materialIdsByQuestion.get(Number(row.id)) ?? []).map(String),
+      sources: sourcesByQuestion.get(Number(row.id)) ?? [],
+    });
+    questionsByPaper.set(Number(row.bank_id), current);
+  }
+
+  return json({
+    contactEmail,
+    papers: paperResult.results.map((row) => ({
+      id: String(row.id),
+      code: row.bank_code,
+      title: row.name,
+      examType: row.exam_type,
+      region: row.province ?? "",
+      examYear: Number(row.exam_year),
+      paperType: row.paper_type,
+      sourceUrl: validOptionalHttpsUrl(row.source_url) ? row.source_url : "",
+      resourceUrl: validEssayResourceUrl(row.resource_url) ? row.resource_url : "",
+      updatedAt: row.updated_at,
+      materials: materialsByPaper.get(Number(row.id)) ?? [],
+      questions: questionsByPaper.get(Number(row.id)) ?? [],
+    })),
+  });
+}
+
+async function adminGetEssayReferenceLibrary(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.read")) return adminForbidden("content.read");
+  const db = getD1();
+  const [papers, materials, questions, mappings, sources, answers, contactEmail] = await Promise.all([
+    db.prepare(`SELECT id, bank_code, name, exam_type, province, exam_year, paper_type, source_url,
+      resource_url, library_status, updated_at FROM question_banks WHERE library_enabled = 1
+      ORDER BY exam_year DESC, id DESC LIMIT 500`).all(),
+    db.prepare(`SELECT id, bank_id, label, title, content, sort_order, status, updated_at
+      FROM essay_library_materials ORDER BY bank_id, sort_order, id`).all(),
+    db.prepare(`SELECT q.id, qbi.bank_id, q.question_code, qbi.question_number,
+      COALESCE(NULLIF(q.prompt, ''), q.stem) AS prompt, qbi.score, q.word_limit, q.sub_type,
+      qbi.sort_order, q.status, q.truth_verified, q.review_status, q.version, q.updated_at
+      FROM question_bank_items qbi JOIN question_banks qb ON qb.id = qbi.bank_id
+      JOIN questions q ON q.id = qbi.question_id WHERE qb.library_enabled = 1
+      ORDER BY qbi.bank_id, qbi.sort_order, q.id`).all(),
+    db.prepare(`SELECT qm.question_id, qm.material_id, qm.sort_order FROM essay_library_question_materials qm
+      ORDER BY qm.question_id, qm.sort_order`).all(),
+    db.prepare(`SELECT id, source_key, name, homepage_url, status, sort_order, updated_at
+      FROM essay_answer_sources ORDER BY sort_order, id`).all(),
+    db.prepare(`SELECT id, question_id, source_id, source_title, display_mode, content, excerpt, source_url,
+      copyright_status, publication_status, sort_order, original_published_at, collected_at, published_at, updated_at
+      FROM essay_reference_answers ORDER BY question_id, sort_order, id`).all(),
+    copyrightContactEmail(),
+  ]);
+  return json({
+    contactEmail,
+    papers: papers.results,
+    materials: materials.results,
+    questions: questions.results,
+    questionMaterials: mappings.results,
+    sources: sources.results,
+    answers: answers.results,
+  });
+}
+
+function validEssayResourceUrl(value: string) {
+  if (!value) return true;
+  try { return new URL(value).protocol === "https:"; } catch { return false; }
+}
+
+function validOptionalHttpsUrl(value: string) {
+  if (!value) return true;
+  try { return new URL(value).protocol === "https:"; } catch { return false; }
+}
+
+function essaySlug(value: unknown, fallback = "") {
+  const normalized = String(value ?? fallback).normalize("NFKC").trim().toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  return /^[a-z0-9][a-z0-9_-]{1,79}$/.test(normalized) ? normalized : "";
+}
+
+function uniquePositiveIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100);
+}
+
+function positiveSafeInteger(value: unknown) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+async function requireEssayPaper(bankId: number) {
+  return getD1().prepare(`SELECT id, bank_code, name, exam_type, province, exam_year, paper_type, source_url
+    FROM question_banks WHERE id = ? AND library_enabled = 1`).bind(bankId).first<{
+      id: number; bank_code: string; name: string; exam_type: string; province: string | null;
+      exam_year: number | null; paper_type: string; source_url: string;
+    }>();
+}
+
+async function adminUpsertEssayPaper(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id);
+  const code = essaySlug(payload.code ?? payload.bankCode);
+  const title = trimmed(payload.title ?? payload.name, 160);
+  const examType = trimmed(payload.examType, 40);
+  const region = trimmed(payload.region ?? payload.province, 40);
+  const paperType = trimmed(payload.paperType, 60);
+  const sourceUrl = trimmed(payload.sourceUrl, 1000);
+  const resourceUrl = trimmed(payload.resourceUrl, 1000);
+  const examYear = Math.floor(Number(payload.examYear));
+  if (!code || !title || !examType || !Number.isInteger(examYear) || examYear < 2000 || examYear > 2200) {
+    return json({ error: "请完整填写试卷编码、标题、考试类型和年份" }, 400);
+  }
+  if (!validOptionalHttpsUrl(sourceUrl) || !validEssayResourceUrl(resourceUrl)) {
+    return json({ error: "来源地址和资料地址必须使用公开可访问的 HTTPS 链接" }, 400);
+  }
+  const db = getD1();
+  const collision = await db.prepare(`SELECT id, library_enabled FROM question_banks
+    WHERE bank_code = ? AND id <> ? LIMIT 1`).bind(code, id > 0 ? id : 0)
+    .first<{ id: number; library_enabled: number }>();
+  if (collision) return json({ error: "试卷编码已被使用，请更换编码" }, 409);
+  if (id > 0) {
+    const updated = await db.prepare(`UPDATE question_banks SET bank_code = ?, name = ?, exam_type = ?, province = ?,
+      exam_year = ?, subject = '申论', paper_type = ?, source_url = ?, resource_url = ?,
+      library_status = 'draft', status = 'draft', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND library_enabled = 1`)
+      .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl, id).run();
+    if (!updated.meta.changes) return json({ error: "申论资料库试卷不存在" }, 404);
+    return json({ ok: true, id, code });
+  }
+  await db.prepare(`INSERT INTO question_banks
+    (bank_code, name, exam_type, province, exam_year, subject, description, cover_color,
+      paper_type, source_url, resource_url, library_enabled, library_status, status)
+    VALUES (?, ?, ?, ?, ?, '申论', '', 'blue', ?, ?, ?, 1, 'draft', 'draft')`)
+    .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl).run();
+  const created = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?")
+    .bind(code).first<{ id: number }>();
+  return json({ ok: true, id: Number(created?.id), code }, 201);
+}
+
+async function adminSetEssayPaperStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.publish")) return adminForbidden("content.publish");
+  const id = positiveSafeInteger(payload.id ?? payload.paperId);
+  const status = String(payload.status ?? "");
+  if (!(id > 0) || !["draft", "published", "archived"].includes(status)) {
+    return json({ error: "试卷状态无效" }, 400);
+  }
+  if (status === "published") {
+    const db = getD1();
+    const [readiness, questions, answers, contactEmail] = await Promise.all([
+      db.prepare(`SELECT
+        (SELECT COUNT(*) FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
+          WHERE qbi.bank_id = ? AND q.status = 'active') AS question_count,
+        (SELECT COUNT(*) FROM essay_library_materials WHERE bank_id = ? AND status = 'active') AS material_count,
+        (SELECT exam_year FROM question_banks WHERE id = ? AND library_enabled = 1) AS exam_year`)
+        .bind(id, id, id).first<{ question_count: number; material_count: number; exam_year: number | null }>(),
+      db.prepare(`SELECT q.id, qbi.question_number, q.truth_verified, q.review_status,
+        (SELECT COUNT(*) FROM question_bank_items other_qbi JOIN question_banks other_qb ON other_qb.id = other_qbi.bank_id
+          WHERE other_qbi.question_id = q.id AND other_qb.library_enabled = 1) AS library_link_count
+        FROM question_bank_items qbi
+        JOIN questions q ON q.id = qbi.question_id WHERE qbi.bank_id = ? AND q.status = 'active'
+        ORDER BY qbi.sort_order, q.id`).bind(id).all<{
+          id: number; question_number: string; truth_verified: number; review_status: string; library_link_count: number;
+        }>(),
+      db.prepare(`SELECT a.question_id, a.id, s.name AS source_name,
+        CASE WHEN s.status = 'active' THEN 1 ELSE 0 END AS source_active,
+        a.display_mode, a.content, a.excerpt, a.source_url, a.copyright_status, a.publication_status, a.sort_order
+        FROM question_bank_items qbi JOIN essay_reference_answers a ON a.question_id = qbi.question_id
+        JOIN essay_answer_sources s ON s.id = a.source_id WHERE qbi.bank_id = ?`).bind(id).all<EssayAnswerRow>(),
+      copyrightContactEmail(),
+    ]);
+    if (Number(readiness?.question_count ?? 0) < 1 || Number(readiness?.material_count ?? 0) < 1) {
+      return json({ error: "发布前至少需要配置一则材料和一道题目", code: "ESSAY_PAPER_INCOMPLETE" }, 409);
+    }
+    if (!Number.isInteger(Number(readiness?.exam_year)) || Number(readiness?.exam_year) < 2000 || Number(readiness?.exam_year) > 2200) {
+      return json({ error: "发布前必须配置有效考试年份", code: "ESSAY_PAPER_YEAR_INVALID" }, 409);
+    }
+    if (!contactEmail) {
+      return json({ error: "发布前请先配置版权联系邮箱", code: "COPYRIGHT_CONTACT_REQUIRED" }, 409);
+    }
+    const unverifiedQuestions = questions.results
+      .filter((row) => Number(row.truth_verified) !== 1 || row.review_status !== "approved")
+      .map((row, index) => row.question_number || String(index + 1));
+    if (unverifiedQuestions.length) {
+      return json({
+        error: `还有 ${unverifiedQuestions.length} 道题未完成真题审核`,
+        code: "ESSAY_QUESTIONS_NOT_VERIFIED",
+        unverifiedQuestions,
+      }, 409);
+    }
+    const reusedQuestions = questions.results
+      .filter((row) => Number(row.library_link_count) !== 1)
+      .map((row, index) => row.question_number || String(index + 1));
+    if (reusedQuestions.length) {
+      return json({
+        error: "资料库题目不能跨试卷复用，请拆分为独立题目",
+        code: "ESSAY_QUESTION_CROSS_PAPER_REUSE",
+        reusedQuestions,
+      }, 409);
+    }
+    const answerReadyQuestionIds = new Set(answers.results.filter((row) => isEssayAnswerPubliclyVisible({
+      id: row.id,
+      sourceName: row.source_name,
+      sourceActive: Number(row.source_active) === 1,
+      displayMode: row.display_mode,
+      copyrightStatus: row.copyright_status,
+      publicationStatus: row.publication_status,
+      content: row.content,
+      excerpt: row.excerpt,
+      sourceUrl: row.source_url,
+      sortOrder: row.sort_order,
+    })).map((row) => Number(row.question_id)));
+    const missingQuestions = questions.results
+      .filter((row) => !answerReadyQuestionIds.has(Number(row.id)))
+      .map((row, index) => row.question_number || String(index + 1));
+    if (missingQuestions.length) {
+      return json({
+        error: `还有 ${missingQuestions.length} 道题没有可公开的参考答案`,
+        code: "ESSAY_PAPER_ANSWER_GAP",
+        missingQuestions,
+      }, 409);
+    }
+  }
+  const updated = await getD1().prepare(`UPDATE question_banks SET library_status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND library_enabled = 1`).bind(status, id).run();
+  if (!updated.meta.changes) return json({ error: "申论资料库试卷不存在" }, 404);
+  return json({ ok: true, id, status });
+}
+
+async function adminUpsertEssayMaterial(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id);
+  const bankId = positiveSafeInteger(payload.paperId ?? payload.bankId);
+  const label = trimmed(payload.label, 40);
+  const title = trimmed(payload.title, 160);
+  const content = trimmed(payload.content, 100_000);
+  const sortOrder = Math.max(0, Math.min(100_000, Math.floor(Number(payload.sortOrder ?? 0)) || 0));
+  if (!(bankId > 0) || !label || !content) return json({ error: "请选择试卷并填写材料编号和正文" }, 400);
+  if (!(await requireEssayPaper(bankId))) return json({ error: "申论资料库试卷不存在" }, 404);
+  const db = getD1();
+  if (id > 0) {
+    const updated = await db.prepare(`UPDATE essay_library_materials SET label = ?, title = ?, content = ?,
+      sort_order = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND bank_id = ?`)
+      .bind(label, title, content, sortOrder, id, bankId).run();
+    if (!updated.meta.changes) return json({ error: "材料不存在" }, 404);
+    await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND library_enabled = 1`).bind(bankId).run();
+    return json({ ok: true, id });
+  }
+  const duplicate = await db.prepare("SELECT id FROM essay_library_materials WHERE bank_id = ? AND label = ?")
+    .bind(bankId, label).first<{ id: number }>();
+  if (duplicate) return json({ error: "该试卷已存在相同材料编号" }, 409);
+  await db.prepare(`INSERT INTO essay_library_materials (bank_id, label, title, content, sort_order, status)
+    VALUES (?, ?, ?, ?, ?, 'active')`).bind(bankId, label, title, content, sortOrder).run();
+  const created = await db.prepare("SELECT id FROM essay_library_materials WHERE bank_id = ? AND label = ?")
+    .bind(bankId, label).first<{ id: number }>();
+  await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND library_enabled = 1`).bind(bankId).run();
+  return json({ ok: true, id: Number(created?.id) }, 201);
+}
+
+async function adminDeleteEssayMaterial(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id);
+  if (!(id > 0)) return json({ error: "材料编号无效" }, 400);
+  const db = getD1();
+  const material = await db.prepare("SELECT id, bank_id FROM essay_library_materials WHERE id = ?")
+    .bind(id).first<{ id: number; bank_id: number }>();
+  if (!material) return json({ error: "材料不存在" }, 404);
+  const updated = await db.prepare(`UPDATE essay_library_materials SET status = 'disabled',
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'disabled'`).bind(id).run();
+  if (!updated.meta.changes) return json({ error: "材料不存在或已停用" }, 404);
+  await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND library_enabled = 1`).bind(material.bank_id).run();
+  return json({ ok: true, id, status: "disabled" });
+}
+
+async function adminUpsertEssayLibraryQuestion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const bankId = positiveSafeInteger(payload.paperId ?? payload.bankId);
+  const requestedId = positiveSafeInteger(payload.id ?? payload.questionId);
+  const number = trimmed(payload.number ?? payload.questionNumber, 24);
+  const prompt = trimmed(payload.prompt, 30_000);
+  const questionType = trimmed(payload.questionType, 80);
+  const scoreNumber = Number(payload.score);
+  const score = Number.isFinite(scoreNumber) ? Math.max(0, Math.min(200, Math.floor(scoreNumber))) : null;
+  const wordLimitNumber = Number(payload.wordLimit);
+  const wordLimit = Number.isFinite(wordLimitNumber) && wordLimitNumber > 0 ? Math.min(20_000, Math.floor(wordLimitNumber)) : null;
+  const sortOrder = Math.max(0, Math.min(100_000, Math.floor(Number(payload.sortOrder ?? 0)) || 0));
+  const materialIds = uniquePositiveIds(payload.materialIds);
+  const paper = await requireEssayPaper(bankId);
+  if (!paper) return json({ error: "申论资料库试卷不存在" }, 404);
+  const questionCode = essaySlug(payload.code ?? payload.questionCode,
+    `${paper.bank_code}-${number || sortOrder || "q"}`);
+  if (!questionCode || !number || !prompt) return json({ error: "题目编码、题号和题干不能为空" }, 400);
+  const db = getD1();
+  if (materialIds.length) {
+    const placeholders = materialIds.map(() => "?").join(",");
+    const valid = await db.prepare(`SELECT COUNT(*) AS count FROM essay_library_materials
+      WHERE bank_id = ? AND status = 'active' AND id IN (${placeholders})`).bind(bankId, ...materialIds)
+      .first<{ count: number }>();
+    if (Number(valid?.count ?? 0) !== materialIds.length) return json({ error: "题目关联了不属于本试卷的材料" }, 400);
+  }
+  let questionId = requestedId;
+  if (questionId > 0) {
+    const linked = await db.prepare(`SELECT q.id,
+      (SELECT COUNT(*) FROM question_bank_items all_qbi JOIN question_banks all_qb ON all_qb.id = all_qbi.bank_id
+        WHERE all_qbi.question_id = q.id AND all_qb.library_enabled = 1) AS library_link_count
+      FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
+      WHERE q.id = ? AND qbi.bank_id = ?`).bind(questionId, bankId)
+      .first<{ id: number; library_link_count: number }>();
+    if (!linked) return json({ error: "题目不存在或不属于该试卷" }, 404);
+    if (Number(linked.library_link_count) !== 1) {
+      return json({ error: "资料库题目不能跨试卷复用，请先拆分为独立题目", code: "ESSAY_QUESTION_CROSS_PAPER_REUSE" }, 409);
+    }
+    const codeCollision = await db.prepare("SELECT id FROM questions WHERE question_code = ? AND id <> ?")
+      .bind(questionCode, questionId).first<{ id: number }>();
+    if (codeCollision) return json({ error: "题目编码已被使用" }, 409);
+    await db.prepare(`UPDATE questions SET question_code = ?, subject = '申论', module = '真题资料库',
+      sub_type = ?, stem = ?, prompt = ?, word_limit = ?, source_exam_type = ?, source_region = ?,
+      source_year = ?, source_batch = ?, source = ?, truth_verified = 0, truth_verified_at = NULL,
+      review_status = 'pending_review', reviewed_by = NULL, reviewed_at = NULL,
+      review_note = '', status = 'active', version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(questionCode, questionType, prompt, prompt, wordLimit, paper.exam_type, paper.province ?? "",
+        paper.exam_year, paper.paper_type, paper.name, questionId).run();
+  } else {
+    const existing = await db.prepare("SELECT id FROM questions WHERE question_code = ?")
+      .bind(questionCode).first<{ id: number }>();
+    if (existing) return json({ error: "题目编码已被使用；资料库题目不能跨试卷复用" }, 409);
+    else {
+      await db.prepare(`INSERT INTO questions
+        (question_code, subject, module, sub_type, stem, prompt, word_limit, source, source_exam_type,
+          source_region, source_year, source_batch, truth_verified, review_status, status)
+        VALUES (?, '申论', '真题资料库', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending_review', 'active')`)
+        .bind(questionCode, questionType, prompt, prompt, wordLimit, paper.name, paper.exam_type, paper.province ?? "",
+          paper.exam_year, paper.paper_type).run();
+      const created = await db.prepare("SELECT id FROM questions WHERE question_code = ?")
+        .bind(questionCode).first<{ id: number }>();
+      questionId = Number(created?.id);
+    }
+  }
+  if (!(questionId > 0)) return json({ error: "题目保存失败" }, 500);
+  await db.batch([
+    db.prepare(`INSERT INTO question_bank_items (bank_id, question_id, question_number, score, sort_order)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(bank_id, question_id) DO UPDATE SET question_number = excluded.question_number,
+        score = excluded.score, sort_order = excluded.sort_order`).bind(bankId, questionId, number, score, sortOrder),
+    db.prepare("DELETE FROM essay_library_question_materials WHERE question_id = ?").bind(questionId),
+    ...materialIds.map((materialId, index) => db.prepare(`INSERT INTO essay_library_question_materials
+      (question_id, material_id, sort_order) VALUES (?, ?, ?)`)
+      .bind(questionId, materialId, index)),
+    db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND library_enabled = 1`).bind(bankId),
+  ]);
+  return json({ ok: true, id: questionId, code: questionCode });
+}
+
+async function adminReviewEssayLibraryQuestion(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "question.review")) return adminForbidden("question.review");
+  const admin = adminFromPayload(payload);
+  if (!admin || admin.role === "question_editor") return adminForbidden("question.review");
+  const id = positiveSafeInteger(payload.id ?? payload.questionId);
+  const expectedVersion = positiveSafeInteger(payload.expectedVersion);
+  const decision = payload.decision === "approve" ? "approve" : payload.decision === "reject" ? "reject" : "";
+  const reviewNote = trimmed(payload.reviewNote, 1_000);
+  if (!id || !expectedVersion || !decision) return json({ error: "题目、版本或审核决定无效" }, 400);
+  if (decision === "reject" && !reviewNote) return json({ error: "驳回时必须填写原因" }, 400);
+
+  const db = getD1();
+  const question = await db.prepare(`SELECT q.id, q.question_code, q.status, q.review_status, q.version,
+    COALESCE(NULLIF(q.prompt, ''), q.stem) AS prompt, qb.id AS bank_id, qb.name AS paper_name,
+    qb.exam_year, qb.source_url,
+    (SELECT COUNT(*) FROM question_bank_items all_qbi
+      JOIN question_banks all_qb ON all_qb.id = all_qbi.bank_id
+      WHERE all_qbi.question_id = q.id AND all_qb.library_enabled = 1) AS library_link_count
+    FROM questions q
+    JOIN question_bank_items qbi ON qbi.question_id = q.id
+    JOIN question_banks qb ON qb.id = qbi.bank_id AND qb.library_enabled = 1
+    WHERE q.id = ? LIMIT 1`).bind(id).first<{
+      id: number; question_code: string; status: string; review_status: string; version: number;
+      prompt: string; bank_id: number; paper_name: string; exam_year: number | null; source_url: string;
+      library_link_count: number;
+    }>();
+  if (!question) return json({ error: "申论资料库题目不存在" }, 404);
+  if (Number(question.version) !== expectedVersion || question.review_status !== "pending_review") {
+    return json({ error: "题目已被编辑或审核，请刷新后重试", code: "QUESTION_REVIEW_VERSION_MISMATCH",
+      currentVersion: Number(question.version) }, 409);
+  }
+  if (Number(question.library_link_count) !== 1) {
+    return json({ error: "资料库题目不能跨试卷复用，请先拆分为独立题目", code: "ESSAY_QUESTION_CROSS_PAPER_REUSE" }, 409);
+  }
+  if (decision === "approve") {
+    if (question.status !== "active" || !trimmed(question.prompt, 30_000)) {
+      return json({ error: "题干为空或题目已停用，不能通过审核" }, 409);
+    }
+    if (!Number.isInteger(Number(question.exam_year)) || Number(question.exam_year) < 2000 || Number(question.exam_year) > 2200) {
+      return json({ error: "试卷年份无效，不能通过真题审核" }, 409);
+    }
+    if (!question.source_url || !validOptionalHttpsUrl(question.source_url)) {
+      return json({ error: "请先为试卷配置可追溯的 HTTPS 来源链接，再通过真题审核" }, 409);
+    }
+  }
+
+  const reviewStatus = decision === "approve" ? "approved" : "rejected";
+  const nextVersion = expectedVersion + 1;
+  const results = await db.batch([
+    db.prepare(`UPDATE questions SET source = ?, truth_verified = ?,
+      truth_verified_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+      review_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, review_note = ?,
+      version = version + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND version = ? AND review_status = 'pending_review' AND status = 'active'`)
+      .bind(question.paper_name, decision === "approve" ? 1 : 0, decision === "approve" ? 1 : 0,
+        reviewStatus, admin.id, reviewNote, id, expectedVersion),
+    draftEssayLibraryPapersForQuestion(db, { questionId: id, version: nextVersion, reviewStatus }),
+  ]);
+  if (!results[0]?.meta.changes) {
+    return json({ error: "题目已被编辑或审核，请刷新后重试", code: "QUESTION_REVIEW_VERSION_MISMATCH" }, 409);
+  }
+  return json({ ok: true, id, paperId: Number(question.bank_id), version: nextVersion,
+    reviewStatus, truthVerified: decision === "approve" });
+}
+
+async function adminUpsertEssayAnswerSource(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id);
+  const sourceKey = essaySlug(payload.sourceKey ?? payload.key);
+  const name = trimmed(payload.name, 100);
+  const homepageUrl = trimmed(payload.homepageUrl, 1000);
+  const sortOrder = Math.max(0, Math.min(100_000, Math.floor(Number(payload.sortOrder ?? 0)) || 0));
+  if (!sourceKey || !name || !validOptionalHttpsUrl(homepageUrl)) return json({ error: "请填写有效的来源标识、名称和 HTTPS 主页" }, 400);
+  const status = payload.status === "disabled" ? "disabled" : "active";
+  const db = getD1();
+  const collision = await db.prepare("SELECT id FROM essay_answer_sources WHERE source_key = ? AND id <> ?")
+    .bind(sourceKey, id > 0 ? id : 0).first<{ id: number }>();
+  if (collision) return json({ error: "来源标识已存在" }, 409);
+  if (id > 0) {
+    const updated = await db.prepare(`UPDATE essay_answer_sources SET source_key = ?, name = ?, homepage_url = ?,
+      status = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(sourceKey, name, homepageUrl, status, sortOrder, id).run();
+    if (!updated.meta.changes) return json({ error: "答案来源不存在" }, 404);
+    await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+      WHERE library_enabled = 1 AND EXISTS (
+        SELECT 1 FROM question_bank_items qbi JOIN essay_reference_answers a ON a.question_id = qbi.question_id
+        WHERE qbi.bank_id = question_banks.id AND a.source_id = ?
+      )`).bind(id).run();
+    return json({ ok: true, id });
+  }
+  await db.prepare(`INSERT INTO essay_answer_sources (source_key, name, homepage_url, status, sort_order)
+    VALUES (?, ?, ?, ?, ?)`).bind(sourceKey, name, homepageUrl, status, sortOrder).run();
+  const created = await db.prepare("SELECT id FROM essay_answer_sources WHERE source_key = ?")
+    .bind(sourceKey).first<{ id: number }>();
+  return json({ ok: true, id: Number(created?.id) }, 201);
+}
+
+async function adminSetEssayAnswerSourceStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id ?? payload.sourceId);
+  const status = payload.status === "active" ? "active" : payload.status === "disabled" ? "disabled" : "";
+  if (!(id > 0) || !status) return json({ error: "来源状态无效" }, 400);
+  const updated = await getD1().prepare("UPDATE essay_answer_sources SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(status, id).run();
+  if (!updated.meta.changes) return json({ error: "答案来源不存在" }, 404);
+  await getD1().prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE library_enabled = 1 AND EXISTS (
+      SELECT 1 FROM question_bank_items qbi JOIN essay_reference_answers a ON a.question_id = qbi.question_id
+      WHERE qbi.bank_id = question_banks.id AND a.source_id = ?
+    )`).bind(id).run();
+  return json({ ok: true, id, status });
+}
+
+async function readEssayAnswerForPublication(id: number) {
+  return getD1().prepare(`SELECT a.id, a.display_mode, a.content, a.excerpt, a.source_url,
+    a.copyright_status, a.publication_status, s.status AS source_status
+    FROM essay_reference_answers a JOIN essay_answer_sources s ON s.id = a.source_id WHERE a.id = ?`)
+    .bind(id).first<{
+      id: number; display_mode: string; content: string; excerpt: string; source_url: string;
+      copyright_status: string; publication_status: string; source_status: string;
+    }>();
+}
+
+function essayPublicationErrors(row: {
+  display_mode: string; content: string; excerpt: string; source_url: string;
+  copyright_status: string; source_status: string;
+}) {
+  const errors = validateEssayAnswerPublication({
+    displayMode: row.display_mode,
+    copyrightStatus: row.copyright_status,
+    content: row.content,
+    excerpt: row.excerpt,
+    sourceUrl: row.source_url,
+  });
+  if (row.source_status !== "active") errors.push("SOURCE_DISABLED");
+  return [...new Set(errors)];
+}
+
+async function adminUpsertEssayReferenceAnswer(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.write")) return adminForbidden("content.write");
+  const admin = adminFromPayload(payload);
+  if (!admin) return adminForbidden("content.write");
+  const id = positiveSafeInteger(payload.id);
+  const questionId = positiveSafeInteger(payload.questionId);
+  const sourceId = positiveSafeInteger(payload.sourceId);
+  const sourceTitle = trimmed(payload.sourceTitle, 300);
+  const displayMode = String(payload.displayMode ?? "");
+  const content = trimmed(payload.content, 100_000);
+  const excerpt = trimmed(payload.excerpt, 8_000);
+  const sourceUrl = trimmed(payload.sourceUrl, 1000);
+  const copyrightStatus = String(payload.copyrightStatus ?? "pending_verification");
+  const publicationStatus = ["draft", "published", "archived"].includes(String(payload.publicationStatus))
+    ? String(payload.publicationStatus) : "draft";
+  const sortOrder = Math.max(0, Math.min(100_000, Math.floor(Number(payload.sortOrder ?? 0)) || 0));
+  const originalPublishedAt = trimmed(payload.originalPublishedAt, 40) || null;
+  if (!(questionId > 0) || !(sourceId > 0)
+    || !["full", "excerpt", "link_only"].includes(displayMode)
+    || !["original", "authorized", "fair_quote", "link_only", "pending_verification"].includes(copyrightStatus)) {
+    return json({ error: "答案关联或版权配置无效" }, 400);
+  }
+  if (publicationStatus === "published" && !hasAdminPermission(admin, "content.publish")) {
+    return adminForbidden("content.publish");
+  }
+  const db = getD1();
+  const source = await db.prepare("SELECT id, status FROM essay_answer_sources WHERE id = ?")
+    .bind(sourceId).first<{ id: number; status: string }>();
+  const question = await db.prepare(`SELECT q.id FROM questions q WHERE q.id = ? AND EXISTS (
+    SELECT 1 FROM question_bank_items qbi JOIN question_banks qb ON qb.id = qbi.bank_id
+    WHERE qbi.question_id = q.id AND qb.library_enabled = 1)`)
+    .bind(questionId).first<{ id: number }>();
+  if (!source || !question) return json({ error: "题目或答案来源不存在" }, 404);
+  if (publicationStatus === "published") {
+    const errors = essayPublicationErrors({
+      display_mode: displayMode, content, excerpt, source_url: sourceUrl,
+      copyright_status: copyrightStatus, source_status: source.status,
+    });
+    if (errors.length) return json({ error: "答案未通过版权发布门禁", code: "ESSAY_ANSWER_NOT_PUBLISHABLE", reasons: errors }, 409);
+  }
+  if (id > 0) {
+    const previous = await db.prepare("SELECT question_id FROM essay_reference_answers WHERE id = ?")
+      .bind(id).first<{ question_id: number }>();
+    if (!previous) return json({ error: "参考答案不存在" }, 404);
+    const updated = await db.prepare(`UPDATE essay_reference_answers SET question_id = ?, source_id = ?, source_title = ?,
+      display_mode = ?, content = ?, excerpt = ?, source_url = ?, copyright_status = ?, publication_status = ?,
+      sort_order = ?, original_published_at = ?, updated_by = ?,
+      published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, CURRENT_TIMESTAMP) ELSE published_at END,
+      updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(questionId, sourceId, sourceTitle, displayMode, content, excerpt, sourceUrl, copyrightStatus,
+        publicationStatus, sortOrder, originalPublishedAt, admin.id, publicationStatus, id).run();
+    if (!updated.meta.changes) return json({ error: "参考答案不存在" }, 404);
+    for (const affectedQuestionId of new Set([Number(previous.question_id), questionId])) {
+      await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+        WHERE library_enabled = 1 AND EXISTS (
+          SELECT 1 FROM question_bank_items qbi
+          WHERE qbi.bank_id = question_banks.id AND qbi.question_id = ?
+        )`).bind(affectedQuestionId).run();
+    }
+    return json({ ok: true, id, publicationStatus });
+  }
+  const duplicate = await db.prepare("SELECT id FROM essay_reference_answers WHERE question_id = ? AND source_id = ?")
+    .bind(questionId, sourceId).first<{ id: number }>();
+  if (duplicate) return json({ error: "该题已收录此来源答案，请编辑已有记录" }, 409);
+  await db.prepare(`INSERT INTO essay_reference_answers
+    (question_id, source_id, source_title, display_mode, content, excerpt, source_url, copyright_status,
+      publication_status, sort_order, original_published_at, created_by, updated_by, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'published' THEN CURRENT_TIMESTAMP ELSE NULL END)`)
+    .bind(questionId, sourceId, sourceTitle, displayMode, content, excerpt, sourceUrl, copyrightStatus,
+      publicationStatus, sortOrder, originalPublishedAt, admin.id, admin.id, publicationStatus).run();
+  const created = await db.prepare("SELECT id FROM essay_reference_answers WHERE question_id = ? AND source_id = ?")
+    .bind(questionId, sourceId).first<{ id: number }>();
+  await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE library_enabled = 1 AND EXISTS (
+      SELECT 1 FROM question_bank_items qbi
+      WHERE qbi.bank_id = question_banks.id AND qbi.question_id = ?
+    )`).bind(questionId).run();
+  return json({ ok: true, id: Number(created?.id), publicationStatus }, 201);
+}
+
+async function adminSetEssayReferenceAnswerStatus(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.publish")) return adminForbidden("content.publish");
+  const id = positiveSafeInteger(payload.id);
+  const status = String(payload.status ?? payload.publicationStatus ?? "");
+  if (!(id > 0) || !["draft", "published", "archived"].includes(status)) return json({ error: "答案状态无效" }, 400);
+  const answer = await readEssayAnswerForPublication(id);
+  if (!answer) return json({ error: "参考答案不存在" }, 404);
+  if (status === "published") {
+    const errors = essayPublicationErrors(answer);
+    if (errors.length) return json({ error: "答案未通过版权发布门禁", code: "ESSAY_ANSWER_NOT_PUBLISHABLE", reasons: errors }, 409);
+  }
+  await getD1().prepare(`UPDATE essay_reference_answers SET publication_status = ?,
+    published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, CURRENT_TIMESTAMP) ELSE published_at END,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(status, status, id).run();
+  await getD1().prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE library_enabled = 1 AND EXISTS (
+      SELECT 1 FROM question_bank_items qbi
+      WHERE qbi.bank_id = question_banks.id AND qbi.question_id = (
+        SELECT question_id FROM essay_reference_answers WHERE id = ?
+      )
+    )`).bind(id).run();
+  return json({ ok: true, id, status });
+}
+
+async function adminUpdateEssayLibrarySettings(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "content.publish")) return adminForbidden("content.publish");
+  const contactEmail = trimmed(payload.contactEmail, 254).toLowerCase();
+  if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
+    return json({ error: "版权联系邮箱格式无效" }, 400);
+  }
+  if (!contactEmail) {
+    const published = await getD1().prepare(`SELECT COUNT(*) AS count FROM question_banks
+      WHERE library_enabled = 1 AND library_status = 'published'`).first<{ count: number }>();
+    if (Number(published?.count ?? 0) > 0) {
+      return json({ error: "已有公开试卷时不能清空版权联系邮箱；请先配置新邮箱或撤回全部试卷",
+        code: "COPYRIGHT_CONTACT_REQUIRED" }, 409);
+    }
+  }
+  await getD1().prepare(`INSERT INTO configs (key, value, updated_at)
+    VALUES ('copyright_contact_email', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(contactEmail).run();
+  return json({ ok: true, contactEmail });
+}
+
 function getAdminSecret() {
   return (env as unknown as { ADMIN_TOKEN?: string }).ADMIN_TOKEN ?? process.env.ADMIN_TOKEN ?? "";
 }
@@ -6682,6 +7510,16 @@ function abandonActiveSessionsForDraftedQuestionBanks(db: ReturnType<typeof getD
       )`).bind(...guard.binds, postState.questionId);
 }
 
+function draftEssayLibraryPapersForQuestion(db: ReturnType<typeof getD1>, postState: QuestionPostStateGuard) {
+  const guard = questionPostStateGuard(postState);
+  return db.prepare(`UPDATE question_banks AS qb SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+    WHERE qb.library_enabled = 1 AND qb.library_status <> 'draft'
+      AND ${guard.sql}
+      AND EXISTS (SELECT 1 FROM question_bank_items qbi
+        WHERE qbi.bank_id = qb.id AND qbi.question_id = ?)`)
+    .bind(...guard.binds, postState.questionId);
+}
+
 async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "question.write")) return adminForbidden("question.write");
   const requestedBankCode = trimmed(payload.bankCode, 60).toUpperCase();
@@ -6764,7 +7602,9 @@ async function adminUpsertQuestionBank(payload: Record<string, unknown>) {
   }
   if (bankId) {
     const updateStatement = db.prepare(`UPDATE question_banks AS qb SET name = ?, exam_type = ?, province = ?,
-      exam_year = ?, subject = ?, description = ?, cover_color = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      exam_year = ?, subject = ?, description = ?, cover_color = ?, status = ?,
+      library_status = CASE WHEN library_enabled = 1 THEN 'draft' ELSE library_status END,
+      updated_at = CURRENT_TIMESTAMP
       WHERE qb.id = ? AND (? <> 'published' OR ${QUESTION_BANK_CAN_PUBLISH_SQL})`)
       .bind(name, examType, province, examYear, subject, description, coverColor, status, bankId, status);
     const statements = [updateStatement];
@@ -7125,6 +7965,8 @@ async function adminUpsertQuestion(payload: Record<string, unknown>) {
       { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
     abandonActiveSessionsForDraftedQuestionBanks(db,
       { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
+    draftEssayLibraryPapersForQuestion(db,
+      { questionId: id, version: nextVersion, reviewStatus: "pending_review" }),
     db.prepare(`INSERT OR IGNORE INTO question_versions
       (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
       SELECT id, version, question_code, ?, 'edit', ?, ?, 'pending_review'
@@ -7172,6 +8014,7 @@ async function adminSetQuestionStatus(payload: Record<string, unknown>) {
   if (status === "disabled") statements.push(abandonActiveSessionsByQuestionCode(db, currentSnapshot.questionCode, statusPostState));
   statements.push(draftInvalidPublishedBanksForQuestion(db, statusPostState));
   statements.push(abandonActiveSessionsForDraftedQuestionBanks(db, statusPostState));
+  statements.push(draftEssayLibraryPapersForQuestion(db, statusPostState));
   statements.push(db.prepare(`INSERT OR IGNORE INTO question_versions
     (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
     SELECT id, version, question_code, ?, 'status', ?, ?, ? FROM questions WHERE id = ? AND version = ?`)
@@ -8133,8 +8976,8 @@ async function adminStartQuestionImport(payload: Record<string, unknown>) {
     return json({ error: `单个文件最多${QUESTION_IMPORT_MAX_CHUNKS_PER_FILE}个持久化分块；内容过大时请按年份或地区拆分文件` }, 400);
   }
   const db = getD1();
-  const bank = await db.prepare("SELECT id, status FROM question_banks WHERE id = ?")
-    .bind(bankId).first<{ id: number; status: string }>();
+  const bank = await db.prepare("SELECT id, status, library_enabled FROM question_banks WHERE id = ?")
+    .bind(bankId).first<{ id: number; status: string; library_enabled: number }>();
   if (!bank) return json({ error: "目标题库不存在" }, 404);
   if (bank.status === "published") {
     return json({ error: "已发布题库不能直接导入；请先下架为草稿，完成导入、复核和审核后再重新发布" }, 409);
@@ -8145,6 +8988,10 @@ async function adminStartQuestionImport(payload: Record<string, unknown>) {
     FROM question_banks WHERE id = ? AND status = 'draft'`)
     .bind(fileName, fileSize, fileHash, duplicateStrategy, totalRows, totalChunks, admin?.id ?? null, bankId).run();
   if (!result.meta.changes) return json({ error: "题库状态刚刚发生变化，请刷新后下架为草稿再导入" }, 409);
+  if (Number(bank.library_enabled) === 1) {
+    await db.prepare(`UPDATE question_banks SET library_status = 'draft', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND library_enabled = 1`).bind(bankId).run();
+  }
   return json({ ok: true, importId: Number(result.meta.last_row_id), chunkSize, totalChunks, status: "uploading" });
 }
 
@@ -8410,6 +9257,8 @@ async function adminReviewQuestion(payload: Record<string, unknown>) {
     statements.push(db.prepare(QUESTION_VALUE_METRICS_SQL)
       .bind(...questionValueMetricBindsForReview(id, nextVersion, currentYear - 4, currentYear - 2)));
   }
+  statements.push(draftEssayLibraryPapersForQuestion(db,
+    { questionId: id, version: nextVersion, reviewStatus: nextStatus }));
   statements.push(db.prepare(`INSERT OR IGNORE INTO question_versions
     (question_id, version, question_code, snapshot_json, change_type, from_version, admin_user_id, review_status)
     SELECT id, version, question_code, ?, 'review', ?, ?, ? FROM questions
@@ -9403,6 +10252,8 @@ async function adminRollbackQuestionVersion(payload: Record<string, unknown>) {
       { questionId, version: nextVersion, reviewStatus: "pending_review" }),
     abandonActiveSessionsForDraftedQuestionBanks(db,
       { questionId, version: nextVersion, reviewStatus: "pending_review" }),
+    draftEssayLibraryPapersForQuestion(db,
+      { questionId, version: nextVersion, reviewStatus: "pending_review" }),
   ]);
   if (!results[0]?.meta.changes) {
     return json({
@@ -10234,6 +11085,18 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminBulkUpsertQuizQuestions: ["content.write"],
   adminSetQuizQuestionStatus: ["content.write"],
   adminUpsertQuizResult: ["content.write"],
+  adminGetEssayReferenceLibrary: ["content.read"],
+  adminUpsertEssayPaper: ["content.write"],
+  adminSetEssayPaperStatus: ["content.publish"],
+  adminUpsertEssayMaterial: ["content.write"],
+  adminDeleteEssayMaterial: ["content.write"],
+  adminUpsertEssayLibraryQuestion: ["content.write"],
+  adminReviewEssayLibraryQuestion: ["question.review"],
+  adminUpsertEssayAnswerSource: ["content.write"],
+  adminSetEssayAnswerSourceStatus: ["content.write"],
+  adminUpsertEssayReferenceAnswer: ["content.write"],
+  adminSetEssayReferenceAnswerStatus: ["content.publish"],
+  adminUpdateEssayLibrarySettings: ["content.publish"],
 };
 
 const ADMIN_WRITE_ACTIONS = new Set([
@@ -10247,9 +11110,13 @@ const ADMIN_WRITE_ACTIONS = new Set([
   "adminRollbackQuestionVersion", "adminCreateUser", "adminSetUserStatus",
   "adminUpdateUser", "adminSetAnalyticsEligibility", "adminSubmitContentReview", "adminReviewContent", "adminReviewQuestion", "adminResolveContentReport",
   "adminCreateQuiz", "adminUpdateQuiz", "adminUpsertQuizQuestion", "adminBulkUpsertQuizQuestions", "adminSetQuizQuestionStatus", "adminUpsertQuizResult",
+  "adminUpsertEssayPaper", "adminSetEssayPaperStatus", "adminUpsertEssayMaterial", "adminDeleteEssayMaterial",
+  "adminUpsertEssayLibraryQuestion", "adminReviewEssayLibraryQuestion", "adminUpsertEssayAnswerSource", "adminSetEssayAnswerSourceStatus",
+  "adminUpsertEssayReferenceAnswer", "adminSetEssayReferenceAnswerStatus", "adminUpdateEssayLibrarySettings",
 ]);
 
 function resourceTypeForAdminAction(action: string) {
+  if (action.includes("Essay")) return "essay_reference_library";
   if (action.includes("ContentReport")) return "content_report";
   if (action.includes("Media")) return "media";
   if (action.includes("Quiz")) return "quiz";
@@ -10382,6 +11249,18 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminBulkUpsertQuizQuestions") response = await adminBulkUpsertQuizQuestions(payload);
   else if (action === "adminSetQuizQuestionStatus") response = await adminSetQuizQuestionStatus(payload);
   else if (action === "adminUpsertQuizResult") response = await adminUpsertQuizResult(payload);
+  else if (action === "adminGetEssayReferenceLibrary") response = await adminGetEssayReferenceLibrary(payload);
+  else if (action === "adminUpsertEssayPaper") response = await adminUpsertEssayPaper(payload);
+  else if (action === "adminSetEssayPaperStatus") response = await adminSetEssayPaperStatus(payload);
+  else if (action === "adminUpsertEssayMaterial") response = await adminUpsertEssayMaterial(payload);
+  else if (action === "adminDeleteEssayMaterial") response = await adminDeleteEssayMaterial(payload);
+  else if (action === "adminUpsertEssayLibraryQuestion") response = await adminUpsertEssayLibraryQuestion(payload);
+  else if (action === "adminReviewEssayLibraryQuestion") response = await adminReviewEssayLibraryQuestion(payload);
+  else if (action === "adminUpsertEssayAnswerSource") response = await adminUpsertEssayAnswerSource(payload);
+  else if (action === "adminSetEssayAnswerSourceStatus") response = await adminSetEssayAnswerSourceStatus(payload);
+  else if (action === "adminUpsertEssayReferenceAnswer") response = await adminUpsertEssayReferenceAnswer(payload);
+  else if (action === "adminSetEssayReferenceAnswerStatus") response = await adminSetEssayReferenceAnswerStatus(payload);
+  else if (action === "adminUpdateEssayLibrarySettings") response = await adminUpdateEssayLibrarySettings(payload);
   else return json({ error: "未知管理操作" }, 400);
   await auditAdminResponse(request, admin, action, payload, response);
   return response;
@@ -10555,6 +11434,7 @@ export async function POST(request: Request) {
     else if (action === "submitQuizAnswer") response = await submitQuizAnswer(identity.userId, payload);
     else if (action === "completeQuizAttempt") response = await completeQuizAttempt(identity.userId, payload);
     else if (action === "recordQuizShare") response = await recordQuizShare(identity.userId, payload);
+    else if (action === "getEssayReferenceLibrary") response = await getEssayReferenceLibrary(payload);
     else response = json({ error: "未知操作" }, 400);
     appendCookies(response.headers, identity.setCookie);
     return response;

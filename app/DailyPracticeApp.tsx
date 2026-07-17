@@ -8,10 +8,11 @@ import type { PracticeDay, Question } from "./data/content";
 import type { AudioTrack } from "./data/audio";
 import AudioHub from "./AudioHub";
 import CommercePaywall, { type PaywallReason } from "./CommercePaywall";
+import EssayReferenceLibrary, { type EssayLibraryPaper, type EssayReferencePaper } from "./EssayReferenceLibrary";
 import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 
-type Tab = "today" | "banks" | "audio" | "review" | "report" | "calendar" | "me";
+type Tab = "today" | "banks" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "copyright";
 type Module = "morning" | "practice" | "affairs" | "essay" | null;
 type PracticeMode = "mixed" | "review";
 type PlanMinutes = 10 | 30 | 45 | 60;
@@ -487,6 +488,16 @@ type DailyReadiness = {
   requiredQuestionCount: number;
   effectiveBankCodes: string[];
   planMinutes?: number;
+};
+
+type EssayReferenceLibraryResponse = {
+  papers?: EssayLibraryPaper[];
+  page?: number;
+  pageSize?: number;
+  total?: number;
+  contactEmail?: string;
+  copyrightContactEmail?: string;
+  settings?: { copyrightContactEmail?: string };
 };
 
 type PracticeSummary = {
@@ -1365,6 +1376,16 @@ export default function DailyPracticeApp() {
   const [bonusDrillOffset, setBonusDrillOffset] = useState(0);
   const [todayGainExpanded, setTodayGainExpanded] = useState(false);
   const [bankFilter, setBankFilter] = useState("适合我");
+  const [essayLibraryPapers, setEssayLibraryPapers] = useState<EssayLibraryPaper[]>([]);
+  const [essayLibraryLoading, setEssayLibraryLoading] = useState(false);
+  const [essayLibraryLoaded, setEssayLibraryLoaded] = useState(false);
+  const [essayLibraryError, setEssayLibraryError] = useState("");
+  const [essayLibraryPage, setEssayLibraryPage] = useState(0);
+  const [essayLibraryTotal, setEssayLibraryTotal] = useState(0);
+  const [essayLibraryLoadingMore, setEssayLibraryLoadingMore] = useState(false);
+  const [essayLibraryInitialPaperId, setEssayLibraryInitialPaperId] = useState<string | undefined>(undefined);
+  const [copyrightContactEmail, setCopyrightContactEmail] = useState("");
+  const [copyrightContactLoading, setCopyrightContactLoading] = useState(false);
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("mixed");
@@ -1640,6 +1661,159 @@ export default function DailyPracticeApp() {
   const trackEvent = useCallback((eventName: string, eventData: Record<string, unknown> = {}) => {
     void fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "trackEvent", eventName, eventData }), keepalive: true }).catch(() => undefined);
   }, []);
+
+  const loadEssayReferenceLibrary = useCallback(async (force = false, requestedPage = 1) => {
+    if (essayLibraryLoading || essayLibraryLoadingMore || (requestedPage === 1 && essayLibraryLoaded && !force)) return;
+    if (requestedPage > 1) setEssayLibraryLoadingMore(true);
+    else setEssayLibraryLoading(true);
+    setEssayLibraryError("");
+    try {
+      const data = await api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", page: requestedPage, pageSize: 50 });
+      const incoming = Array.isArray(data.papers) ? data.papers : [];
+      setEssayLibraryPapers((current) => {
+        if (requestedPage === 1) return incoming;
+        const merged = new Map(current.map((paper) => [String(paper.id), paper]));
+        incoming.forEach((paper) => merged.set(String(paper.id), { ...merged.get(String(paper.id)), ...paper }));
+        return [...merged.values()];
+      });
+      setEssayLibraryPage(Number(data.page ?? requestedPage));
+      setEssayLibraryTotal(Math.max(0, Number(data.total ?? incoming.length)));
+      setCopyrightContactEmail(
+        String(data.contactEmail ?? data.copyrightContactEmail ?? data.settings?.copyrightContactEmail ?? "").trim(),
+      );
+      setEssayLibraryLoaded(true);
+    } catch (error) {
+      setEssayLibraryError(error instanceof Error ? error.message : "资料库加载失败，请稍后重试");
+    } finally {
+      setEssayLibraryLoading(false);
+      setEssayLibraryLoadingMore(false);
+    }
+  }, [api, essayLibraryLoaded, essayLibraryLoading, essayLibraryLoadingMore]);
+
+  const loadEssayPaperDetail = useCallback(async (paperId: string) => {
+    const existing = essayLibraryPapers.find((paper) => String(paper.id) === String(paperId));
+    if (Array.isArray(existing?.questions) && Array.isArray(existing?.materials)) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("essayPaper", String(existing.code ?? paperId));
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      trackEvent("essay_reference_paper_open", { paperId, cached: true });
+      return;
+    }
+    try {
+      const data = await api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", paperId });
+      const detail = data.papers?.[0];
+      if (!detail) throw new Error("该试卷暂时不可用，请返回后重试");
+      setEssayLibraryPapers((current) => current.map((paper) => (
+        String(paper.id) === String(paperId) ? { ...paper, ...detail } : paper
+      )));
+      const paperKey = String(detail.code ?? existing?.code ?? paperId);
+      const url = new URL(window.location.href);
+      url.searchParams.set("essayPaper", paperKey);
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      trackEvent("essay_reference_paper_open", { paperId, cached: false });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "试卷详情加载失败，请稍后重试");
+      throw error;
+    }
+  }, [api, essayLibraryPapers, notify, trackEvent]);
+
+  const loadCopyrightSettings = useCallback(async () => {
+    setCopyrightContactLoading(true);
+    try {
+      const data = await api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", settingsOnly: true });
+      setCopyrightContactEmail(String(data.contactEmail ?? "").trim());
+    } catch {
+      setCopyrightContactEmail("");
+    } finally {
+      setCopyrightContactLoading(false);
+    }
+  }, [api]);
+
+  const clearEssayPaperLink = useCallback(() => {
+    setEssayLibraryInitialPaperId(undefined);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("essayPaper");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
+  const shareEssayReferencePaper = useCallback(async (paper: EssayReferencePaper) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("essayPaper", String(paper.code ?? paper.id));
+    const shareUrl = url.toString();
+    const text = `${paper.region}-${paper.year} ${paper.volumeType}申论真题及参考答案`;
+    try {
+      if (typeof window.navigator.share === "function") {
+        await window.navigator.share({ title: paper.title, text, url: shareUrl });
+        trackEvent("essay_reference_share", { paperId: paper.id, method: "native" });
+        return;
+      }
+      await copyPlainText(`${paper.title}\n${shareUrl}`);
+      notify("试卷链接已复制");
+      trackEvent("essay_reference_share", { paperId: paper.id, method: "clipboard" });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      try {
+        await copyPlainText(`${paper.title}\n${shareUrl}`);
+        notify("试卷链接已复制");
+        trackEvent("essay_reference_share", { paperId: paper.id, method: "clipboard_fallback" });
+      } catch {
+        notify("当前浏览器暂时无法分享，请稍后重试");
+      }
+    }
+  }, [notify, trackEvent]);
+
+  const openEssayReferenceLibrary = useCallback(() => {
+    setActiveModule(null);
+    setTab("essayLibrary");
+    trackEvent("essay_reference_library_open", { entry: "essay_bank_filter" });
+    void loadEssayReferenceLibrary(true, 1);
+  }, [loadEssayReferenceLibrary, trackEvent]);
+
+  const openCopyrightNotice = useCallback(() => {
+    setActiveModule(null);
+    setTab("copyright");
+    void loadCopyrightSettings();
+  }, [loadCopyrightSettings]);
+
+  const loadEssayReferenceDeepLink = useCallback(async (paperCode: string, signal?: AbortSignal) => {
+    setActiveModule(null);
+    setTab("essayLibrary");
+    setEssayLibraryLoading(true);
+    setEssayLibraryError("");
+    try {
+      const [catalog, detailData] = await Promise.all([
+        api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", page: 1, pageSize: 50 }, { signal }),
+        api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", paperCode }, { signal }),
+      ]);
+      const detail = detailData.papers?.[0];
+      if (!detail) throw new Error("分享的试卷暂时不可用");
+      const catalogPapers = Array.isArray(catalog.papers) ? catalog.papers : [];
+      const merged = new Map(catalogPapers.map((paper) => [String(paper.id), paper]));
+      merged.set(String(detail.id), { ...merged.get(String(detail.id)), ...detail });
+      setEssayLibraryPapers([...merged.values()]);
+      setEssayLibraryInitialPaperId(String(detail.id));
+      setEssayLibraryPage(Number(catalog.page ?? 1));
+      setEssayLibraryTotal(Math.max(Number(catalog.total ?? catalogPapers.length), merged.size));
+      setCopyrightContactEmail(String(catalog.contactEmail ?? detailData.contactEmail ?? "").trim());
+      setEssayLibraryLoaded(true);
+      trackEvent("essay_reference_deep_link_open", { paperCode, paperId: detail.id });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setEssayLibraryError(error instanceof Error ? error.message : "分享的试卷加载失败");
+    } finally {
+      if (!signal?.aborted) setEssayLibraryLoading(false);
+    }
+  }, [api, trackEvent]);
+
+  useEffect(() => {
+    const paperCode = new URLSearchParams(window.location.search).get("essayPaper")?.trim() ?? "";
+    if (!paperCode) return;
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) void loadEssayReferenceDeepLink(paperCode, controller.signal);
+    });
+    return () => controller.abort();
+  }, [loadEssayReferenceDeepLink]);
 
   const shareThreeDayReport = useCallback(async () => {
     const report = bootstrap?.studyInsights;
@@ -3606,6 +3780,11 @@ export default function DailyPracticeApp() {
             <div className="target-scope-note"><b>主攻优先 · 兼顾其他题库</b><span>{primaryBank ? `优先安排《${primaryBank.name}》；其他已加入题库也会参与训练` : "请先添加一套行测题库"}</span><button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>管理目标</button></div>
             <div className="bank-filters">{["适合我", "我的", "全部", "国考", "省考", "专项", "申论"].map((item) => <button key={item} className={bankFilter === item ? "active" : ""} onClick={() => setBankFilter(item)}>{item}</button>)}</div>
             {bankFilter === "适合我" && <div className="fit-rule-note"><b>推荐标准</b><span>仅按主攻考试、已选省份、已加入题库、到期复习和薄弱考点展示符合条件的题库。</span></div>}
+            {bankFilter === "申论" && <section className="essay-reference-entry">
+              <div className="essay-reference-entry-icon">查</div>
+              <div><span>免费资料查询</span><h2>申论真题资料库</h2><p>按考试、地区、年份和卷种查找真题材料，并在同一题目下切换查看不同来源的参考答案。</p><small>独立资料库 · 不计入今日任务 · 无需开通会员</small></div>
+              <button type="button" onClick={openEssayReferenceLibrary}>进入资料库</button>
+            </section>}
             <section className="bank-list">{filteredBanks.map((bank) => {
               const percent = bank.questionCount ? Math.round((bank.studiedCount / bank.questionCount) * 100) : 0;
               const estimatedDays = bank.questionCount ? Math.max(1, Math.ceil(Math.max(0, bank.questionCount - bank.studiedCount) / dailyPlan.questionCount)) : 0;
@@ -3620,8 +3799,29 @@ export default function DailyPracticeApp() {
                 </div>
               </article>;
             })}</section>
-            {filteredBanks.length === 0 && <div className="empty-state compact"><span>库</span><h3>该分类暂无已发布题库</h3><p>相关题库发布后将自动显示在此处。</p></div>}
+            {filteredBanks.length === 0 && bankFilter !== "申论" && <div className="empty-state compact"><span>库</span><h3>该分类暂无已发布题库</h3><p>相关题库发布后将自动显示在此处。</p></div>}
           </div>}
+
+          {tab === "essayLibrary" && <>
+            {essayLibraryLoading && !essayLibraryLoaded ? <div className="page-content subpage essay-reference-loading"><div className="empty-state compact"><span>查</span><h3>正在加载申论真题资料库</h3><p>正在整理可公开查询的试卷、材料和参考答案。</p></div></div>
+              : essayLibraryError ? <div className="page-content subpage essay-reference-loading"><div className="empty-state compact"><span>!</span><h3>资料库暂时无法加载</h3><p>{essayLibraryError}</p><button className="primary-button" type="button" onClick={() => {
+                const paperCode = new URLSearchParams(window.location.search).get("essayPaper")?.trim() ?? "";
+                if (paperCode) void loadEssayReferenceDeepLink(paperCode);
+                else void loadEssayReferenceLibrary(true, 1);
+              }}>重新加载</button><button className="secondary-button" type="button" onClick={() => { clearEssayPaperLink(); setBankFilter("申论"); setTab("banks"); }}>返回题库</button></div></div>
+                : <EssayReferenceLibrary
+                  papers={essayLibraryPapers}
+                  initialPaperId={essayLibraryInitialPaperId}
+                  onClose={() => { clearEssayPaperLink(); setBankFilter("申论"); setTab("banks"); }}
+                  onPaperOpen={loadEssayPaperDetail}
+                  onPaperExit={clearEssayPaperLink}
+                  onSharePaper={shareEssayReferencePaper}
+                  hasMore={essayLibraryPapers.length < essayLibraryTotal}
+                  totalCount={essayLibraryTotal}
+                  loadingMore={essayLibraryLoadingMore}
+                  onLoadMore={() => loadEssayReferenceLibrary(false, essayLibraryPage + 1)}
+                />}
+          </>}
 
           {tab === "review" && <div className="page-content subpage"><div className="subpage-heading"><span>智能复习</span><h1>通过再次作答验证掌握情况</h1><p>仅展示今日到期复习题；答错、超时及掌握不稳定的题目将纳入复习计划。</p></div><section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy || insights.dueCount === 0} onClick={() => void startPractice("review", undefined, { kind: "review" })}>{insights.dueCount ? "开始复习" : "今日复习已完成"}</button></section><div className="review-rules"><article><span>1天</span><div><b>答错、超时及掌握不稳定</b><p>次日重新作答，验证是否已经掌握。</p></div></article><article><span>3天</span><div><b>首次稳定答对</b><p>跨天再次答对后，进入长期记忆阶段。</p></div></article><article><span>7/14/30天</span><div><b>连续稳定掌握</b><p>按到期时间进行巩固，稳定后逐步延长复习间隔。</p></div></article></div>{(insights.dueCount === 0 || practiceEmpty) && <div className="empty-state compact review-empty"><span>✓</span><h3>今日没有到期复习题</h3><p>复习任务已完成，可继续进行今日新题训练。</p><button className="primary-button" onClick={() => setTab("today")}>返回今日</button></div>}</div>}
 
@@ -3795,6 +3995,33 @@ export default function DailyPracticeApp() {
             <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后会直接回到今日页，按你的备考组合生成下一步练习；时长码自动累计，终身码不会被覆盖。</small></article>
             <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证及首次有效日练后，双方会员时长自动发放；仅访问链接或完成注册不计入奖励条件。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
             <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
+            <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看产品定位、内容来源和版权联系说明。</p></div><strong>›</strong></button>
+          </div>}
+
+          {tab === "about" && <div className="page-content subpage about-page">
+            <div className="subpage-back-heading"><button type="button" onClick={() => setTab("me")}>‹ 返回</button><span>关于公考日练</span></div>
+            <section className="about-intro-card"><div className="brand-mark">公</div><div><h1>公考日练</h1><p>面向公务员考试备考人群的精简日练与资料查询工具。</p></div></section>
+            <section className="about-menu" aria-label="关于公考日练">
+              <button type="button" onClick={openCopyrightNotice}><div><b>版权与内容来源说明</b><small>内容来源、第三方名称使用及权利投诉方式</small></div><strong>›</strong></button>
+            </section>
+          </div>}
+
+          {tab === "copyright" && <div className="page-content subpage legal-page">
+            <div className="subpage-back-heading"><button type="button" onClick={() => setTab("about")}>‹ 返回</button><span>版权与内容来源说明</span></div>
+            <article className="legal-copy">
+              <h1>版权与内容来源说明</h1>
+              <p>“公考日练”提供公务员考试相关资料的分类、整理与查询服务。除本平台原创内容外，部分试题、材料及参考答案整理自公开可访问的网络资料，相关著作权归原作者或权利人所有。</p>
+              <p>页面中的机构或作者名称仅用于说明资料来源，不代表本平台与相关机构存在合作、推荐或背书关系。除明确标注为官方内容外，平台所展示的答案均为第三方参考答案，不属于官方标准答案，仅供备考查询参考。</p>
+              <p>如您是相关内容的著作权人或合法授权代理人，并认为平台展示的内容侵犯了您的合法权益，请将以下信息发送至版权联系邮箱：</p>
+              <ul>
+                <li>权利人姓名或主体名称及联系方式；</li>
+                <li>相关权属证明或授权证明；</li>
+                <li>涉及内容的页面、试卷名称及题号；</li>
+                <li>需要删除、修改或断开链接的具体内容。</li>
+              </ul>
+              <p>平台收到完整通知后，将及时核验，并根据实际情况采取隐藏、删除或断开链接等必要措施。</p>
+              <div className="legal-contact"><span>版权联系邮箱</span><b>{copyrightContactEmail ? <a href={`mailto:${copyrightContactEmail}`}>{copyrightContactEmail}</a> : copyrightContactLoading ? "正在读取配置" : "暂未配置"}</b><small>处理时间：工作日9:00—18:00</small></div>
+            </article>
           </div>}
         </>}
 
@@ -3827,7 +4054,7 @@ export default function DailyPracticeApp() {
           }}
         />}
 
-        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><span>复</span>复习</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>台</span>电台</button><button className={tab === "me" || tab === "report" || tab === "calendar" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
+        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" || tab === "essayLibrary" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><span>复</span>复习</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>台</span>电台</button><button className={tab === "me" || tab === "report" || tab === "calendar" || tab === "about" || tab === "copyright" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
 
         {eventFormOpen && bootstrap && (
           <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-labelledby="event-form-title" aria-describedby="event-form-description">

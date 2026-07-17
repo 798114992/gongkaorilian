@@ -42,12 +42,17 @@ test("all migrations build a fresh database with the current durable schema", ()
     "question_import_errors", "question_versions", "products", "orders",
     "payment_transactions", "refunds", "entitlement_grants", "content_reports", "device_account_links",
     "quiz_tests", "quiz_questions", "quiz_result_levels", "quiz_attempts", "quiz_share_events",
+    "essay_library_materials", "essay_library_question_materials", "essay_answer_sources", "essay_reference_answers",
   ]) assert.ok(tables.has(table), `missing migrated table ${table}`);
 
   for (const column of ["attempt_key", "practice_session_id", "selected_answer", "was_due", "apply_status"])
     assert.ok(tableColumns(db, "practice_attempts").includes(column), `missing practice_attempts.${column}`);
   for (const column of ["truth_verified", "review_status", "reviewed_by", "reviewed_at", "review_note", "version"])
     assert.ok(tableColumns(db, "questions").includes(column), `missing questions.${column}`);
+  for (const column of ["paper_type", "source_url", "resource_url", "library_enabled", "library_status"])
+    assert.ok(tableColumns(db, "question_banks").includes(column), `missing question_banks.${column}`);
+  for (const column of ["question_number", "score"])
+    assert.ok(tableColumns(db, "question_bank_items").includes(column), `missing question_bank_items.${column}`);
   for (const column of ["file_hash", "duplicate_strategy", "uploaded_rows", "processed_rows", "total_chunks", "cancel_requested", "lease_token", "lease_until"])
     assert.ok(tableColumns(db, "question_imports").includes(column), `missing question_imports.${column}`);
   assert.ok(tableColumns(db, "question_import_codes").includes("base_version"), "missing question_import_codes.base_version");
@@ -59,7 +64,7 @@ test("all migrations build a fresh database with the current durable schema", ()
   for (const table of ["content_items", "content_item_versions", "media_assets"])
     assert.ok(tableColumns(db, table).includes("access_level"), `missing ${table}.access_level`);
 
-  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "19");
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "20");
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_system_seed_version'").get().value, "2026-07-15-v3");
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_content_seed_version'").get().value, "1");
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='default_quiz_seed_version'").get().value, "2");
@@ -85,6 +90,9 @@ test("all migrations build a fresh database with the current durable schema", ()
   assert.ok(indexNames(db, "content_reports").includes("content_reports_open_uq"));
   assert.ok(indexNames(db, "device_account_links").includes("device_account_links_device_user_uq"));
   assert.ok(indexNames(db, "device_account_links").includes("device_account_links_user_device_idx"));
+  assert.ok(indexNames(db, "essay_library_materials").includes("essay_library_materials_bank_label_uq"));
+  assert.ok(indexNames(db, "essay_answer_sources").includes("essay_answer_sources_key_uq"));
+  assert.ok(indexNames(db, "essay_reference_answers").includes("essay_reference_answers_question_source_uq"));
   db.close();
 });
 
@@ -102,6 +110,26 @@ test("0017 upgrades an existing 0016 database with identity and immutable import
   assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "17");
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='device_account_links'").get().count, 1);
   assert.equal(tableColumns(db, "question_import_codes").includes("base_version"), true);
+  db.close();
+});
+
+test("0021 upgrades the prior schema with the configurable essay reference library", () => {
+  const db = new DatabaseSync(":memory:");
+  const files = migrationFiles();
+  const migration21 = files.find((name) => name.startsWith("0021_"));
+  assert.ok(migration21, "missing tracked 0021 migration");
+  applyMigrations(db, files.filter((name) => name < migration21));
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "19");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='essay_reference_answers'").get().count, 0);
+
+  applyMigrations(db, [migration21]);
+  assert.equal(db.prepare("SELECT value FROM configs WHERE key='runtime_schema_version'").get().value, "20");
+  for (const table of ["essay_library_materials", "essay_library_question_materials", "essay_answer_sources", "essay_reference_answers"])
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name=?").get(table).count, 1);
+  for (const column of ["paper_type", "source_url", "resource_url", "library_enabled", "library_status"])
+    assert.ok(tableColumns(db, "question_banks").includes(column), `missing question_banks.${column}`);
+  for (const column of ["question_number", "score"])
+    assert.ok(tableColumns(db, "question_bank_items").includes(column), `missing question_bank_items.${column}`);
   db.close();
 });
 
@@ -438,7 +466,8 @@ test("migration journal, SQL files and snapshots form one continuous chain", asy
   for (const table of ["question_import_chunks", "question_versions", "content_imports", "content_import_chunks",
     "content_import_row_results", "content_import_keys", "content_import_errors", "products", "orders",
     "entitlement_grants", "content_reports", "device_account_links", "quiz_tests", "quiz_questions",
-    "quiz_result_levels", "quiz_attempts", "quiz_share_events"])
+    "quiz_result_levels", "quiz_attempts", "quiz_share_events", "essay_library_materials",
+    "essay_library_question_materials", "essay_answer_sources", "essay_reference_answers"])
     assert.ok(finalSnapshot.tables[table], `final snapshot is missing ${table}`);
 });
 

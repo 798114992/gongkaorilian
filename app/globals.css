@@ -2265,7 +2265,91 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .quiz-result-mini-stats { grid-template-columns: 1fr 1fr; }
 }
 
-/* 申论真题资料库：作为免费查询工具接入题库，不进入日练任务或会员链路。 */
+/* 资料中心：答案对比为核心，听练与公考雷达按场景使用。 */
+.resources-page { max-width: 760px; margin: 0 auto; }
+.resources-heading { margin-bottom: 16px; }
+.resources-heading > div { min-width: 0; }
+.resources-heading > div > span { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .1em; }
+.resource-primary-card {
+  position: relative;
+  overflow: hidden;
+  padding: 22px;
+  border: 1px solid #a9cde0;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 94% 5%, rgb(70 144 184 / 16%), transparent 36%),
+    linear-gradient(145deg, #f9fdff 0%, #edf7fc 66%, #f7fbfd 100%);
+  box-shadow: 0 15px 36px rgb(28 82 117 / 10%);
+}
+.resource-primary-topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.resource-primary-topline span {
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: #155d91;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .06em;
+}
+.resource-primary-topline small { color: #567487; font-size: 11px; font-weight: 750; }
+.resource-primary-copy { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 15px; align-items: center; margin-top: 18px; }
+.resource-primary-icon {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  border-radius: 18px;
+  color: #fff;
+  background: linear-gradient(145deg, #174f7a, #2876a8);
+  box-shadow: 0 9px 20px rgb(21 93 145 / 20%);
+  font-size: 19px;
+  font-weight: 900;
+}
+.resource-primary-copy h2 { margin: 0 0 6px; color: #112c40; font-size: 22px; line-height: 1.35; letter-spacing: -.02em; }
+.resource-primary-copy p { margin: 0; color: #4f687a; font-size: 13px; line-height: 1.72; }
+.resource-feature-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.resource-feature-list span { padding: 7px 10px; border: 1px solid #c8dde8; border-radius: 10px; color: #37657f; background: rgb(255 255 255 / 72%); font-size: 11px; font-weight: 750; }
+.resource-primary-actions { display: flex; gap: 14px; align-items: center; margin-top: 20px; }
+.resource-primary-actions button {
+  min-width: 132px;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 14px;
+  color: #fff;
+  background: #155d91;
+  font-size: 13px;
+  font-weight: 850;
+}
+.resource-primary-actions button:hover { background: #104d78; }
+.resource-primary-actions small { color: #718692; font-size: 10px; line-height: 1.5; }
+.resource-support-section { margin-top: 20px; }
+.resource-support-section .compact-section-heading { margin-bottom: 11px; }
+.resource-support-section .compact-section-heading > small { color: #7b8d98; font-size: 11px; }
+.resource-support-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.resource-support-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 124px;
+  padding: 16px;
+  border: 1px solid #dbe5eb;
+  border-radius: 19px;
+  background: #fff;
+  text-align: left;
+  box-shadow: 0 7px 22px rgb(31 57 77 / 5%);
+}
+.resource-support-card:hover { border-color: #bfd3df; background: #fbfdfe; }
+.resource-support-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 14px; font-size: 14px; font-weight: 900; }
+.resource-support-card.audio .resource-support-icon { color: #7c5421; background: #fff2d9; }
+.resource-support-card.radar .resource-support-icon { color: #24654f; background: #e4f5ee; }
+.resource-support-card div { min-width: 0; }
+.resource-support-card b { display: block; margin: 2px 0 6px; color: #1b3142; font-size: 15px; }
+.resource-support-card p { display: -webkit-box; overflow: hidden; margin: 0; color: #657987; font-size: 11px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.resource-support-card em { grid-column: 2; justify-self: start; color: #27658b; font-size: 11px; font-style: normal; font-weight: 800; }
+.resource-scope-note { margin: 12px 2px 0; color: #6d808c; font-size: 11px; line-height: 1.65; }
+
+/* 答案对比也保留在题库的申论筛选中，便于原有用户发现。 */
 .essay-reference-entry {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2382,6 +2466,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .legal-contact small { color: #728692; font-size: 12px; }
 
 @media (max-width: 560px) {
+  .resource-primary-card { padding: 19px 17px; border-radius: 21px; }
+  .resource-primary-copy { grid-template-columns: 46px minmax(0, 1fr); gap: 12px; }
+  .resource-primary-icon { width: 46px; height: 46px; border-radius: 15px; font-size: 17px; }
+  .resource-primary-copy h2 { font-size: 20px; }
+  .resource-primary-actions { align-items: stretch; flex-direction: column; gap: 8px; }
+  .resource-primary-actions button { width: 100%; }
+  .resource-primary-actions small { text-align: center; }
+  .resource-support-grid { grid-template-columns: 1fr; }
+  .resource-support-card { min-height: 104px; }
   .essay-reference-entry { grid-template-columns: 44px minmax(0, 1fr); gap: 12px; padding: 17px; }
   .essay-reference-entry-icon { width: 44px; height: 44px; border-radius: 14px; font-size: 16px; }
   .essay-reference-entry > button { grid-column: 1 / -1; width: 100%; }

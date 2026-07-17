@@ -14,7 +14,7 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
   assert.match(app, /今日重点任务/);
   assert.match(app, /today-command-card/);
   assert.match(app, /daily-timeline-card/);
-  assert.match(app, />电台<\/button>/);
+  assert.match(app, />资料<\/button>/);
   assert.match(app, /当前为免费版/);
   assert.match(app, /signin-with-chatgpt/);
   assert.doesNotMatch(app, /DEMO-/);
@@ -24,6 +24,21 @@ test("the 公考日练 product shell has a real preview boundary", async () => {
   assert.match(layout, /lang="zh-CN"/);
   assert.match(css, /--navy:\s*#163861/);
   assert.doesNotMatch(`${page}\n${app}\n${layout}`, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
+});
+
+test("the primary navigation keeps the learning loop in the intended order", async () => {
+  const app = await readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8");
+  const navStart = app.indexOf('<nav className="bottom-nav"');
+  const navEnd = app.indexOf("</nav>", navStart);
+
+  assert.notEqual(navStart, -1, "missing primary navigation");
+  assert.notEqual(navEnd, -1, "primary navigation is not closed");
+
+  const nav = app.slice(navStart, navEnd + "</nav>".length);
+  assert.match(nav, />今日<\/button>[\s\S]*>题库<\/button>[\s\S]*>复习<\/button>[\s\S]*>资料<\/button>[\s\S]*>我的<\/button>/);
+  assert.doesNotMatch(nav, />电台<\/button>/);
+  assert.match(app, /tab === "resources"/);
+  assert.match(app, /申论真题答案对比/);
 });
 
 test("the learner flow includes goal onboarding, question banks and spaced review", async () => {

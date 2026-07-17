@@ -289,7 +289,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     for (const track of tracks) {
       const id = trackSeriesId(track);
       if (map.has(id)) continue;
-      const fallback = builtInCategoryMeta[track.category] ?? { label: "音频", title: "日练电台", empty: "栏目内容准备中。", color: "#6c7d8e" };
+      const fallback = builtInCategoryMeta[track.category] ?? { label: "音频", title: "通勤听练", empty: "栏目内容准备中。", color: "#6c7d8e" };
       map.set(id, {
         id,
         label: track.seriesLabel?.trim() || fallback.label,
@@ -557,7 +557,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     if (!("mediaSession" in navigator) || !("MediaMetadata" in window)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title,
-      artist: "公考日练 · 日练电台",
+      artist: "公考日练 · 通勤听练",
       album: track.kicker,
     });
     const setAction = (action: "play" | "pause" | "stop" | "seekbackward" | "seekforward", handler: () => void) => {
@@ -926,7 +926,7 @@ export default function AudioHub({ active, tracks: curatedTracks, wrongQuestions
     <>
     <div className={`page-content subpage audio-page ${active ? "" : "is-hidden"}`} aria-hidden={!active}>
       <div className="subpage-heading audio-heading">
-        <div><span>日练电台</span><h1>通勤听练</h1><p>可收听时政热点、申论表达和个人错题。</p></div>
+        <div><span>音频资料</span><h1>通勤听练</h1><p>仅在不便看屏幕时，按需收听已发布的知识内容。</p></div>
         <span className={`network-badge ${online ? "" : "offline"}`}>{online ? "在线" : "离线模式"}</span>
       </div>
 

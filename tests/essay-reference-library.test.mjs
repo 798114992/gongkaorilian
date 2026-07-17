@@ -125,8 +125,8 @@ test("the learner library identifies itself as a reference lookup tool", async (
   const library = await readFile(libraryFile, "utf8");
   assert.match(library, /useEffect/);
   assert.match(library, /import \{[\s\S]{0,100}?useEffect/);
-  assert.match(library, /申论真题资料库/);
-  assert.match(library, /历年真题与多来源参考答案集中查询/);
+  assert.match(library, /申论真题答案对比/);
+  assert.match(library, /同一道题，多来源参考答案集中查看/);
   assert.match(library, /来源/);
   assert.match(library, /link_only/);
 });

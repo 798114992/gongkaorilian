@@ -12,7 +12,7 @@ import EssayReferenceLibrary, { type EssayLibraryPaper, type EssayReferencePaper
 import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 
-type Tab = "today" | "banks" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "copyright";
+type Tab = "today" | "banks" | "resources" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "copyright";
 type Module = "morning" | "practice" | "affairs" | "essay" | null;
 type PracticeMode = "mixed" | "review";
 type PlanMinutes = 10 | 30 | 45 | 60;
@@ -1441,6 +1441,7 @@ export default function DailyPracticeApp() {
   const autoRetriedPracticeKeyRef = useRef("");
   const pendingPracticeAttemptsRef = useRef<QueuedPracticeAttempt[]>([]);
   const radarRequestSequenceRef = useRef(0);
+  const essayLibraryReturnTabRef = useRef<"banks" | "resources">("resources");
   const inviteBindingRef = useRef("");
   const bootstrapRetryAttemptRef = useRef(0);
   const bootstrapRetryTimerRef = useRef<number | null>(null);
@@ -1762,10 +1763,24 @@ export default function DailyPracticeApp() {
     }
   }, [notify, trackEvent]);
 
-  const openEssayReferenceLibrary = useCallback(() => {
+  const closeEssayReferenceLibrary = useCallback(() => {
+    clearEssayPaperLink();
+    const returnTab = essayLibraryReturnTabRef.current;
+    if (returnTab === "banks") setBankFilter("申论");
+    setTab(returnTab);
+  }, [clearEssayPaperLink]);
+
+  const navigateFromBottom = useCallback((nextTab: Tab) => {
+    if (tab === "essayLibrary") clearEssayPaperLink();
+    setTab(nextTab);
+    trackEvent("module_open", { module: nextTab, entry: "bottom_nav" });
+  }, [clearEssayPaperLink, tab, trackEvent]);
+
+  const openEssayReferenceLibrary = useCallback((returnTab: "banks" | "resources" = "resources") => {
+    essayLibraryReturnTabRef.current = returnTab;
     setActiveModule(null);
     setTab("essayLibrary");
-    trackEvent("essay_reference_library_open", { entry: "essay_bank_filter" });
+    trackEvent("essay_reference_library_open", { entry: returnTab === "banks" ? "essay_bank_filter" : "resources_primary" });
     void loadEssayReferenceLibrary(true, 1);
   }, [loadEssayReferenceLibrary, trackEvent]);
 
@@ -1776,6 +1791,7 @@ export default function DailyPracticeApp() {
   }, [loadCopyrightSettings]);
 
   const loadEssayReferenceDeepLink = useCallback(async (paperCode: string, signal?: AbortSignal) => {
+    essayLibraryReturnTabRef.current = "resources";
     setActiveModule(null);
     setTab("essayLibrary");
     setEssayLibraryLoading(true);
@@ -3235,10 +3251,15 @@ export default function DailyPracticeApp() {
         questionCode: String(rawOptions.questionCode ?? "").slice(0, 100) || undefined,
       };
       resume = () => startEssayPractice(options);
+    } else if (context.resumeAction === "play_audio") {
+      resume = () => {
+        setTab("audio");
+        notify("会员权益已同步，请再次点击播放");
+      };
     }
     const returnTab = String(context.tab ?? "");
     window.setTimeout(() => {
-      if (["today", "banks", "review", "report", "calendar", "me"].includes(returnTab)) setTab(returnTab as Tab);
+      if (["today", "banks", "resources", "audio", "review", "report", "calendar", "me"].includes(returnTab)) setTab(returnTab as Tab);
       if (bootstrap.user.membershipActive) {
         if (resume) void resume();
         else notify("登录成功，会员权益已同步");
@@ -3767,7 +3788,7 @@ export default function DailyPracticeApp() {
                   <div className="bonus-more-heading"><span>更多学习方式</span><small>按需使用，不计入今日必做</small></div>
                   <div className="smart-bonus-tools">
                     <button className="bonus-tool-entry" onClick={() => { setBankFilter("专项"); setTab("banks"); }}><span>专</span><b>专项自选</b><small>自主选择5–10分钟专项训练</small></button>
-                    <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>日练电台</b><small>通勤或睡前听</small></button>
+                    <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>通勤听练</b><small>不便看屏幕时按需使用</small></button>
                   </div>
                   {allDailyDone && <button className="finish-today-button" onClick={() => { setBonusExpanded(false); notify("今日学习已完成，明天继续"); }}>结束今日学习</button>}
                 </div>
@@ -3782,8 +3803,8 @@ export default function DailyPracticeApp() {
             {bankFilter === "适合我" && <div className="fit-rule-note"><b>推荐标准</b><span>仅按主攻考试、已选省份、已加入题库、到期复习和薄弱考点展示符合条件的题库。</span></div>}
             {bankFilter === "申论" && <section className="essay-reference-entry">
               <div className="essay-reference-entry-icon">查</div>
-              <div><span>免费资料查询</span><h2>申论真题资料库</h2><p>按考试、地区、年份和卷种查找真题材料，并在同一题目下切换查看不同来源的参考答案。</p><small>独立资料库 · 不计入今日任务 · 无需开通会员</small></div>
-              <button type="button" onClick={openEssayReferenceLibrary}>进入资料库</button>
+              <div><span>免费资料查询</span><h2>申论真题答案对比</h2><p>按考试、地区、年份和卷种查找真题，并在同一道题下切换查看不同来源的参考答案。</p><small>独立资料工具 · 不计入今日任务 · 无需开通会员</small></div>
+              <button type="button" onClick={() => openEssayReferenceLibrary("banks")}>查看答案对比</button>
             </section>}
             <section className="bank-list">{filteredBanks.map((bank) => {
               const percent = bank.questionCount ? Math.round((bank.studiedCount / bank.questionCount) * 100) : 0;
@@ -3802,17 +3823,46 @@ export default function DailyPracticeApp() {
             {filteredBanks.length === 0 && bankFilter !== "申论" && <div className="empty-state compact"><span>库</span><h3>该分类暂无已发布题库</h3><p>相关题库发布后将自动显示在此处。</p></div>}
           </div>}
 
+          {tab === "resources" && <div className="page-content subpage resources-page">
+            <div className="subpage-heading resources-heading"><div><span>备考资料</span><h1>高频资料集中查询</h1><p>将需要反复查阅的资料与辅助工具集中在一处，优先解决申论真题答案分散、对照不便的问题。</p></div></div>
+
+            <section className="resource-primary-card" aria-labelledby="essay-comparison-title">
+              <div className="resource-primary-topline"><span>免费开放</span><small>申论核心工具</small></div>
+              <div className="resource-primary-copy">
+                <div className="resource-primary-icon">对</div>
+                <div><h2 id="essay-comparison-title">申论真题答案对比</h2><p>同一道题，多来源参考答案集中查看。按地区、年份和卷种筛选，减少在多个页面之间反复查找。</p></div>
+              </div>
+              <div className="resource-feature-list" aria-label="答案对比功能">
+                <span>按地区年份筛选</span><span>同题切换来源</span><span>材料与题目对应</span>
+              </div>
+              <div className="resource-primary-actions"><button type="button" onClick={() => openEssayReferenceLibrary("resources")}>进入答案对比</button><small>第三方参考答案，不属于官方标准答案</small></div>
+            </section>
+
+            <section className="resource-support-section">
+              <div className="compact-section-heading"><div><span>辅助工具</span><h2>按实际场景使用</h2></div><small>不列入今日必做</small></div>
+              <div className="resource-support-grid">
+                <button type="button" className="resource-support-card audio" onClick={() => { trackEvent("module_open", { module: "audio", entry: "resources_support" }); setTab("audio"); }}>
+                  <span className="resource-support-icon">听</span><div><b>通勤听练</b><p>仅在走路、通勤等不便看屏幕时使用。</p></div><em>进入</em>
+                </button>
+                <button type="button" className="resource-support-card radar" onClick={() => { trackEvent("module_open", { module: "calendar", entry: "resources_support" }); setTab("calendar"); }}>
+                  <span className="resource-support-icon">报</span><div><b>公考雷达</b><p>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "管理公告、职位表与报名节点"}</p></div><em>{nextCalendarEvent?.days === 0 ? "今日办理" : nextCalendarEvent && nextCalendarEvent.days <= 7 ? `还有${nextCalendarEvent.days}天` : "查看"}</em>
+                </button>
+              </div>
+              <p className="resource-scope-note">报名、缴费、准考证打印等临近事项仍会在“今日”主动提醒，无需每天进入公考雷达查询。</p>
+            </section>
+          </div>}
+
           {tab === "essayLibrary" && <>
-            {essayLibraryLoading && !essayLibraryLoaded ? <div className="page-content subpage essay-reference-loading"><div className="empty-state compact"><span>查</span><h3>正在加载申论真题资料库</h3><p>正在整理可公开查询的试卷、材料和参考答案。</p></div></div>
+            {essayLibraryLoading && !essayLibraryLoaded ? <div className="page-content subpage essay-reference-loading"><div className="empty-state compact"><span>查</span><h3>正在加载申论真题答案对比</h3><p>正在整理可公开查询的试卷、材料和参考答案。</p></div></div>
               : essayLibraryError ? <div className="page-content subpage essay-reference-loading"><div className="empty-state compact"><span>!</span><h3>资料库暂时无法加载</h3><p>{essayLibraryError}</p><button className="primary-button" type="button" onClick={() => {
                 const paperCode = new URLSearchParams(window.location.search).get("essayPaper")?.trim() ?? "";
                 if (paperCode) void loadEssayReferenceDeepLink(paperCode);
                 else void loadEssayReferenceLibrary(true, 1);
-              }}>重新加载</button><button className="secondary-button" type="button" onClick={() => { clearEssayPaperLink(); setBankFilter("申论"); setTab("banks"); }}>返回题库</button></div></div>
+              }}>重新加载</button><button className="secondary-button" type="button" onClick={closeEssayReferenceLibrary}>返回上一页</button></div></div>
                 : <EssayReferenceLibrary
                   papers={essayLibraryPapers}
                   initialPaperId={essayLibraryInitialPaperId}
-                  onClose={() => { clearEssayPaperLink(); setBankFilter("申论"); setTab("banks"); }}
+                  onClose={closeEssayReferenceLibrary}
                   onPaperOpen={loadEssayPaperDetail}
                   onPaperExit={clearEssayPaperLink}
                   onSharePaper={shareEssayReferencePaper}
@@ -3991,7 +4041,7 @@ export default function DailyPracticeApp() {
             <article className="panel-card account-panel radar-account"><div><span>公考雷达</span><h3>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "补全公告、职位表与报名节点"}</h3><p>{nextCalendarEvent ? nextCalendarEvent.days === 0 ? "请于今日完成关键事项核对。" : `还有${nextCalendarEvent.days}天，已提前${nextCalendarEvent.reminderDays}天提醒。` : "统一管理多个考试的公告、职位表、筛选和报名日期。"}</p></div><button className="profile-edit" onClick={() => setTab("calendar")}>打开雷达</button></article>
             <article className="panel-card account-panel synced"><div><span>学习诊断</span><h3>{insights.total ? `已分析 ${insights.total} 道有效作答` : "完成首轮后生成训练建议"}</h3><p>查看正确率、作答用时、掌握状态和下一步训练方向。</p></div><button className="profile-edit" onClick={() => setTab("report")}>查看报告</button></article>
             <article className={bootstrap?.user.signedIn ? "panel-card account-panel synced" : "panel-card account-panel"}><div><span>{bootstrap?.user.signedIn ? "账号同步已开启" : "当前仅保存在本设备"}</span><h3>{bootstrap?.user.signedIn ? "换设备也能继续学习" : "登录后同步学习记录"}</h3><p>{bootstrap?.user.signedIn ? "报考目标、题库、掌握状态和会员时长均已同步。" : "登录时会自动合并当前进度。"}</p></div>{bootstrap?.user.signedIn ? <b>✓ 已同步</b> : <a href={signInHref}>登录并同步</a>}</article>
-            <article className={`membership-card${bootstrap?.user.membershipActive ? " active" : ""}`}><div><span>{bootstrap?.user.membershipActive ? "会员有效期" : "公考日练会员"}</span><h3>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : formatDate(bootstrap.user.membershipEnd) : "每天30分钟，聚焦高频考点"}</h3><p>{bootstrap?.user.membershipActive ? "题库、解析、电台、错题复习和公考雷达会员功能已启用。" : "围绕真题、错题复习、时政和报考节点，提供精简训练与提醒。"} </p>{!bootstrap?.user.membershipActive && <div className="membership-benefits"><span>多题库组合</span><span>高频真题微练</span><span>错题记忆复习</span><span>日练电台</span></div>}</div>{bootstrap?.user.membershipActive ? <b>VIP</b> : <button className="profile-edit" onClick={() => openPaywall("value_loop", undefined, { tab: "me" })}>查看权益</button>}</article>
+            <article className={`membership-card${bootstrap?.user.membershipActive ? " active" : ""}`}><div><span>{bootstrap?.user.membershipActive ? "会员有效期" : "公考日练会员"}</span><h3>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : formatDate(bootstrap.user.membershipEnd) : "每天30分钟，聚焦高频考点"}</h3><p>{bootstrap?.user.membershipActive ? "题库、解析、错题复习与完整职位筛选功能已启用。" : "围绕真题、错题复习和报考节点，提供精简训练与提醒。"} </p>{!bootstrap?.user.membershipActive && <div className="membership-benefits"><span>多题库组合</span><span>高频真题微练</span><span>错题记忆复习</span><span>多考试职位筛选</span></div>}</div>{bootstrap?.user.membershipActive ? <b>VIP</b> : <button className="profile-edit" onClick={() => openPaywall("value_loop", undefined, { tab: "me" })}>查看权益</button>}</article>
             <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后会直接回到今日页，按你的备考组合生成下一步练习；时长码自动累计，终身码不会被覆盖。</small></article>
             <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证及首次有效日练后，双方会员时长自动发放；仅访问链接或完成注册不计入奖励条件。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
             <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
@@ -4054,7 +4104,7 @@ export default function DailyPracticeApp() {
           }}
         />}
 
-        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => setTab("today")}><span>今</span>今日</button><button className={tab === "banks" || tab === "essayLibrary" ? "active" : ""} onClick={() => setTab("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}><span>复</span>复习</button><button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}><span>台</span>电台</button><button className={tab === "me" || tab === "report" || tab === "calendar" || tab === "about" || tab === "copyright" ? "active" : ""} onClick={() => setTab("me")}><span>我</span>我的</button></nav>}
+        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => navigateFromBottom("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => navigateFromBottom("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => navigateFromBottom("review")}><span>复</span>复习</button><button className={tab === "resources" || tab === "essayLibrary" || tab === "audio" ? "active" : ""} onClick={() => navigateFromBottom("resources")}><span>资</span>资料</button><button className={tab === "me" || tab === "report" || tab === "calendar" || tab === "about" || tab === "copyright" ? "active" : ""} onClick={() => navigateFromBottom("me")}><span>我</span>我的</button></nav>}
 
         {eventFormOpen && bootstrap && (
           <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-labelledby="event-form-title" aria-describedby="event-form-description">

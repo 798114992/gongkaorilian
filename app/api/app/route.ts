@@ -1357,10 +1357,10 @@ async function seedDefaults() {
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO products
       (id, name, description, price_cents, currency, grant_type, duration_days, public_promise, status, sort_order)
-      VALUES ('gkrl-lifetime-2980', '公考日练终身会员', '包含完整真题日练、多题库组合、记忆周期复习、申论微练与日练电台。',
+      VALUES ('gkrl-lifetime-2980', '公考日练终身会员', '包含完整真题日练、多题库组合、记忆周期复习、申论微练与学习诊断。',
         2980, 'CNY', 'lifetime', NULL, '29.8元开通终身会员', 'active', 10)`),
     db.prepare(`UPDATE products
-      SET description = '包含完整真题日练、多题库组合、记忆周期复习、申论微练与日练电台。',
+      SET description = '包含完整真题日练、多题库组合、记忆周期复习、申论微练与学习诊断。',
           public_promise = '29.8元开通终身会员'
       WHERE id = 'gkrl-lifetime-2980'`),
     db.prepare("INSERT OR IGNORE INTO configs (key, value) VALUES ('invite_reward_days', '7')"),
@@ -1984,7 +1984,7 @@ async function authorizeAudioPlayback(userId: string, payload: Record<string, un
   }
 
   if (!await grantDailyFreeAudio(userId, claimKey)) {
-    return json({ error: "今日免费试听次数已用完，开通会员可收听完整电台内容", code: "PAYWALL_AUDIO" }, 403);
+    return json({ error: "今日免费试听次数已用完，开通会员可收听完整音频内容", code: "PAYWALL_AUDIO" }, 403);
   }
   return json({ ok: true, access: "daily_free", claimKey });
 }
@@ -6862,7 +6862,7 @@ async function serveAuthorizedMedia(assetId: string, request: Request) {
   }
   if (!allowed && quotaControlledAudio) {
     if (!identity.signedIn) {
-      return json({ error: "登录后每天可试听1条电台音频", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403, identity.setCookie);
+      return json({ error: "登录后每天可试听1条音频内容", code: "VERIFIED_ACCOUNT_REQUIRED" }, 403, identity.setCookie);
     }
     allowed = await grantDailyFreeAudio(identity.userId, assetId);
     if (!allowed) {

@@ -87,7 +87,7 @@ const reasonCopy: Record<PaywallReason, { eyebrow: string; title: string; detail
   value_loop: {
     eyebrow: "公考日练终身会员",
     title: "按每日10–60分钟完成重点训练",
-    detail: "会员可使用多题库组合、每日真题、申论微练、错题间隔复习和日练电台。",
+    detail: "会员可使用多题库组合、每日真题、申论微练、错题间隔复习和学习诊断。",
   },
 };
 
@@ -208,7 +208,7 @@ export default function CommercePaywall({
             <ul>
               <li>多套国考、省考与专项题库自由组合</li>
               <li>可按10–60分钟计划完成每日真题训练，错题按记忆周期复习</li>
-              <li>可使用申论真题微练、学习诊断与日练电台</li>
+              <li>可使用申论真题微练、学习诊断与薄弱项强化</li>
             </ul>
           </article>
         ) : <div className={styles.error}>当前暂无可购买的会员方案，请稍后再试。</div>}

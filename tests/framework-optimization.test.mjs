@@ -23,6 +23,12 @@ test("资料、营销位和权益策略共用受审核的内容配置体系", as
   assert.match(app, /isCampaignVisible/);
 });
 
+test("首次训练状态在启动数据加载前保持空值安全", async () => {
+  const [, app] = await files;
+  assert.match(app, /const firstCompletedPractice = bootstrap\?\.firstCompletedPractice \?\? null/);
+  assert.doesNotMatch(app, /const firstCompletedPractice = bootstrap\.firstCompletedPractice/);
+});
+
 test("新配置类型具有服务端发布门禁", () => {
   assert.deepEqual(validatePublishableContent("resource_card", { title: "资料", summary: "说明", actionLabel: "查看", actionType: "tab" }), []);
   assert.ok(validatePublishableContent("resource_card", { title: "资料", actionType: "javascript" }).length >= 2);

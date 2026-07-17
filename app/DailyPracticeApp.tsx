@@ -3450,7 +3450,7 @@ export default function DailyPracticeApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootstrap?.user.id, bootstrap?.user.signedIn, bootstrap?.user.membershipActive, openPaywall]);
 
-  const firstCompletedPractice = bootstrap.firstCompletedPractice ?? null;
+  const firstCompletedPractice = bootstrap?.firstCompletedPractice ?? null;
   const primaryTodayResolution = resolveDailyPrimaryTask({
     onboarded: profile.onboarded,
     targetCount: profile.targets.length,

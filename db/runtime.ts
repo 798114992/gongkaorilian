@@ -3,6 +3,12 @@ import { env } from "cloudflare:workers";
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
 const RUNTIME_SCHEMA_VERSION = "20";
+const MIN_COMPATIBLE_RUNTIME_SCHEMA_VERSION = Number(RUNTIME_SCHEMA_VERSION);
+
+function runtimeSchemaVersionIsCompatible(value: unknown) {
+  const version = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(version) && version >= MIN_COMPATIBLE_RUNTIME_SCHEMA_VERSION;
+}
 
 export function getD1() {
   const db = (env as unknown as { DB?: D1Database }).DB;
@@ -1141,7 +1147,10 @@ async function deployedSchemaIsCurrent() {
       && Number(state.essay_bank_columns) === 5 && Number(state.essay_item_columns) === 2
       && Number(state.essay_material_columns) === 5 && Number(state.essay_question_material_columns) === 3
       && Number(state.essay_source_columns) === 4 && Number(state.essay_answer_columns) === 9
-      && String(state.version ?? "") === RUNTIME_SCHEMA_VERSION);
+      // Database migrations are forward-only. A failed application rollback can
+      // legitimately leave D1 on a newer additive schema, so accept newer
+      // versions once every structure required by this build is present.
+      && runtimeSchemaVersionIsCompatible(state.version));
     if (!current) return false;
     return true;
   } catch {

@@ -481,6 +481,9 @@ test("runtime schema guard uses a one-query deployed-schema probe and keeps lega
   assert.match(runtime, /if \(!names\.has\(column\.name\)\)/);
   assert.match(runtime, /async function deployedSchemaIsCurrent/);
   assert.match(runtime, /runtime_schema_version/);
+  assert.match(runtime, /function runtimeSchemaVersionIsCompatible/);
+  assert.match(runtime, /version >= MIN_COMPATIBLE_RUNTIME_SCHEMA_VERSION/);
+  assert.doesNotMatch(runtime, /String\(state\.version \?\? ""\) === RUNTIME_SCHEMA_VERSION/);
   assert.match(runtime, /await deployedSchemaIsCurrent\(\)/);
   assert.match(runtime, /RUNTIME_SCHEMA_BOOTSTRAP/);
   assert.match(runtime, /=== "local-only"/);

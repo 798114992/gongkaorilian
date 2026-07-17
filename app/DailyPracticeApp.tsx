@@ -3495,23 +3495,23 @@ export default function DailyPracticeApp() {
 
   const primaryTodayCopy = (() => {
     switch (primaryTodayState) {
-      case "needs_target": return { eyebrow: "开始使用", title: "先设置你的报考目标", detail: "可同时选择国考和多个省考，系统据此匹配题库、节点与每日训练。", actionLabel: "设置报考目标" };
-      case "needs_bank": return { eyebrow: "备考组合待补全", title: bootstrap.dailyReadiness ? `不重复真题仅${dailyReadinessCount}/${dailyReadinessRequired}道` : "加入一套可参与日练的真题库", detail: "只统计地区、年份匹配且当前可用的已核验真题；跨题库重复题只算1道。", actionLabel: "补全可练题库" };
-      case "critical_exam": return { eyebrow: criticalReminder?.days === 0 ? "今日需处理" : "报考事项临近", title: `${criticalReminder?.targetLabel ?? "报考目标"} · ${criticalReminder?.title ?? "核对报考节点"}`, detail: `${criticalReminder ? shortDate(criticalReminder.eventDate) : ""} · 错过可能影响报考，请优先核对官方来源。`, actionLabel: "立即核对报考事项" };
-      case "resume_session": return { eyebrow: primaryTodayResolution.activeSessionKind === "diagnostic" ? "首次体验未完成" : "训练进度已保存", title: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续完成首次5题体验" : `继续行测日练，还剩${dailyRemaining}题`, detail: "已作答进度保留，继续后不会重复计算已完成题目。", actionLabel: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续首次体验" : "继续今日训练" };
-      case "sync_checkin": return { eyebrow: "任务已完成", title: "同步今日打卡", detail: "学习任务已经完成；云端同步成功后计入连续打卡。", actionLabel: "同步今日打卡" };
-      case "first_practice": return { eyebrow: "首次体验", title: "先完成5道真题，建立学习基线", detail: "约5分钟；完成后根据真实作答生成薄弱点与复习安排。", actionLabel: "开始5题体验" };
-      case "first_result": return { eyebrow: "首次结果已生成", title: "查看首份学习诊断", detail: "查看本轮正确率、薄弱模块和已经纳入复习的题目。", actionLabel: "查看首次诊断" };
-      case "due_review": return { eyebrow: "到期复习优先", title: `${insights.dueCount}道题今日到期`, detail: `先完成到期题，再安排${primaryBank?.name ?? "主攻题库"}的新题训练。`, actionLabel: "开始到期复习" };
-      case "morning": return { eyebrow: `晨读 ${dailyPlan.morningMinutes}分钟`, title: "先完成今日晨读", detail: `阅读《${day.morning.title}》，提取规范表达后继续真题训练。`, actionLabel: `开始今日${dailyPlan.minutes}分钟训练` };
-      case "practice": return { eyebrow: `行测日练 ${dailyPlan.practiceMinutes}分钟`, title: `完成${dailyPlan.questionCount}道真题`, detail: `${primaryBank ? `主攻${primaryBank.name}` : "按已加入题库"} · 到期题优先 · 主攻与兼顾均衡。`, actionLabel: `开始行测日练 · ${dailyPlan.questionCount}题` };
-      case "essay": return { eyebrow: `申论真题 ${dailyPlan.essayMinutes}分钟`, title: "完成今日申论真题微练", detail: "根据材料独立作答，再按采分点与规范表达进行自评。", actionLabel: "开始申论微练" };
-      default: return { eyebrow: "今日已完成", title: "今日学习任务已完成", detail: "作答结果与复习时间已保存，可查看学习报告与明日安排。", actionLabel: "查看学习报告" };
+      case "needs_target": return { eyebrow: "开始使用", title: "先设置你的报考目标", detail: "可同时选择国考和多个省考，系统自动匹配题库与日练。", actionLabel: "设置报考目标" };
+      case "needs_bank": return { eyebrow: "备考组合待补全", title: bootstrap.dailyReadiness ? `可练真题${dailyReadinessCount}/${dailyReadinessRequired}道` : "加入一套可参与日练的真题库", detail: "仅统计地区、年份匹配且已核验的非重复真题。", actionLabel: "补全可练题库" };
+      case "critical_exam": return { eyebrow: criticalReminder?.days === 0 ? "今日需处理" : "报考事项临近", title: `${criticalReminder?.targetLabel ?? "报考目标"} · ${criticalReminder?.title ?? "核对报考节点"}`, detail: `${criticalReminder ? shortDate(criticalReminder.eventDate) : ""} · 请核对官方公告，避免错过。`, actionLabel: "立即核对报考事项" };
+      case "resume_session": return { eyebrow: primaryTodayResolution.activeSessionKind === "diagnostic" ? "首次体验未完成" : "训练进度已保存", title: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续完成首次5题体验" : `继续行测日练，还剩${dailyRemaining}题`, detail: "进度已保存，继续作答即可。", actionLabel: primaryTodayResolution.activeSessionKind === "diagnostic" ? "继续首次体验" : "继续今日训练" };
+      case "sync_checkin": return { eyebrow: "任务已完成", title: "同步今日打卡", detail: "同步成功后计入连续打卡。", actionLabel: "同步今日打卡" };
+      case "first_practice": return { eyebrow: "首次体验", title: "先完成5道真题，建立学习基线", detail: "约5分钟，完成后生成薄弱点和复习安排。", actionLabel: "开始5题体验" };
+      case "first_result": return { eyebrow: "首次结果已生成", title: "查看首份学习诊断", detail: "查看正确率、薄弱模块和待复习题。", actionLabel: "查看首次诊断" };
+      case "due_review": return { eyebrow: "到期复习优先", title: `${insights.dueCount}道题今日到期`, detail: `先复习，再练${primaryBank?.name ?? "主攻题库"}新题。`, actionLabel: "开始到期复习" };
+      case "morning": return { eyebrow: `晨读 ${dailyPlan.morningMinutes}分钟`, title: "先完成今日晨读", detail: `阅读《${day.morning.title}》，提取规范表达。`, actionLabel: `开始今日${dailyPlan.minutes}分钟训练` };
+      case "practice": return { eyebrow: `行测日练 ${dailyPlan.practiceMinutes}分钟`, title: `完成${dailyPlan.questionCount}道真题`, detail: `${primaryBank ? `主攻${primaryBank.name}` : "已加入题库"} · 到期题优先。`, actionLabel: `开始行测日练 · ${dailyPlan.questionCount}题` };
+      case "essay": return { eyebrow: `申论真题 ${dailyPlan.essayMinutes}分钟`, title: "完成今日申论真题微练", detail: "独立作答后，按采分点自评。", actionLabel: "开始申论微练" };
+      default: return { eyebrow: "今日已完成", title: "今日学习任务已完成", detail: "结果已保存，可查看报告和明日安排。", actionLabel: "查看学习报告" };
     }
   })();
   const dailyActionLabel = primaryTodayCopy.actionLabel;
   const primaryActionMeta = primaryTodayState === "needs_target" ? "约1分钟 · 可同时选择多个考试"
-    : primaryTodayState === "needs_bank" ? `当前${dailyReadinessCount}/${dailyReadinessRequired}道 · 补足后自动编排`
+    : primaryTodayState === "needs_bank" ? `还差${Math.max(0, dailyReadinessRequired - dailyReadinessCount)}道 · 补足后自动编排`
       : primaryTodayState === "critical_exam" ? "报考事项优先于今日学习任务"
         : primaryTodayState === "first_practice" || (primaryTodayState === "resume_session" && primaryTodayResolution.activeSessionKind === "diagnostic") ? "5道真题 · 约5分钟"
           : primaryTodayState === "first_result" ? "结果依据实际作答生成"
@@ -3874,7 +3874,7 @@ export default function DailyPracticeApp() {
   const todayReviewAdded = Math.max(sessionReviewAdded, activeDailySession?.reviewAdded ?? 0);
   const weeklyMetrics = insights.weekly ?? emptyInsights.weekly;
   const todayValueHeadline = todayAnswered === 0
-    ? "完成练习后展示实际学习结果"
+    ? "暂无学习结果"
     : todayMetrics.repairedDue > 0
       ? `今日已完成${todayMetrics.repairedDue}道到期题复习`
       : todayMetrics.highFrequencyPoints.length > 0
@@ -3891,13 +3891,13 @@ export default function DailyPracticeApp() {
   const visibleTodayQuizCampaign = todayCampaign && todayCampaign.actionType === "quiz" && isCampaignVisible(todayCampaign) ? todayCampaign : null;
 
   if (!bootstrap) {
-    return <main className="app-shell"><div className="app-frame"><header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，高效完成今日训练</span></div></header><section className="empty-state bootstrap-state" role={bootstrapLoadState === "error" ? "alert" : "status"}><span>{bootstrapLoadState === "error" ? "!" : "…"}</span><h3>{bootstrapLoadState === "error" ? "学习数据暂时没有加载成功" : "正在同步账户、题库权益与学习进度"}</h3><p>{bootstrapLoadState === "error" ? `${bootstrapError || "网络暂时不可用"}。数据加载失败时不会更新学习进度。` : "首次进入时将同步账号状态与学习记录。"}</p>{bootstrapLoadState === "error" && <button className="primary-button" onClick={() => void loadBootstrap()}>立即重试</button>}</section>{toast && <div className="toast" role="status">{toast}</div>}</div></main>;
+    return <main className="app-shell"><div className="app-frame"><header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，完成重点训练</span></div></header><section className="empty-state bootstrap-state" role={bootstrapLoadState === "error" ? "alert" : "status"}><span>{bootstrapLoadState === "error" ? "!" : "…"}</span><h3>{bootstrapLoadState === "error" ? "学习数据暂时没有加载成功" : "正在同步账户、题库权益与学习进度"}</h3><p>{bootstrapLoadState === "error" ? `${bootstrapError || "网络暂时不可用"}。数据加载失败时不会更新学习进度。` : "首次进入时将同步账号状态与学习记录。"}</p>{bootstrapLoadState === "error" && <button className="primary-button" onClick={() => void loadBootstrap()}>立即重试</button>}</section>{toast && <div className="toast" role="status">{toast}</div>}</div></main>;
   }
 
   return (
     <main className="app-shell">
       <div className="app-frame">
-        <header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，高效完成今日训练</span></div><button className="member-chip" onClick={() => setTab("me")}>{membershipText(bootstrap?.user, hasExtendedMembership)}</button></header>
+        <header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，完成重点训练</span></div><button className="member-chip" onClick={() => setTab("me")}>{membershipText(bootstrap?.user, hasExtendedMembership)}</button></header>
 
         {(!online || pendingPracticeAttempts.length > 0) && <section className={`practice-sync-banner${online ? " pending" : " offline"}`} role="status" aria-live="polite">
           <div><b>{online ? `${pendingPracticeAttempts.length}次答题尚未同步` : "网络已断开，当前为离线状态"}</b><span>{online
@@ -3913,12 +3913,12 @@ export default function DailyPracticeApp() {
         {activeModule ? renderModule() : <>
           {tab === "today" && <div className="page-content today-redesign">
             <section className={`today-focus-strip${profile.onboarded && dailyConfigurationBlocking ? " has-config-gap" : ""}`}>
-              <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
+              <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近：${nextExam.target.label} · ${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
               <button className="today-focus-adjust" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
               {profile.onboarded && dailyConfigurationBlocking && <button className="bank-config-gap" onClick={() => { setBankFilter("适合我"); setTab("banks"); }}>
-                <span>备考组合配置缺口</span>
-                <div><b>{bootstrap?.dailyReadiness ? `当前仅${dailyReadinessCount}/${dailyReadinessRequired}道不重复可练真题` : `${bankConfigGaps[0]?.label ?? "当前目标"}还没有可练的行测题库`}</b><small>{bootstrap?.dailyReadiness ? "只统计当前可用且已核验的真题；不同题库中的重复题不会重复累计" : "需加入年份适用且至少含5道不重复真题的行测或综合题库"}</small></div>
-                <i>完善配置 ›</i>
+                <span>可练题库待补全</span>
+                <div><b>{bootstrap?.dailyReadiness ? `可练真题 ${dailyReadinessCount}/${dailyReadinessRequired}道` : `${bankConfigGaps[0]?.label ?? "当前目标"}暂无可练行测题库`}</b><small>{bootstrap?.dailyReadiness ? "仅计入地区、年份匹配且已核验的非重复真题" : "请加入年份适用且至少含5道非重复真题的题库"}</small></div>
+                <i>去补全 ›</i>
               </button>}
             </section>
 
@@ -3932,7 +3932,7 @@ export default function DailyPracticeApp() {
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟计划` : "切换为10分钟精简计划"}</button>}</div>
             </section>
 
-            {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天可练5题，体验完整学习流程</h3></div><button onClick={() => setTab("me")}>激活权益</button></section>}
+            {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天5题，体验完整流程</h3></div><button onClick={() => setTab("me")}>激活权益</button></section>}
 
 
             <section className="daily-timeline-card"><div className="compact-section-heading"><div><span>今日{dailyStepItems.length}项安排</span><h2>{dailyConfigurationBlocking ? "题库补全后自动生成行测" : allDailyDone ? "今日任务已完成" : "系统已按优先级安排"}</h2></div><em>{dailyConfigurationBlocking ? "待配置" : allDailyDone ? "已完成" : `还剩${enabledDailySteps.length - doneCount}项`}</em></div>
@@ -3957,7 +3957,7 @@ export default function DailyPracticeApp() {
 
             <section className="today-gain-card compact-gain-card">
               <details className="today-gain-disclosure" open={todayGainExpanded} onToggle={(event) => setTodayGainExpanded(event.currentTarget.open)}>
-                <summary><div><span>今日学习结果</span><b>{todayValueHeadline}</b><small>{allDailyDone ? "今日学习任务已完成，结果依据实际作答生成" : todayAnswered ? `已完成${todayAnswered}题 · 新增待复习${todayReviewAdded}题` : "完成练习后可查看详细结果"}</small></div><em>{todayGainExpanded ? "收起" : "查看"}⌄</em></summary>
+                <summary><div><span>今日学习结果</span><b>{todayValueHeadline}</b><small>{allDailyDone ? "依据实际作答生成" : todayAnswered ? `已完成${todayAnswered}题 · 待复习${todayReviewAdded}题` : "完成练习后显示"}</small></div><em>{todayGainExpanded ? "收起" : "查看"}⌄</em></summary>
                 <div className="today-gain-content">
                   {valueComparisonItems.length > 0 && <div className="value-comparison-row">{valueComparisonItems.map((item) => <span key={item}>{item}</span>)}</div>}
                   <div className="today-gain-grid"><div><b>{todayAnswered}</b><span>已完成真题</span></div><div><b>{todayAnswered ? `${todayAccuracy}%` : "—"}</b><span>今日正确率</span></div><div><b>{todayMetrics.repairedDue}</b><span>完成到期复习</span></div><div><b>{todayMetrics.wrong}</b><span>答错题目</span></div></div>
@@ -3979,14 +3979,14 @@ export default function DailyPracticeApp() {
             </section>}
 
             <section className={`quick-practice-card smart-bonus-card${allDailyDone ? " ready" : ""}`}>
-              <div className="compact-section-heading"><div><span>专项强化（约10分钟）</span><h2>{allDailyDone ? "优先完成系统推荐训练" : "完成今日任务后可进行专项强化"}</h2></div></div>
+              <div className="compact-section-heading"><div><span>专项强化（约10分钟）</span><h2>{allDailyDone ? "系统已生成推荐训练" : "完成今日任务后开放"}</h2></div></div>
               <details
                 className="smart-bonus-disclosure"
                 open={bonusExpanded}
                 onToggle={(event) => setBonusExpanded(event.currentTarget.open)}
               >
                 <summary>
-                  <div><span>{allDailyDone ? "今日任务已完成" : "不影响今日任务进度"}</span><b>{allDailyDone ? "已根据作答结果生成专项推荐" : "更多练习与学习方式"}</b></div>
+                  <div><span>{allDailyDone ? "今日任务已完成" : "按需加练"}</span><b>{allDailyDone ? "已根据作答结果推荐" : "不计入今日任务"}</b></div>
                   <em>{bonusExpanded ? "收起" : "展开"}⌄</em>
                 </summary>
                 <div className="smart-bonus-content">
@@ -3994,11 +3994,11 @@ export default function DailyPracticeApp() {
                     <div className="smart-bonus-icon" style={{ color: recommendedDrill?.color, background: recommendedDrill ? `${recommendedDrill.color}18` : undefined }}>{needsDiagnostic ? "测" : recommendedDrill?.icon ?? "练"}</div>
                     <div className="smart-bonus-copy"><span>{needsDiagnostic ? "首次诊断" : recommendationPoint ? "考点级推荐" : recommendedDrillEntry?.moduleMatch ? "薄弱项优先" : "智能推荐"}</span><h3>{bonusRecommendationTitle}</h3><p>{bonusRecommendationReason}</p>{recommendationEvidence.length > 0 && <div className="recommendation-evidence">{recommendationEvidence.map((item) => <em key={item}>{item}</em>)}</div>}<small>{bonusRecommendationMeta}</small></div>
                     <div className="smart-bonus-actions"><button className="primary-button" disabled={busy} onClick={startRecommendedBonus}>{needsDiagnostic ? "开始能力诊断" : "开始专项强化"}</button>{bonusAlternativeCount > 1 && !needsDiagnostic && <button className="bonus-switch-button" onClick={() => setBonusDrillOffset((value) => value + 1)}>更换推荐</button>}</div>
-                  </article> : <div className="bonus-locked-note"><span>主</span><div><b>请先完成今日任务</b><small>完成后将根据作答表现生成专项强化建议。</small></div><button onClick={runDailyAction}>继续今日任务</button></div>}
-                  <div className="bonus-more-heading"><span>更多学习方式</span><small>按需使用，不计入今日必做</small></div>
+                  </article> : <div className="bonus-locked-note"><span>主</span><div><b>完成今日任务后开放</b><small>根据作答表现推荐专项。</small></div><button onClick={runDailyAction}>继续今日任务</button></div>}
+                  <div className="bonus-more-heading"><span>其他方式</span><small>按需使用</small></div>
                   <div className="smart-bonus-tools">
                     <button className="bonus-tool-entry" onClick={() => { setBankFilter("专项"); setTab("banks"); }}><span>专</span><b>专项自选</b><small>自主选择5–10分钟专项训练</small></button>
-                    <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>通勤听练</b><small>不便看屏幕时按需使用</small></button>
+                    <button className="bonus-tool-entry" onClick={() => setTab("audio")}><span>听</span><b>通勤听练</b><small>不便看屏幕时使用</small></button>
                   </div>
                   {allDailyDone && <button className="finish-today-button" onClick={() => { setBonusExpanded(false); notify("今日学习已完成，明天继续"); }}>结束今日学习</button>}
                 </div>
@@ -4017,13 +4017,13 @@ export default function DailyPracticeApp() {
           </div>}
 
           {tab === "banks" && <div className="page-content subpage">
-            <div className="subpage-heading bank-heading"><div><span>题库书架</span><h1>按报考计划组合题库</h1><p>国考、多个省考、公安岗、行政执法和事业单位可同时加入；各地区题库分别组题，避免题目混用。</p></div><strong>{addedBanks.length} 本已添加</strong></div>
-            <div className="target-scope-note"><b>主攻优先 · 兼顾其他题库</b><span>{primaryBank ? `优先安排《${primaryBank.name}》；其他已加入题库也会参与训练` : "请先添加一套行测题库"}</span><button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>管理目标</button></div>
+            <div className="subpage-heading bank-heading"><div><span>题库书架</span><h1>按报考计划组合题库</h1><p>可同时加入国考、多省考及专项题库，各地区独立组题。</p></div><strong>{addedBanks.length} 本已添加</strong></div>
+            <div className="target-scope-note"><b>主攻优先 · 兼顾其他题库</b><span>{primaryBank ? `主攻《${primaryBank.name}》，其他题库同步参与` : "请先添加一套行测题库"}</span><button onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>管理目标</button></div>
             <div className="bank-filters">{["适合我", "我的", "全部", "国考", "省考", "专项", "申论"].map((item) => <button key={item} className={bankFilter === item ? "active" : ""} onClick={() => setBankFilter(item)}>{item}</button>)}</div>
-            {bankFilter === "适合我" && <div className="fit-rule-note"><b>推荐标准</b><span>仅按主攻考试、已选省份、已加入题库、到期复习和薄弱考点展示符合条件的题库。</span></div>}
+            {bankFilter === "适合我" && <div className="fit-rule-note"><b>推荐标准</b><span>根据报考目标、已选地区、薄弱考点和到期复习推荐。</span></div>}
             {bankFilter === "申论" && <section className="essay-reference-entry">
               <div className="essay-reference-entry-icon">查</div>
-              <div><span>免费资料查询</span><h2>申论真题答案对比</h2><p>按考试、地区、年份和卷种查找真题，并在同一道题下切换查看不同来源的参考答案。</p><small>独立资料工具 · 不计入今日任务 · 无需开通会员</small></div>
+              <div><span>免费资料查询</span><h2>申论真题答案对比</h2><p>按地区、年份和卷种查题，对比多来源参考答案。</p><small>独立查询 · 免费开放</small></div>
               <button type="button" onClick={() => openEssayReferenceLibrary("banks")}>查看答案对比</button>
             </section>}
             <section className="bank-list">{filteredBanks.map((bank) => {
@@ -4036,25 +4036,25 @@ export default function DailyPracticeApp() {
                 <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bankTruthLabel(bank)}</small></div>
                 <div className="bank-copy"><div><span>{bankTruthLabel(bank)} · {bank.questionCount}题</span><h3>{bank.name}</h3>{isPrimary && <div className="primary-bank-badge">主攻题库</div>}<p>{bank.description}</p><div className={`scope-badge ${fit.tone}`}>{fit.badge}</div>{bankFilter === "适合我" && <small className="fit-reason">推荐依据：{[fit.reason, frequencyText(bank.frequency), starText(bank.importanceStars), scoreRateText(bank.scoreRate)].filter(Boolean).join(" · ")}</small>}</div>
                   <div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
-                  <footer><small>{bank.questionCount === 0 ? "题库内容准备中；加入后不影响基础日练" : bankLocked ? "体验期已结束，本题库和历史进度已保留；开通后可继续使用" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 预计${estimatedDays}天完成一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">{bankLocked ? "🔒 已保留" : "✓ 已加入"}</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && !bankLocked && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bankLocked && bank.questionCount > 0 ? <button className="start-bank" onClick={() => bank.subject === "申论" ? openPaywall("essay", () => startEssayPractice({ bankCodes: [bank.code], daily: false }), { tab: "banks", bankCode: bank.code, resumeAction: "start_essay" }) : openPaywall("second_bank", () => startPractice("mixed", [bank.code], { kind: "bank" }), { tab: "banks", bankCode: bank.code, resumeAction: "start_practice", mode: "mixed", bankCodes: [bank.code], practiceOptions: { kind: "bank" } })}>开通后继续</button> : bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "本题库练习" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
+                  <footer><small>{bank.questionCount === 0 ? "内容准备中，不影响基础日练" : bankLocked ? "权益已到期，学习进度已保留" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 预计${estimatedDays}天完成一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">{bankLocked ? "🔒 已保留" : "✓ 已加入"}</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && !bankLocked && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bankLocked && bank.questionCount > 0 ? <button className="start-bank" onClick={() => bank.subject === "申论" ? openPaywall("essay", () => startEssayPractice({ bankCodes: [bank.code], daily: false }), { tab: "banks", bankCode: bank.code, resumeAction: "start_essay" }) : openPaywall("second_bank", () => startPractice("mixed", [bank.code], { kind: "bank" }), { tab: "banks", bankCode: bank.code, resumeAction: "start_practice", mode: "mixed", bankCodes: [bank.code], practiceOptions: { kind: "bank" } })}>开通后继续</button> : bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "本题库练习" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
                 </div>
               </article>;
             })}</section>
-            {filteredBanks.length === 0 && bankFilter !== "申论" && <div className="empty-state compact"><span>库</span><h3>该分类暂无已发布题库</h3><p>相关题库发布后将自动显示在此处。</p></div>}
+            {filteredBanks.length === 0 && bankFilter !== "申论" && <div className="empty-state compact"><span>库</span><h3>该分类暂无已发布题库</h3><p>可切换分类或稍后查看。</p></div>}
           </div>}
 
           {tab === "resources" && <div className="page-content subpage resources-page">
-            <div className="subpage-heading resources-heading"><div><span>备考资料</span><h1>高频资料集中查询</h1><p>将需要反复查阅的资料与辅助工具集中在一处，优先解决申论真题答案分散、对照不便的问题。</p></div></div>
+            <div className="subpage-heading resources-heading"><div><span>备考资料</span><h1>高频资料集中查询</h1><p>集中查询申论真题答案及常用备考资料。</p></div></div>
 
             {primaryResourceCard ? <section className={`resource-primary-card tone-${primaryResourceCard.tone}`} aria-labelledby={`resource-${primaryResourceCard.id}`}>
-              <div className="resource-primary-topline"><span>{primaryResourceCard.eyebrow || "资料入口"}</span><small>{primaryResourceCard.accessLevel === "free" ? "免费开放" : "会员资料"}</small></div>
+              <div className="resource-primary-topline"><span>{primaryResourceCard.eyebrow || "资料入口"}</span>{primaryResourceCard.eyebrow !== (primaryResourceCard.accessLevel === "free" ? "免费开放" : "会员资料") && <small>{primaryResourceCard.accessLevel === "free" ? "免费开放" : "会员资料"}</small>}</div>
               <div className="resource-primary-copy">
                 <div className="resource-primary-icon">{primaryResourceCard.icon}</div>
                 <div><h2 id={`resource-${primaryResourceCard.id}`}>{primaryResourceCard.title}</h2><p>{primaryResourceCard.summary}</p></div>
               </div>
               {primaryResourceCard.meta && <div className="resource-feature-list" aria-label="资料功能">{primaryResourceCard.meta.split(/[｜|]/).filter(Boolean).slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div>}
-              <div className="resource-primary-actions"><button type="button" onClick={() => runConfiguredAction(primaryResourceCard.actionType, primaryResourceCard.actionTarget, `resource:${primaryResourceCard.id}`)}>{primaryResourceCard.actionLabel}</button><small>运营后台可调整入口、排序与开放范围</small></div>
-            </section> : <div className="empty-state compact"><span>资</span><h3>资料入口暂未发布</h3><p>管理员发布资料入口后将自动显示在此处。</p></div>}
+              <div className="resource-primary-actions"><button type="button" onClick={() => runConfiguredAction(primaryResourceCard.actionType, primaryResourceCard.actionTarget, `resource:${primaryResourceCard.id}`)}>{primaryResourceCard.actionLabel}</button></div>
+            </section> : <div className="empty-state compact"><span>资</span><h3>资料入口暂未开放</h3><p>请稍后查看。</p></div>}
 
             {resourcesCampaign && isCampaignVisible(resourcesCampaign) && <section className={`configured-campaign-card tone-${resourcesCampaign.tone}`}>
               <div><span>{resourcesCampaign.eyebrow}</span><h2>{resourcesCampaign.title}</h2><p>{resourcesCampaign.summary}</p></div>
@@ -4062,12 +4062,12 @@ export default function DailyPracticeApp() {
             </section>}
 
             <section className="resource-support-section">
-              <div className="compact-section-heading"><div><span>辅助工具</span><h2>按实际场景使用</h2></div><small>不列入今日必做</small></div>
+              <div className="compact-section-heading"><div><span>辅助工具</span><h2>按需使用</h2></div><small>不计入日练</small></div>
               <div className="resource-support-grid">{supportResourceCards.map((card) => <button key={card.id} type="button" className={`resource-support-card tone-${card.tone}`} onClick={() => runConfiguredAction(card.actionType, card.actionTarget, `resource:${card.id}`)}>
                 <span className="resource-support-icon">{card.icon}</span><div><b>{card.title}</b><p>{card.summary}</p></div><em>{card.actionLabel}</em>
               </button>)}</div>
-              {!supportResourceCards.length && <div className="empty-state compact"><span>+</span><h3>暂无辅助资料入口</h3><p>可在后台按实际运营需要新增。</p></div>}
-              <p className="resource-scope-note">报名、缴费、准考证打印等临近事项仍会在“今日”主动提醒，无需每天进入公考雷达查询。</p>
+              {!supportResourceCards.length && <div className="empty-state compact"><span>+</span><h3>暂无其他工具</h3><p>请稍后查看。</p></div>}
+              <p className="resource-scope-note">报名、缴费等临近事项会在“今日”提醒。</p>
             </section>
           </div>}
 
@@ -4092,11 +4092,11 @@ export default function DailyPracticeApp() {
                 />}
           </>}
 
-          {tab === "review" && <div className="page-content subpage"><div className="subpage-heading"><span>智能复习</span><h1>通过再次作答验证掌握情况</h1><p>仅展示今日到期复习题；答错、超时及掌握不稳定的题目将纳入复习计划。</p></div><section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy || insights.dueCount === 0} onClick={() => void startPractice("review", undefined, { kind: "review" })}>{insights.dueCount ? "开始复习" : "今日复习已完成"}</button></section><div className="review-rules"><article><span>1天</span><div><b>答错、超时及掌握不稳定</b><p>次日重新作答，验证是否已经掌握。</p></div></article><article><span>3天</span><div><b>首次稳定答对</b><p>跨天再次答对后，进入长期记忆阶段。</p></div></article><article><span>7/14/30天</span><div><b>连续稳定掌握</b><p>按到期时间进行巩固，稳定后逐步延长复习间隔。</p></div></article></div>{(insights.dueCount === 0 || practiceEmpty) && <div className="empty-state compact review-empty"><span>✓</span><h3>今日没有到期复习题</h3><p>复习任务已完成，可继续进行今日新题训练。</p><button className="primary-button" onClick={() => setTab("today")}>返回今日</button></div>}</div>}
+          {tab === "review" && <div className="page-content subpage"><div className="subpage-heading"><span>智能复习</span><h1>通过再次作答验证掌握情况</h1><p>答错、超时或掌握不稳定的题目，将按期安排复习。</p></div><section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy || insights.dueCount === 0} onClick={() => void startPractice("review", undefined, { kind: "review" })}>{insights.dueCount ? "开始复习" : "今日复习已完成"}</button></section><div className="review-rules"><article><span>1天</span><div><b>答错、超时或不稳定</b><p>次日复习</p></div></article><article><span>3天</span><div><b>首次稳定答对</b><p>3天后复习</p></div></article><article><span>7/14/30天</span><div><b>连续稳定掌握</b><p>逐步延长间隔</p></div></article></div>{(insights.dueCount === 0 || practiceEmpty) && <div className="empty-state compact review-empty"><span>✓</span><h3>今日没有到期复习题</h3><p>可继续今日新题。</p><button className="primary-button" onClick={() => setTab("today")}>返回今日</button></div>}</div>}
 
           {tab === "calendar" && <div className="page-content subpage calendar-page">
-            <div className="subpage-heading calendar-heading"><div><span>公考雷达 · 报考工作台</span><h1>集中管理公告、职位表和报名节点</h1><p>统一查看公告发布、职位表、岗位条件筛选及报名截止等关键报考事项。</p></div><button className="primary-button" onClick={() => openEventForm()}>＋ 添加节点</button></div>
-            <section className={`reminder-banner${dueReminder ? " urgent" : ""}`}><div><span>{dueReminder ? "有节点进入提醒期" : "报名提醒已工作"}</span><h3>{dueReminder ? `${dueReminder.targetLabel} · ${dueReminder.title}` : "每次打开自动检查全部考试节点"}</h3><p>{dueReminder ? dueReminder.days === 0 ? "今日为截止或办理日期，请优先确认。" : `还有${dueReminder.days}天，请提前准备材料。` : "站内提醒默认开启；浏览器通知开启后，会在打开应用时同步弹出。"}</p></div><button onClick={() => void enableBrowserReminders()}>{progress.reminderMode === "browser" ? "✓ 系统通知已开" : "开启系统通知"}</button></section>
+            <div className="subpage-heading calendar-heading"><div><span>公考雷达 · 报考工作台</span><h1>管理公告、职位与报名节点</h1><p>查看公告、筛选职位、管理报名节点。</p></div><button className="primary-button" onClick={() => openEventForm()}>＋ 添加节点</button></div>
+            <section className={`reminder-banner${dueReminder ? " urgent" : ""}`}><div><span>{dueReminder ? "有节点进入提醒期" : "报名提醒"}</span><h3>{dueReminder ? `${dueReminder.targetLabel} · ${dueReminder.title}` : "打开应用自动检查"}</h3><p>{dueReminder ? dueReminder.days === 0 ? "今日为截止或办理日期，请优先确认。" : `还有${dueReminder.days}天，请提前准备材料。` : "站内提醒已开启，可选系统通知。"}</p></div><button onClick={() => void enableBrowserReminders()}>{progress.reminderMode === "browser" ? "✓ 系统通知已开" : "开启系统通知"}</button></section>
             <div className="radar-mode-tabs" role="tablist" aria-label="公考雷达模块">
               {[
                 ["notices", "公告雷达", `${relevantNotices.length}条`] as const,
@@ -4105,28 +4105,28 @@ export default function DailyPracticeApp() {
               ].map(([mode, label, count]) => <button key={mode} className={radarMode === mode ? "active" : ""} onClick={() => setRadarMode(mode)}><span>{label}</span><b>{count}</b></button>)}
             </div>
             <section className="radar-feature-grid" aria-label="公考雷达能力">
-              <button className={radarMode === "notices" ? "active" : ""} onClick={() => setRadarMode("notices")}><span>公告</span><h3>公告雷达</h3><p>招录公告、补充公告、职位表发布和重要变更统一收口。</p></button>
-              <button className={radarMode === "positions" ? "active" : ""} onClick={() => setRadarMode("positions")}><span>职位</span><h3>职位筛选</h3><p>按学历、专业、应届身份、政治面貌等条件初步匹配岗位。</p></button>
-              <button className={radarMode === "tasks" ? "active" : ""} onClick={() => setRadarMode("tasks")}><span>待办</span><h3>报名动作</h3><p>把公告查看、职位收藏、资格核对、报名截止变成可勾选清单。</p></button>
+              <button className={radarMode === "notices" ? "active" : ""} onClick={() => setRadarMode("notices")}><span>公告</span><h3>公告雷达</h3><p>集中查看公告、职位表和重要变更。</p></button>
+              <button className={radarMode === "positions" ? "active" : ""} onClick={() => setRadarMode("positions")}><span>职位</span><h3>职位筛选</h3><p>按学历、专业和身份初筛职位。</p></button>
+              <button className={radarMode === "tasks" ? "active" : ""} onClick={() => setRadarMode("tasks")}><span>待办</span><h3>报名待办</h3><p>将资格核对、报名截止等转为待办。</p></button>
             </section>
 
             {radarMode === "notices" && <>
               <section className="notice-summary-grid">
                 <article><span>已选考试</span><b>{profile.targets.length || 0}</b><small>{profile.targets.length ? profile.targets.map((target) => target.label).slice(0, 3).join(" / ") : "先设置国考或省考目标"}</small></article>
-                <article><span>公告/职位表</span><b>{relevantNotices.length}</b><small>发布后自动匹配至你的备考组合</small></article>
+                <article><span>公告/职位表</span><b>{relevantNotices.length}</b><small>按备考组合自动匹配</small></article>
                 <article><span>日历节点</span><b>{upcomingCalendarEvents.length}</b><small>{nextCalendarEvent ? `最近：${shortDate(nextCalendarEvent.eventDate)}` : "可手动添加报名节点"}</small></article>
               </section>
               <section className="notice-list"><div className="section-heading"><div><span>公告雷达</span><h2>只看与你备考组合相关的公告</h2></div><button onClick={() => openEventForm(primaryTarget?.code ?? "", "公告发布", "公告发布")}>补充公告节点</button></div>
                 {relevantNotices.length ? relevantNotices.map((notice) => <article className="notice-card" key={notice.id}>
                   <div><span>{notice.targetLabel} · {notice.noticeType}</span><h3>{notice.title}</h3><p>{notice.summary || "公告摘要、报名要求和职位表说明暂待补充。"}</p><small>{notice.publishDate ? `${shortDate(notice.publishDate)}发布` : "发布时间待补充"} · {notice.status || "已发布"}</small></div>
                   {notice.sourceUrl ? <a href={notice.sourceUrl} target="_blank" rel="noreferrer" onClick={() => trackEvent("radar_notice_open", { noticeId: notice.id, targetCode: notice.targetCode })}>查看来源</a> : <button onClick={() => openEventForm(notice.targetCode, notice.noticeType, notice.title)}>加节点</button>}
-                </article>) : <div className="empty-state compact calendar-empty"><span>告</span><h3>暂未发布相关公告</h3><p>可以先手动添加公告、职位表和报名截止节点；相关公告发布后，将按国考或省份自动显示。</p><button className="primary-button" onClick={() => openEventForm()}>手动添加公告节点</button></div>}
+                </article>) : <div className="empty-state compact calendar-empty"><span>告</span><h3>暂未发布相关公告</h3><p>可先手动添加节点，发布后自动匹配。</p><button className="primary-button" onClick={() => openEventForm()}>手动添加公告节点</button></div>}
               </section>
             </>}
 
             {radarMode === "positions" && <>
-              {radarLimited && <section className="reminder-banner"><div><span>免费职位预览</span><h3>当前展示1个考试目标的3个职位样例</h3><p>会员可同时筛国考和多个省考，并按学历、专业、身份匹配、收藏及横向对比。</p></div><button onClick={() => openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions" })}>解锁完整雷达</button></section>}
-              <section className="candidate-panel"><div className="section-heading"><div><span>我的报考条件</span><h2>先录入一次，后面按岗位自动初筛</h2></div><button onClick={() => void saveCandidateProfile()}>保存条件档案</button></div>
+              {radarLimited && <section className="reminder-banner"><div><span>免费职位预览</span><h3>当前展示1个考试目标的3个职位样例</h3><p>会员可同时筛选国考和多省考职位，并收藏对比。</p></div><button onClick={() => openPaywall("radar", undefined, { tab: "calendar", radarMode: "positions" })}>解锁完整雷达</button></section>}
+              <section className="candidate-panel"><div className="section-heading"><div><span>我的报考条件</span><h2>录入一次，自动初筛</h2></div><button onClick={() => void saveCandidateProfile()}>保存条件档案</button></div>
                 <div className="candidate-grid">
                   <label><span>学历</span><select value={progress.candidateProfile.education} onChange={(event) => updateCandidateProfile({ education: event.target.value })}>{candidateOptions.education.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
                   <label><span>学位</span><select value={progress.candidateProfile.degree} onChange={(event) => updateCandidateProfile({ degree: event.target.value })}>{candidateOptions.degree.map((item) => <option key={item} value={item}>{item || "请选择"}</option>)}</select></label>
@@ -4169,13 +4169,13 @@ export default function DailyPracticeApp() {
                   <details className="position-basis"><summary>查看判断依据与数据版本</summary><div>{match.basis.map((item) => <span key={item}>{item}</span>)}{position.remote && <span>岗位风险：{position.remote}</span>}<span>数据版本：v{position.dataVersion || 1}{position.updatedAt ? ` · 更新于${shortDate(position.updatedAt)}` : " · 更新时间待补充"}</span></div></details>
                   {position.remarks && <p className="position-remark">{position.remarks}</p>}
                   <footer><button className={saved ? "saved" : ""} onClick={() => void toggleSavedPosition(position)}>{saved ? "✓ 已加入备选" : "+ 加入备选"}</button><button className={comparePositions.some((item) => item.id === position.id) ? "compared" : ""} onClick={() => toggleComparedPosition(position)}>{comparePositions.some((item) => item.id === position.id) ? "✓ 对比中" : "加入对比"}</button>{position.sourceUrl && <a href={position.sourceUrl} target="_blank" rel="noreferrer" onClick={() => trackEvent("radar_official_source_open", { positionId: position.id, targetCode: position.targetCode })}>官方来源</a>}</footer>
-                </article>) : <div className="empty-state compact calendar-empty"><span>职</span><h3>{radarKeyword ? "没有匹配当前关键词的职位" : "暂未发布可筛选的职位表"}</h3><p>{radarKeyword ? "可尝试缩短关键词或切换考试范围。" : "职位表发布后，将展示“初步符合 / 待确认 / 明确不符合”等匹配结果，并支持收藏和横向对比。"}</p></div>}
+                </article>) : <div className="empty-state compact calendar-empty"><span>职</span><h3>{radarKeyword ? "没有匹配当前关键词的职位" : "暂未发布可筛选的职位表"}</h3><p>{radarKeyword ? "可缩短关键词或切换考试范围。" : "发布后显示匹配结果，并支持收藏、对比。"}</p></div>}
                 {!radarLimited && radarTotal > 20 && <nav className="position-pagination" aria-label="职位分页"><button disabled={radarPage <= 1 || radarPositionsLoading} onClick={() => setRadarPage((page) => Math.max(1, page - 1))}>上一页</button><span>第 {radarPage} / {Math.max(1, Math.ceil(radarTotal / 20))} 页</span><button disabled={radarPage >= Math.ceil(radarTotal / 20) || radarPositionsLoading} onClick={() => setRadarPage((page) => page + 1)}>下一页</button></nav>}
               </section>
             </>}
 
             {radarMode === "tasks" && <>
-              <section className="radar-todo-list"><div className="section-heading"><div><span>报名待办</span><h2>今天打开后，先知道该处理什么</h2></div><button onClick={() => openEventForm()}>添加自定义待办</button></div>
+              <section className="radar-todo-list"><div className="section-heading"><div><span>报名待办</span><h2>今天要处理的事项</h2></div><button onClick={() => openEventForm()}>添加自定义待办</button></div>
                 {radarTodoItems.length ? radarTodoItems.map((item) => {
                   const done = Boolean(progress.radarTodoDone[item.id]);
                   return <article className={`${item.tone}${done ? " done" : ""}`} key={item.id}>
@@ -4193,10 +4193,10 @@ export default function DailyPracticeApp() {
                       notify("该节点已更新，请刷新公考雷达后重试");
                     }}>{item.actionLabel}</button>
                   </article>;
-                }) : <div className="empty-state compact calendar-empty"><span>✓</span><h3>当前没有待办</h3><p>添加报名截止、资格审查、准考证打印等节点后，这里会自动生成待办。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
+                }) : <div className="empty-state compact calendar-empty"><span>✓</span><h3>当前没有待办</h3><p>添加报名、审查等节点后自动生成。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
               </section>
               <div className="calendar-targets">{profile.targets.map((target, index) => <button key={target.code} onClick={() => openEventForm(target.code)}><span>{index === 0 ? "主攻" : "兼顾"}</span><b>{target.label}</b><small>{target.examDate ? `${shortDate(target.examDate)}笔试` : "补充考试节点"}</small></button>)}</div>
-              <section className="calendar-list"><div className="section-heading"><div><span>时间轴</span><h2>按时间排好的公告、职位表与报名任务</h2></div><em>{upcomingCalendarEvents.length} 个节点</em></div>
+              <section className="calendar-list"><div className="section-heading"><div><span>时间轴</span><h2>公告、职位表与报名节点</h2></div><em>{upcomingCalendarEvents.length} 个节点</em></div>
                 {upcomingCalendarEvents.length ? upcomingCalendarEvents.map((event) => {
                   const automatic = event.id.startsWith("exam-");
                   const official = event.id.startsWith("official-");
@@ -4210,10 +4210,10 @@ export default function DailyPracticeApp() {
                         : <button disabled title="暂未提供官方来源链接">暂无来源</button>
                       : <button aria-label={`删除${event.title}`} onClick={() => void removeExamEvent(event.id)}>删除</button>}
                   </article>;
-                }) : <div className="empty-state compact calendar-empty"><span>历</span><h3>还没有公考雷达节点</h3><p>建议先添加“公告发布”“职位表发布”和“报名截止”，比只记笔试日期更有用。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
+                }) : <div className="empty-state compact calendar-empty"><span>历</span><h3>还没有公考雷达节点</h3><p>建议先添加公告、职位表和报名截止。</p><button className="primary-button" onClick={() => openEventForm()}>添加第一个节点</button></div>}
               </section>
             </>}
-            <p className="calendar-disclaimer">日期由你保存或从报考目标带入。公告、职位表和报名资格请以招录机关官方发布为准；来源链接可随节点一并保存。</p>
+            <p className="calendar-disclaimer">时间与资格条件以招录机关官方发布为准。</p>
           </div>}
 
           {tab === "report" && <div className="page-content subpage">
@@ -4234,10 +4234,10 @@ export default function DailyPracticeApp() {
             </article> : <article className="report-card three-day-report progress">
               <div className="three-day-report-heading"><div><span>3天体验报告</span><h2>再完成 {Math.max(0, 3 - threeDayReportProgress)} 个有效学习日</h2></div><em>{threeDayReportProgress}/3 天</em></div>
               <div className="three-day-progress-dots" aria-label={`三天体验进度：已完成${threeDayReportProgress}天`}>{[1, 2, 3].map((dayNumber) => <i key={dayNumber} className={dayNumber <= threeDayReportProgress ? "done" : ""}>{dayNumber <= threeDayReportProgress ? "✓" : dayNumber}</i>)}</div>
-              <p>当天完成有效作答即计为一个学习日；累计3个学习日后生成完整报告。报告不提供排名或提分预测。</p>
+              <p>累计3个有效学习日后生成报告，不提供排名或提分预测。</p>
               <button type="button" className="secondary-button" onClick={() => setTab("today")}>继续今日练习</button>
             </article>}
-            {insights.total === 0 ? <div className="empty-state report-empty"><span>报</span><h3>完成第一组日练后生成诊断</h3><p>完成作答后，系统将分析正确率、用时和薄弱模块；数据不足时暂不生成诊断结论。</p><button className="primary-button" onClick={runDailyAction}>开始今日日练</button></div> : <>
+            {insights.total === 0 ? <div className="empty-state report-empty"><span>报</span><h3>完成第一组日练后生成诊断</h3><p>系统分析正确率、用时和薄弱模块；样本不足时不下结论。</p><button className="primary-button" onClick={runDailyAction}>开始今日日练</button></div> : <>
               <div className="stats-grid report-stats"><article><span>累计答题</span><strong>{insights.total}</strong><small>题</small></article><article><span>正确率</span><strong>{insights.accuracy}</strong><small>%</small></article><article><span>掌握不稳定/猜测作答</span><strong>{insights.uncertainCount}</strong><small>题</small></article><article><span>超时作答</span><strong>{insights.overtimeCount}</strong><small>题</small></article><article><span>平均用时</span><strong>{insights.avgSeconds}</strong><small>秒</small></article><article><span>今日到期复习</span><strong>{insights.dueCount}</strong><small>题</small></article></div>
               <article className="report-card weekly-report"><div className="report-title"><h3>本周学习结果</h3><span>最近7个自然日 · 有效作答</span></div><div className="prescription-facts"><span>完成 {weeklyMetrics.total} 道真题</span><span>正确率 {weeklyMetrics.accuracy}%{weeklyMetrics.accuracyDelta !== null ? `（${weeklyMetrics.accuracyDelta >= 0 ? "+" : ""}${weeklyMetrics.accuracyDelta}pp）` : ""}</span><span>学习 {weeklyMetrics.activeDays} 天</span><span>高频考点覆盖 {weeklyMetrics.highFrequencyCoverage} 个</span><span>重复错误率 {weeklyMetrics.repeatErrorRate === null ? "样本积累中" : `${weeklyMetrics.repeatErrorRate}%`}</span><span>平均 {weeklyMetrics.avgSeconds} 秒{weeklyMetrics.avgSecondsDelta !== null ? `（${weeklyMetrics.avgSecondsDelta > 0 ? "慢" : "快"}${Math.abs(weeklyMetrics.avgSecondsDelta)}秒）` : ""}</span></div>
                 <p><b>本周已稳定掌握：</b>{weeklyMetrics.masteredPoints.length ? weeklyMetrics.masteredPoints.join("、") : "尚无达到稳定掌握条件的考点"}</p>
@@ -4256,16 +4256,16 @@ export default function DailyPracticeApp() {
               <button className="profile-edit" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>修改</button>
             </div>
             <div className="target-chip-row">{profile.targets.map((target, index) => <span className="target-chip" key={target.code}>{index === 0 ? "主攻 · " : ""}{target.label} · {target.examYear}</span>)}</div>
-            <article className="panel-card streak-panel"><div><span>连续打卡</span><h3>{streak}天 · 累计{progress.checkins.length}天</h3><p>完成当日日练即自动打卡，10分钟精简训练同样计入连续学习。</p></div><div className="streak-medal">{streak >= 30 ? "30" : streak >= 7 ? "7" : "✓"}<small>日练</small></div></article>
-            <article className="panel-card account-panel radar-account"><div><span>公考雷达</span><h3>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "补全公告、职位表与报名节点"}</h3><p>{nextCalendarEvent ? nextCalendarEvent.days === 0 ? "请于今日完成关键事项核对。" : `还有${nextCalendarEvent.days}天，已提前${nextCalendarEvent.reminderDays}天提醒。` : "统一管理多个考试的公告、职位表、筛选和报名日期。"}</p></div><button className="profile-edit" onClick={() => setTab("calendar")}>打开雷达</button></article>
-            <article className="panel-card account-panel synced"><div><span>学习诊断</span><h3>{insights.total ? `已分析 ${insights.total} 道有效作答` : "完成首轮后生成训练建议"}</h3><p>查看正确率、作答用时、掌握状态和下一步训练方向。</p></div><button className="profile-edit" onClick={() => setTab("report")}>查看报告</button></article>
-            <article className={bootstrap?.user.signedIn ? "panel-card account-panel synced" : "panel-card account-panel"}><div><span>{bootstrap?.user.signedIn ? "账号同步已开启" : "当前仅保存在本设备"}</span><h3>{bootstrap?.user.signedIn ? "换设备也能继续学习" : "登录后同步学习记录"}</h3><p>{bootstrap?.user.signedIn ? "报考目标、题库、掌握状态和会员时长均已同步。" : "登录时会自动合并当前进度。"}</p></div>{bootstrap?.user.signedIn ? <b>✓ 已同步</b> : <a href={signInHref}>登录并同步</a>}</article>
-            <article className={`membership-card${bootstrap?.user.membershipActive ? " active" : ""}`}><div><span>{bootstrap?.user.membershipActive ? "会员有效期" : "公考日练会员"}</span><h3>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : formatDate(bootstrap.user.membershipEnd) : "每天30分钟，聚焦高频考点"}</h3><p>{bootstrap?.user.membershipActive ? "题库、解析、错题复习与完整职位筛选功能已启用。" : "围绕真题、错题复习和报考节点，提供精简训练与提醒。"} </p>{!bootstrap?.user.membershipActive && <div className="membership-benefits"><span>多题库组合</span><span>高频真题微练</span><span>错题记忆复习</span><span>多考试职位筛选</span></div>}</div>{bootstrap?.user.membershipActive ? <b>VIP</b> : <button className="profile-edit" onClick={() => openPaywall("value_loop", undefined, { tab: "me" })}>查看权益</button>}</article>
+            <article className="panel-card streak-panel"><div><span>连续打卡</span><h3>{streak}天 · 累计{progress.checkins.length}天</h3><p>完成当日日练自动打卡，10分钟计划同样计入。</p></div><div className="streak-medal">{streak >= 30 ? "30" : streak >= 7 ? "7" : "✓"}<small>日练</small></div></article>
+            <article className="panel-card account-panel radar-account"><div><span>公考雷达</span><h3>{nextCalendarEvent ? `${nextCalendarEvent.targetLabel} · ${nextCalendarEvent.title}` : "补全公告、职位表与报名节点"}</h3><p>{nextCalendarEvent ? nextCalendarEvent.days === 0 ? "请于今日完成关键事项核对。" : `还有${nextCalendarEvent.days}天，已提前${nextCalendarEvent.reminderDays}天提醒。` : "管理多个考试的公告、职位和报名节点。"}</p></div><button className="profile-edit" onClick={() => setTab("calendar")}>打开雷达</button></article>
+            <article className="panel-card account-panel synced"><div><span>学习诊断</span><h3>{insights.total ? `已分析 ${insights.total} 道有效作答` : "完成首轮后生成训练建议"}</h3><p>查看正确率、用时、掌握状态和训练建议。</p></div><button className="profile-edit" onClick={() => setTab("report")}>查看报告</button></article>
+            <article className={bootstrap?.user.signedIn ? "panel-card account-panel synced" : "panel-card account-panel"}><div><span>{bootstrap?.user.signedIn ? "账号同步已开启" : "当前仅保存在本设备"}</span><h3>{bootstrap?.user.signedIn ? "换设备也能继续学习" : "登录后同步学习记录"}</h3><p>{bootstrap?.user.signedIn ? "报考目标、题库、学习记录和会员时长已同步。" : "登录时会自动合并当前进度。"}</p></div>{bootstrap?.user.signedIn ? <b>✓ 已同步</b> : <a href={signInHref}>登录并同步</a>}</article>
+            <article className={`membership-card${bootstrap?.user.membershipActive ? " active" : ""}`}><div><span>{bootstrap?.user.membershipActive ? "会员有效期" : "公考日练会员"}</span><h3>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : formatDate(bootstrap.user.membershipEnd) : "每天30分钟，聚焦高频考点"}</h3><p>{bootstrap?.user.membershipActive ? "完整题库、解析、复习和职位筛选已启用。" : "每日真题、错题复习与报考提醒。"} </p>{!bootstrap?.user.membershipActive && <div className="membership-benefits"><span>多题库组合</span><span>高频真题微练</span><span>错题记忆复习</span><span>多考试职位筛选</span></div>}</div>{bootstrap?.user.membershipActive ? <b>VIP</b> : <button className="profile-edit" onClick={() => openPaywall("value_loop", undefined, { tab: "me" })}>查看权益</button>}</article>
             {meCampaign && isCampaignVisible(meCampaign) && <section className={`configured-campaign-card tone-${meCampaign.tone}`}><div><span>{meCampaign.eyebrow}</span><h2>{meCampaign.title}</h2><p>{meCampaign.summary}</p></div><button onClick={() => { recordCampaignClick(meCampaign); runConfiguredAction(meCampaign.actionType, meCampaign.actionTarget, `campaign:${meCampaign.id}`); }}>{meCampaign.actionLabel}</button></section>}
-            <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后会直接回到今日页，按你的备考组合生成下一步练习；时长码自动累计，终身码不会被覆盖。</small></article>
-            <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证及首次有效日练后，双方会员时长自动发放；仅访问链接或完成注册不计入奖励条件。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
+            <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后返回今日；时长自动累计，终身权益不被覆盖。</small></article>
+            <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证和首次有效日练后，双方自动获得时长。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
             <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
-            <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看产品定位、内容来源和版权联系说明。</p></div><strong>›</strong></button>
+            <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看产品、内容来源和版权说明。</p></div><strong>›</strong></button>
           </div>}
 
           {tab === "about" && <div className="page-content subpage about-page">

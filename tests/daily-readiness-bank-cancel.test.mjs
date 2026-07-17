@@ -58,7 +58,7 @@ test("daily readiness uses effective reviewed banks and content fingerprints ins
   assert.match(route, /dailyReadiness: await loadDailyReadiness|loadDailyReadiness\(identity\.userId, membershipActive\)/);
   assert.match(client, /bootstrap\.dailyReadiness \? !bootstrap\.dailyReadiness\.ready/);
   assert.match(client, /dailyReadinessCount/);
-  assert.match(client, /跨题库重复题只算1道/);
+  assert.match(client, /仅统计地区、年份匹配且已核验的非重复真题/);
 
   const rows = [
     ["题干 A。", ["甲", "乙"]],

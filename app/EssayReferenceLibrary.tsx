@@ -701,7 +701,7 @@ export default function EssayReferenceLibrary({
               <div className={styles.emptyState}>
                 <div aria-hidden="true">文</div>
                 <strong>{papers.length === 0 ? "资料正在整理中" : libraryView === "favorite" ? "暂未收藏资料" : libraryView === "recent" ? "暂无查看记录" : "未找到相关资料"}</strong>
-                <p>{papers.length === 0 ? "后台发布首批申论真题资料后，将自动显示在这里。" : libraryView === "all" ? "请调整搜索内容或筛选条件后重试。" : "可返回全部资料进行查看。"}</p>
+                <p>{papers.length === 0 ? "资料整理完成后将在这里显示。" : libraryView === "all" ? "请调整搜索或筛选条件。" : "可返回全部资料查看。"}</p>
                 <button type="button" onClick={papers.length === 0 ? onClose : resetFilters}>{papers.length === 0 ? "返回上一页" : "查看全部资料"}</button>
               </div>
             )}

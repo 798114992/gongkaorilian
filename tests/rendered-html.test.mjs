@@ -50,14 +50,14 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
   assert.match(app, /题库书架/);
   assert.match(app, /resolveBankFit/);
   assert.match(app, /bankCanPowerDailyPractice/);
-  assert.match(app, /备考组合配置缺口/);
+  assert.match(app, /可练题库待补全/);
   assert.match(app, /bank\.questionCount > 0/);
   assert.match(app, /bankYearSupportsTarget\(bank\.examYear, target\.examYear\)/);
   assert.doesNotMatch(app, /label: "题库提醒"/);
   assert.match(app, /推荐标准/);
   assert.match(app, /取消/);
   assert.match(app, /buildDailyPlan/);
-  assert.match(app, /答错、超时及掌握不稳定/);
+  assert.match(app, /答错、超时或掌握不稳定/);
   assert.match(app, /把握不足（答对后仍会复习）/);
   assert.match(route, /getPracticeBatch/);
   assert.match(route, /submitPracticeAnswer/);
@@ -181,7 +181,7 @@ test("exam radar, registration reminders, streaks and focused micro drills are p
   assert.match(app, /公考雷达 · 报考工作台/);
   assert.match(app, /职位表发布/);
   assert.match(app, /报考筛选/);
-  assert.match(app, /报名提醒已工作/);
+  assert.match(app, /站内提醒已开启/);
   assert.match(app, /公告发布/);
   assert.match(app, /准考证打印/);
   assert.match(app, /candidateProfile/);

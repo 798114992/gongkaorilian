@@ -350,18 +350,19 @@ export default function QuizFeature({
           <small>趣味测试 · 免费开放</small>
         </span>
         <em aria-hidden="true">›</em>
-      </button> : entryVisible ? <section className="quiz-teaser-card" aria-label="趣味测试">
-        <div>
-          <span>{teaserConfig?.eyebrow || "轻松测一测 · 可分享"}</span>
+      </button> : entryVisible ? <section className="quiz-teaser-card" aria-label="测测你有没有局长思维">
+        <div className="quiz-teaser-copy">
+          <span className="quiz-teaser-eyebrow">{teaserConfig?.eyebrow || "机关思维轻测 · 免费开放"}</span>
           <h2>{teaserConfig?.title || "测测你有没有“局长”思维？"}</h2>
-          <p>{teaserConfig?.summary || "独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。"}</p>
+          <p>{teaserConfig?.summary || "不计入日练进度；随机10道“办公室语感题”，生成段位卡，可邀请朋友同题挑战。"}</p>
+          <div className="quiz-teaser-badges" aria-label="测试特点"><em>10题</em><em>约1分钟</em><em>结果可分享</em></div>
         </div>
         <div className="quiz-teaser-visual" aria-hidden="true">
           <i />
           <b>局</b>
           <em />
         </div>
-        <button onClick={() => openQuiz()}>{teaserConfig?.actionLabel || "开始测试"}</button>
+        <button onClick={() => openQuiz()}>{teaserConfig?.actionLabel || "测一下"}</button>
       </section> : null}
 
       {open && <div className="quiz-overlay" role="dialog" aria-modal="true" aria-labelledby="quiz-title">

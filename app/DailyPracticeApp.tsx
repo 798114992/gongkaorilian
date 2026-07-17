@@ -3888,6 +3888,7 @@ export default function DailyPracticeApp() {
   const threeDayReportReady = weeklyMetrics.activeDays >= 3;
   const threeDayReportProgress = Math.min(3, weeklyMetrics.activeDays);
   const threeDayNextIssues = weeklyMetrics.nextIssues.slice(0, 3);
+  const visibleTodayQuizCampaign = todayCampaign && todayCampaign.actionType === "quiz" && isCampaignVisible(todayCampaign) ? todayCampaign : null;
 
   if (!bootstrap) {
     return <main className="app-shell"><div className="app-frame"><header className="topbar"><div className="brand-mark">公</div><div className="brand-copy"><strong>公考日练</strong><span>每天10–60分钟，高效完成今日训练</span></div></header><section className="empty-state bootstrap-state" role={bootstrapLoadState === "error" ? "alert" : "status"}><span>{bootstrapLoadState === "error" ? "!" : "…"}</span><h3>{bootstrapLoadState === "error" ? "学习数据暂时没有加载成功" : "正在同步账户、题库权益与学习进度"}</h3><p>{bootstrapLoadState === "error" ? `${bootstrapError || "网络暂时不可用"}。数据加载失败时不会更新学习进度。` : "首次进入时将同步账号状态与学习记录。"}</p>{bootstrapLoadState === "error" && <button className="primary-button" onClick={() => void loadBootstrap()}>立即重试</button>}</section>{toast && <div className="toast" role="status">{toast}</div>}</div></main>;
@@ -3911,6 +3912,16 @@ export default function DailyPracticeApp() {
 
         {activeModule ? renderModule() : <>
           {tab === "today" && <div className="page-content today-redesign">
+            <QuizFeature
+              notify={notify}
+              trackEvent={trackEvent}
+              variant="teaser"
+              entryVisible
+              teaserConfig={visibleTodayQuizCampaign ? { eyebrow: visibleTodayQuizCampaign.eyebrow, title: visibleTodayQuizCampaign.title, summary: visibleTodayQuizCampaign.summary, actionLabel: visibleTodayQuizCampaign.actionLabel } : undefined}
+              onEntryOpen={visibleTodayQuizCampaign ? () => recordCampaignClick(visibleTodayQuizCampaign) : undefined}
+              onComplete={visibleTodayQuizCampaign ? () => markCampaignComplete(visibleTodayQuizCampaign) : undefined}
+            />
+
             <section className={`today-focus-strip${profile.onboarded && dailyConfigurationBlocking ? " has-config-gap" : ""}`}>
               <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
               <button className="today-focus-adjust" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
@@ -3972,15 +3983,6 @@ export default function DailyPracticeApp() {
               <div className="today-alert-list">{todayAlertItems.map((item) => <button key={item.id} className="urgent" onClick={item.action}><span>{item.label}</span><div><b>{item.title}</b><small>{item.detail}</small></div><i>›</i></button>)}</div>
             </section>}
 
-            <QuizFeature
-              notify={notify}
-              trackEvent={trackEvent}
-              variant="teaser"
-              entryVisible={Boolean(todayCampaign && todayCampaign.actionType === "quiz" && isCampaignVisible(todayCampaign))}
-              teaserConfig={todayCampaign ? { eyebrow: todayCampaign.eyebrow, title: todayCampaign.title, summary: todayCampaign.summary, actionLabel: todayCampaign.actionLabel } : undefined}
-              onEntryOpen={todayCampaign ? () => recordCampaignClick(todayCampaign) : undefined}
-              onComplete={todayCampaign ? () => markCampaignComplete(todayCampaign) : undefined}
-            />
             {todayCampaign && todayCampaign.actionType !== "quiz" && isCampaignVisible(todayCampaign) && <section className={`configured-campaign-card tone-${todayCampaign.tone}`}>
               <div><span>{todayCampaign.eyebrow}</span><h2>{todayCampaign.title}</h2><p>{todayCampaign.summary}</p></div>
               <button onClick={() => { recordCampaignClick(todayCampaign); runConfiguredAction(todayCampaign.actionType, todayCampaign.actionTarget, `campaign:${todayCampaign.id}`); }}>{todayCampaign.actionLabel}</button>

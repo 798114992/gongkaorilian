@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { BOOTSTRAP_MAX_REQUESTS } from "./bootstrap-retry.mjs";
 
 type QuizMeta = {
   id: string;
@@ -76,14 +77,28 @@ type Props = {
 };
 
 async function quizApi<T>(payload: Record<string, unknown>) {
-  const response = await fetch("/api/app", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json() as T & { error?: string };
-  if (!response.ok) throw new Error(data.error || "测试暂时不可用");
-  return data;
+  for (let requestNumber = 1; requestNumber <= BOOTSTRAP_MAX_REQUESTS; requestNumber += 1) {
+    const response = await fetch("/api/app", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let data: T & { error?: string; code?: string; retryAction?: boolean };
+    try {
+      data = await response.json() as T & { error?: string; code?: string; retryAction?: boolean };
+    } catch {
+      data = {} as T & { error?: string; code?: string; retryAction?: boolean };
+    }
+    // A new visitor receives one preparation response before the quiz handler
+    // runs. The server guarantees the payload is still safe to replay.
+    if (response.status === 409 && data.code === "IDENTITY_PREPARING" && data.retryAction) {
+      if (requestNumber < BOOTSTRAP_MAX_REQUESTS) continue;
+      throw new Error("账号初始化未完成，请稍后重试");
+    }
+    if (!response.ok) throw new Error(data.error || "测试暂时不可用");
+    return data;
+  }
+  throw new Error("账号初始化未完成，请稍后重试");
 }
 
 function shareTitleFor(result: QuizResult) {
@@ -347,15 +362,13 @@ export default function QuizFeature({
         <span className="quiz-tool-icon" aria-hidden="true">局</span>
         <span className="quiz-tool-copy">
           <b>局长思维小测</b>
-          <small>趣味测试 · 免费开放</small>
+          <small>趣味测试</small>
         </span>
         <em aria-hidden="true">›</em>
       </button> : entryVisible ? <section className="quiz-teaser-card" aria-label="测测你有没有局长思维">
         <div className="quiz-teaser-copy">
-          <span className="quiz-teaser-eyebrow">{teaserConfig?.eyebrow || "机关思维轻测 · 免费开放"}</span>
+          <span className="quiz-teaser-eyebrow">{teaserConfig?.eyebrow || "趣味测试"}</span>
           <h2>{teaserConfig?.title || "测测你有没有“局长”思维？"}</h2>
-          <p>{teaserConfig?.summary || "不计入日练进度；随机10道“办公室语感题”，生成段位卡，可邀请朋友同题挑战。"}</p>
-          <div className="quiz-teaser-badges" aria-label="测试特点"><em>10题</em><em>约1分钟</em><em>结果可分享</em></div>
         </div>
         <div className="quiz-teaser-visual" aria-hidden="true">
           <i />

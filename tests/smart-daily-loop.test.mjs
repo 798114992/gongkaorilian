@@ -17,12 +17,15 @@ test("today page prioritizes urgent exam actions and evidence-based point recomm
   assert.match(app, /recommendationEvidence/);
   assert.match(app, /today-gain-disclosure/);
   assert.doesNotMatch(app, />加练一下</);
-  assert.match(app, /entryVisible=\{Boolean\(todayCampaign/);
+  assert.match(app, /variant="teaser"[\s\S]*?entryVisible/);
+  assert.ok(app.indexOf("<QuizFeature") > app.indexOf("smart-bonus-card"),
+    "the quiz should be the final lightweight entry on the today page");
   assert.match(app, /campaign_impression/);
   assert.doesNotMatch(app, /unlocked=\{allDailyDone\}/);
 
-  assert.match(quiz, /独立趣味测试，不计入日练进度/);
-  assert.match(quiz, /趣味测试 · 免费开放/);
+  assert.match(quiz, /quiz-teaser-eyebrow[\s\S]*?趣味测试/);
+  assert.doesNotMatch(quiz, /不计入日练进度；随机10道/);
+  assert.doesNotMatch(quiz, /趣味测试 · 免费开放/);
   assert.doesNotMatch(quiz, /完成今日主线后解锁局长思维小测/);
   assert.doesNotMatch(quiz, /disabled=\{!unlocked\}/);
 

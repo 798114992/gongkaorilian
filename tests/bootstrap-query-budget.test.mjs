@@ -9,6 +9,7 @@ import {
 
 const routeFile = new URL("../app/api/app/route.ts", import.meta.url);
 const clientFile = new URL("../app/DailyPracticeApp.tsx", import.meta.url);
+const quizClientFile = new URL("../app/QuizFeature.tsx", import.meta.url);
 
 function functionSection(source, name) {
   const start = source.indexOf(`async function ${name}`);
@@ -130,4 +131,16 @@ test("public API client retries only the pre-handler identity signal and remains
   assert.match(api, /requestNumber < BOOTSTRAP_MAX_REQUESTS/);
   assert.ok(api.indexOf("data.code === \"IDENTITY_PREPARING\"") < api.indexOf("if (!response.ok)"),
     "the retriable 409 must be handled before generic HTTP errors");
+});
+
+test("standalone quiz client also retries identity preparation before reporting an error", async () => {
+  const client = await readFile(quizClientFile, "utf8");
+  const quizApi = functionSection(client, "quizApi");
+
+  assert.match(client, /import \{ BOOTSTRAP_MAX_REQUESTS \} from "\.\/bootstrap-retry\.mjs"/);
+  assert.match(quizApi, /for \(let requestNumber = 1; requestNumber <= BOOTSTRAP_MAX_REQUESTS;/);
+  assert.match(quizApi, /response\.status === 409 && data\.code === "IDENTITY_PREPARING" && data\.retryAction/);
+  assert.match(quizApi, /requestNumber < BOOTSTRAP_MAX_REQUESTS/);
+  assert.ok(quizApi.indexOf("data.code === \"IDENTITY_PREPARING\"") < quizApi.indexOf("if (!response.ok)"),
+    "the quiz client must replay the preparation response before treating it as an error");
 });

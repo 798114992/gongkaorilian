@@ -3912,16 +3912,6 @@ export default function DailyPracticeApp() {
 
         {activeModule ? renderModule() : <>
           {tab === "today" && <div className="page-content today-redesign">
-            <QuizFeature
-              notify={notify}
-              trackEvent={trackEvent}
-              variant="teaser"
-              entryVisible
-              teaserConfig={visibleTodayQuizCampaign ? { eyebrow: visibleTodayQuizCampaign.eyebrow, title: visibleTodayQuizCampaign.title, summary: visibleTodayQuizCampaign.summary, actionLabel: visibleTodayQuizCampaign.actionLabel } : undefined}
-              onEntryOpen={visibleTodayQuizCampaign ? () => recordCampaignClick(visibleTodayQuizCampaign) : undefined}
-              onComplete={visibleTodayQuizCampaign ? () => markCampaignComplete(visibleTodayQuizCampaign) : undefined}
-            />
-
             <section className={`today-focus-strip${profile.onboarded && dailyConfigurationBlocking ? " has-config-gap" : ""}`}>
               <div className="today-focus-summary"><span>我的备考组合</span><b>{primaryTarget?.label ?? "尚未设置主攻考试"}{profile.targets.length > 1 ? ` · 兼顾${profile.targets.length - 1}项` : ""}</b><small>{nextExam ? `最近考试：${nextExam.target.label}，还有${nextExam.days}天` : "设置目标后自动安排主攻与兼顾"}</small></div>
               <button className="today-focus-adjust" onClick={() => { setProfileDraft(profile); setOnboardingOpen(true); }}>调整</button>
@@ -4014,6 +4004,16 @@ export default function DailyPracticeApp() {
                 </div>
               </details>
             </section>
+
+            <QuizFeature
+              notify={notify}
+              trackEvent={trackEvent}
+              variant="teaser"
+              entryVisible
+              teaserConfig={visibleTodayQuizCampaign ? { eyebrow: "趣味测试", title: visibleTodayQuizCampaign.title, actionLabel: "开始测试" } : undefined}
+              onEntryOpen={visibleTodayQuizCampaign ? () => recordCampaignClick(visibleTodayQuizCampaign) : undefined}
+              onComplete={visibleTodayQuizCampaign ? () => markCampaignComplete(visibleTodayQuizCampaign) : undefined}
+            />
           </div>}
 
           {tab === "banks" && <div className="page-content subpage">

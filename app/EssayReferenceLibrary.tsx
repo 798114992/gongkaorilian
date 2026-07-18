@@ -128,6 +128,7 @@ export type EssayReferenceLibraryProps = {
   sources?: EssayReferenceSource[];
   onClose: () => void;
   initialPaperId?: string;
+  initialQuestionId?: string;
   favoritePaperIds?: string[];
   recentPaperIds?: string[];
   onFavoritePaperIdsChange?: (ids: string[]) => void;
@@ -135,6 +136,11 @@ export type EssayReferenceLibraryProps = {
   onPaperOpen?: (paperId: string) => void | Promise<void>;
   onPaperExit?: () => void;
   onSharePaper?: (paper: EssayReferencePaper) => void | Promise<void>;
+  todayQuestionIds?: string[];
+  completedTodayQuestionIds?: string[];
+  onAddQuestionToToday?: (paper: EssayReferencePaper, question: EssayReferenceQuestion) => void | Promise<unknown>;
+  onCompleteTodayQuestion?: (paper: EssayReferencePaper, question: EssayReferenceQuestion) => void | Promise<unknown>;
+  onRemoveTodayQuestion?: (paper: EssayReferencePaper, question: EssayReferenceQuestion) => void | Promise<unknown>;
   hasMore?: boolean;
   totalCount?: number;
   loadingMore?: boolean;
@@ -344,6 +350,7 @@ export default function EssayReferenceLibrary({
   sources: flatSources = [],
   onClose,
   initialPaperId,
+  initialQuestionId,
   favoritePaperIds,
   recentPaperIds,
   onFavoritePaperIdsChange,
@@ -351,6 +358,11 @@ export default function EssayReferenceLibrary({
   onPaperOpen,
   onPaperExit,
   onSharePaper,
+  todayQuestionIds = [],
+  completedTodayQuestionIds = [],
+  onAddQuestionToToday,
+  onCompleteTodayQuestion,
+  onRemoveTodayQuestion,
   hasMore = false,
   totalCount,
   loadingMore = false,
@@ -377,6 +389,7 @@ export default function EssayReferenceLibrary({
   const [localRecent, setLocalRecent] = useState<string[]>(() => readStoredIds(`${storageKey}:recent`));
   const [expandedMaterials, setExpandedMaterials] = useState<Set<string>>(new Set());
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
+  const [comparisonSources, setComparisonSources] = useState<Record<string, string[]>>({});
   const questionRefs = useRef<Record<string, HTMLElement | null>>({});
   const initialOnClose = useRef(onClose);
 
@@ -479,6 +492,12 @@ export default function EssayReferenceLibrary({
   const selectedPaper = papers.find((paper) => paper.id === selectedPaperId) ?? null;
   const selectedQuestions = selectedPaper ? questionsByPaper.get(selectedPaper.id) ?? [] : [];
 
+  useEffect(() => {
+    if (!initialQuestionId || !selectedPaper || !selectedQuestions.some((question) => question.id === initialQuestionId)) return;
+    const timer = window.setTimeout(() => questionRefs.current[initialQuestionId]?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    return () => window.clearTimeout(timer);
+  }, [initialQuestionId, selectedPaper, selectedQuestions]);
+
   const updateFavorites = (next: string[]) => {
     if (favoritePaperIds === undefined) {
       setLocalFavorites(next);
@@ -502,6 +521,7 @@ export default function EssayReferenceLibrary({
       setSelectedPaperId(paperId);
       setExpandedMaterials(new Set());
       setExpandedSources(new Set());
+      setComparisonSources({});
       const nextRecent = [paperId, ...recent.filter((id) => id !== paperId)].slice(0, 20);
       if (recentPaperIds === undefined) {
         setLocalRecent(nextRecent);
@@ -524,6 +544,21 @@ export default function EssayReferenceLibrary({
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
+    });
+  };
+
+  const openComparison = (questionId: string, questionSources: EssayReferenceSource[]) => {
+    const comparable = questionSources.filter((source) => Boolean(source.content)).slice(0, 3).map((source) => source.id);
+    setComparisonSources((current) => ({ ...current, [questionId]: comparable.slice(0, Math.min(2, comparable.length)) }));
+  };
+
+  const toggleComparisonSource = (questionId: string, sourceId: string) => {
+    setComparisonSources((current) => {
+      const selected = current[questionId] ?? [];
+      const next = selected.includes(sourceId)
+        ? selected.filter((id) => id !== sourceId)
+        : selected.length < 3 ? [...selected, sourceId] : selected;
+      return { ...current, [questionId]: next };
     });
   };
 
@@ -776,6 +811,13 @@ export default function EssayReferenceLibrary({
                 <div className={styles.questionList}>
                   {selectedQuestions.map((question) => {
                     const questionSources = sourcesByQuestion.get(question.id) ?? [];
+                    const selectedComparisonIds = comparisonSources[question.id] ?? [];
+                    const selectedComparisonSources = selectedComparisonIds
+                      .map((sourceId) => questionSources.find((source) => source.id === sourceId))
+                      .filter((source): source is EssayReferenceSource => Boolean(source));
+                    const comparableSources = questionSources.filter((source) => Boolean(source.content));
+                    const inToday = todayQuestionIds.includes(question.id);
+                    const completedToday = completedTodayQuestionIds.includes(question.id);
                     const materialLabels = (question.materialIds ?? []).map((materialId) => (
                       selectedPaper.materials?.find((material) => material.id === materialId)?.label
                     )).filter((label): label is string => Boolean(label));
@@ -799,10 +841,26 @@ export default function EssayReferenceLibrary({
                           <div className={styles.requirements}><strong>作答要求</strong><span>{question.requirements}</span></div>
                         )}
 
+                        {onAddQuestionToToday && <div className={styles.questionPlanAction}>
+                          <div><strong>{completedToday ? "今日已完成查阅" : inToday ? "已纳入今日计划" : "想今天重点查看这道题？"}</strong><span>预计约8分钟；当日安排已开始或已满时自动顺延。</span></div>
+                          {completedToday
+                            ? <button type="button" disabled>✓ 已完成</button>
+                            : inToday && onCompleteTodayQuestion
+                              ? <div className={styles.questionPlanButtons}><button type="button" onClick={() => void onCompleteTodayQuestion(selectedPaper, question)}>完成查阅</button>{onRemoveTodayQuestion && <button type="button" className={styles.questionPlanRemove} onClick={() => void onRemoveTodayQuestion(selectedPaper, question)}>移出</button>}</div>
+                              : <button type="button" onClick={() => void onAddQuestionToToday(selectedPaper, question)}>加入今日</button>}
+                        </div>}
+
                         <div className={styles.answerHeading}>
                           <strong>参考答案</strong>
-                          <span>{questionSources.length} 个来源</span>
+                          <div><span>{questionSources.length} 个来源</span>{comparableSources.length >= 2 && <button type="button" onClick={() => selectedComparisonIds.length ? setComparisonSources((current) => ({ ...current, [question.id]: [] })) : openComparison(question.id, questionSources)}>{selectedComparisonIds.length ? "退出对比" : "并排对比"}</button>}</div>
                         </div>
+
+                        {selectedComparisonIds.length > 0 && <section className={styles.comparisonPanel} aria-label={`第${question.number}题答案对比`}>
+                          <div className={styles.comparisonToolbar}><strong>选择2—3个来源</strong><div>{comparableSources.map((source) => <button type="button" key={source.id} className={selectedComparisonIds.includes(source.id) ? styles.comparisonSourceActive : ""} onClick={() => toggleComparisonSource(question.id, source.id)}>{selectedComparisonIds.includes(source.id) ? "✓ " : ""}{source.name}</button>)}</div></div>
+                          {selectedComparisonSources.length >= 2
+                            ? <div className={styles.comparisonScroll}><div className={styles.comparisonGrid} style={{ "--compare-columns": selectedComparisonSources.length } as CSSProperties}>{selectedComparisonSources.map((source, sourceIndex) => <article key={source.id} style={{ "--source-accent": source.accent || sourceAccents[sourceIndex % sourceAccents.length] } as CSSProperties}><header><strong>{source.name}</strong><span>{Array.from(String(source.content ?? "").replace(/\s/g, "")).length}字</span></header><div>{source.content}</div>{source.originalUrl && <a href={source.originalUrl} target="_blank" rel="noreferrer">查看原文 <ExternalIcon /></a>}</article>)}</div></div>
+                            : <p className={styles.comparisonHint}>请至少选择2个来源；最多同时对比3个。</p>}
+                        </section>}
 
                         {questionSources.length ? (
                           <div className={styles.sourceList}>

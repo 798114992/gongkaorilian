@@ -64,7 +64,7 @@ const PUBLIC_ACTIONS = new Set([
   "submitContentReport", "getPracticeSessionSummary", "recordDailyStep", "recordDailyCheckin", "authorizeAudioPlayback", "bindInvite", "redeem",
   "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
   "getQuiz", "startQuizAttempt", "submitQuizAnswer", "completeQuizAttempt", "recordQuizShare",
-  "getEssayReferenceLibrary", "getSupportInfo",
+  "getEssayReferenceLibrary", "getSupportInfo", "addTodayItem", "updateTodayItem",
 ]);
 const PASSIVE_PUBLIC_ACTIONS = new Set([
   "searchJobPositions", "getEssayPracticeBatch", "getPracticeSessionSummary", "getCommerceProducts",
@@ -113,6 +113,8 @@ const EVENT_NAMES = new Set([
   "essay_draft_submit",
   "essay_revision_submit",
   "essay_reference_library_open",
+  "today_item_add",
+  "today_item_update",
   "essay_reference_paper_open",
   "essay_reference_share",
   "essay_reference_deep_link_open",
@@ -1945,6 +1947,184 @@ async function selectedBankCodes(userId: string) {
   return rows.results.map((row) => row.bank_code).filter((code) => code !== STARTER_BANK_CODE);
 }
 
+type DailyQueueItemRow = {
+  id: string;
+  date_key: string;
+  item_type: string;
+  source_id: string;
+  source_parent_id: string;
+  title: string;
+  detail: string;
+  estimated_minutes: number;
+  status: string;
+  origin: string;
+  sort_order: number;
+  completed_at: string | null;
+};
+
+function publicDailyQueueItem(row: DailyQueueItemRow) {
+  return {
+    id: row.id,
+    dateKey: row.date_key,
+    itemType: row.item_type,
+    sourceId: row.source_id,
+    sourceParentId: row.source_parent_id,
+    title: row.title,
+    detail: row.detail,
+    estimatedMinutes: Number(row.estimated_minutes),
+    status: row.status,
+    origin: row.origin,
+    sortOrder: Number(row.sort_order),
+    completedAt: row.completed_at,
+  };
+}
+
+async function loadDailyQueue(userId: string, fromDate = chinaDateKey(), days = 8) {
+  const endDate = chinaDateKeyAfter(fromDate, Math.max(0, Math.min(30, days - 1)));
+  const rows = await getD1().prepare(`SELECT id, date_key, item_type, source_id, source_parent_id,
+    title, detail, estimated_minutes, status, origin, sort_order, completed_at
+    FROM user_daily_queue_items
+    WHERE user_id = ? AND date_key BETWEEN ? AND ? AND status IN ('scheduled','completed')
+    ORDER BY date_key, status = 'completed', sort_order, created_at`)
+    .bind(userId, fromDate, endDate).all<DailyQueueItemRow>();
+  return rows.results.map(publicDailyQueueItem);
+}
+
+async function loadTodayBankFocusCodes(userId: string, dateKey = chinaDateKey()) {
+  const rows = await getD1().prepare(`SELECT source_id FROM user_daily_queue_items
+    WHERE user_id = ? AND date_key = ? AND item_type = 'bank_practice' AND status = 'scheduled'
+    ORDER BY sort_order, created_at LIMIT 2`).bind(userId, dateKey).all<{ source_id: string }>();
+  return rows.results.map((row) => row.source_id);
+}
+
+async function completeDailyBankQueue(userId: string, dateKey: string, bankCodes: string[]) {
+  const codes = Array.from(new Set(bankCodes.map((code) => trimmed(code, 80)).filter(Boolean))).slice(0, 32);
+  if (!codes.length) return;
+  await getD1().prepare(`UPDATE user_daily_queue_items SET status = 'completed',
+    completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+    WHERE user_id = ? AND date_key = ? AND item_type = 'bank_practice' AND status = 'scheduled'
+      AND source_id IN (${codes.map(() => "?").join(",")})`).bind(userId, dateKey, ...codes).run();
+}
+
+async function addTodayItem(userId: string, payload: Record<string, unknown>) {
+  const db = getD1();
+  const itemType = payload.itemType === "essay_reference" ? "essay_reference"
+    : payload.itemType === "bank_practice" ? "bank_practice" : "";
+  const sourceId = trimmed(payload.sourceId, 80);
+  if (!itemType || !sourceId) return json({ error: "待办内容无效" }, 400);
+
+  let title = "";
+  let detail = "";
+  let sourceParentId = "";
+  let estimatedMinutes = itemType === "essay_reference" ? 8 : 10;
+  if (itemType === "bank_practice") {
+    const bank = await db.prepare(`SELECT qb.bank_code, qb.name, qb.subject, qb.status,
+      EXISTS(SELECT 1 FROM user_question_banks uqb WHERE uqb.user_id = ? AND uqb.bank_code = qb.bank_code) AS selected,
+      EXISTS(SELECT 1 FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
+        WHERE qbi.bank_id = qb.id AND q.status = 'active' AND q.subject = '行测'
+          AND q.truth_verified = 1 AND q.review_status = 'approved') AS available
+      FROM question_banks qb WHERE qb.bank_code = ? LIMIT 1`)
+      .bind(userId, sourceId).first<{ bank_code: string; name: string; subject: string; status: string; selected: number; available: number }>();
+    if (!bank || bank.status !== "published" || bank.subject === "申论" || !Number(bank.selected) || !Number(bank.available)) {
+      return json({ error: "请先加入一套已有可练真题的行测题库" }, 409);
+    }
+    title = bank.name;
+    detail = "优先用于当日行测组题";
+  } else {
+    const questionId = Number(sourceId);
+    if (!Number.isSafeInteger(questionId) || questionId <= 0) return json({ error: "申论题目编号无效" }, 400);
+    const question = await db.prepare(`SELECT q.id, q.question_code, qbi.question_number, qb.id AS bank_id,
+      qb.name AS bank_name, qb.library_status,
+      EXISTS(SELECT 1 FROM essay_reference_answers a JOIN essay_answer_sources s ON s.id = a.source_id
+        WHERE a.question_id = q.id AND a.publication_status = 'published' AND s.status = 'active'
+          AND (trim(a.source_url) = '' OR a.source_url LIKE 'https://%')
+          AND ((a.display_mode = 'full' AND a.copyright_status IN ('original','authorized') AND trim(a.content) <> '')
+            OR (a.display_mode = 'excerpt' AND a.copyright_status IN ('original','authorized','fair_quote') AND trim(a.excerpt) <> '')
+            OR (a.display_mode = 'link_only' AND a.copyright_status IN ('original','authorized','link_only') AND a.source_url LIKE 'https://%'))
+      ) AS available
+      FROM questions q JOIN question_bank_items qbi ON qbi.question_id = q.id
+      JOIN question_banks qb ON qb.id = qbi.bank_id
+      WHERE q.id = ? AND q.status = 'active' AND qb.library_enabled = 1 AND qb.library_status = 'published'
+      ORDER BY qbi.sort_order LIMIT 1`).bind(questionId).first<{
+        id: number; question_code: string; question_number: string; bank_id: number; bank_name: string;
+        library_status: string; available: number;
+      }>();
+    if (!question || !Number(question.available)) return json({ error: "该题的参考答案暂不可用" }, 404);
+    sourceParentId = String(question.bank_id);
+    title = `${question.bank_name} · 第${question.question_number || question.question_code}题`;
+    detail = "查看并对比多来源参考答案";
+  }
+
+  const existing = await db.prepare(`SELECT id, date_key, item_type, source_id, source_parent_id,
+    title, detail, estimated_minutes, status, origin, sort_order, completed_at
+    FROM user_daily_queue_items WHERE user_id = ? AND item_type = ? AND source_id = ?
+      AND status = 'scheduled' AND date_key >= ? ORDER BY date_key LIMIT 1`)
+    .bind(userId, itemType, sourceId, chinaDateKey()).first<DailyQueueItemRow>();
+  if (existing) return json({ item: publicDailyQueueItem(existing), scheduledDate: existing.date_key, duplicate: true });
+
+  const today = chinaDateKey();
+  let scheduledDate = "";
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = chinaDateKeyAfter(today, offset);
+    if (offset === 0) {
+      if (itemType === "bank_practice") {
+        const session = await db.prepare(`SELECT status FROM practice_sessions
+          WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
+            AND status IN ('active','completed') LIMIT 1`).bind(userId, candidate).first<{ status: string }>();
+        if (session) continue;
+      } else {
+        const completed = await db.prepare(`SELECT 1 AS done FROM daily_step_completions
+          WHERE user_id = ? AND date_key = ? AND step = 'essay' LIMIT 1`).bind(userId, candidate).first<{ done: number }>();
+        if (completed) continue;
+      }
+    }
+    const count = await db.prepare(`SELECT COUNT(*) AS count FROM user_daily_queue_items
+      WHERE user_id = ? AND date_key = ? AND item_type = ? AND status = 'scheduled'`)
+      .bind(userId, candidate, itemType).first<{ count: number }>();
+    const capacity = itemType === "bank_practice" ? 2 : 1;
+    if (Number(count?.count ?? 0) < capacity) { scheduledDate = candidate; break; }
+  }
+  if (!scheduledDate) return json({ error: "未来两周的学习安排已满，请先完成或移除已有任务" }, 409);
+
+  const id = crypto.randomUUID();
+  await db.prepare(`INSERT INTO user_daily_queue_items
+    (id, user_id, date_key, item_type, source_id, source_parent_id, title, detail,
+      estimated_minutes, status, origin, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 'manual', ?)`)
+    .bind(id, userId, scheduledDate, itemType, sourceId, sourceParentId, title, detail,
+      estimatedMinutes, itemType === "bank_practice" ? 20 : 30).run();
+  const item = await db.prepare(`SELECT id, date_key, item_type, source_id, source_parent_id,
+    title, detail, estimated_minutes, status, origin, sort_order, completed_at
+    FROM user_daily_queue_items WHERE id = ? AND user_id = ?`).bind(id, userId).first<DailyQueueItemRow>();
+  return json({ item: item ? publicDailyQueueItem(item) : null, scheduledDate, scheduledToday: scheduledDate === today, duplicate: false });
+}
+
+async function updateTodayItem(userId: string, payload: Record<string, unknown>) {
+  const id = trimmed(payload.id, 80);
+  const status = payload.status === "completed" ? "completed" : payload.status === "removed" ? "removed" : "";
+  if (!id || !status) return json({ error: "任务状态无效" }, 400);
+  const db = getD1();
+  const item = await db.prepare(`SELECT id, date_key, item_type FROM user_daily_queue_items
+    WHERE id = ? AND user_id = ? AND status = 'scheduled' LIMIT 1`)
+    .bind(id, userId).first<{ id: string; date_key: string; item_type: string }>();
+  if (!item) return json({ error: "任务不存在或已更新" }, 404);
+  if (status === "completed" && item.date_key !== chinaDateKey()) {
+    return json({ error: "该任务尚未到计划日期" }, 409);
+  }
+  const updated = await db.prepare(`UPDATE user_daily_queue_items SET status = ?,
+    completed_at = CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE NULL END,
+    updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = 'scheduled'`)
+    .bind(status, status, id, userId).run();
+  if (!updated.meta.changes) return json({ error: "任务状态更新失败" }, 409);
+  if (status === "completed" && item.item_type === "essay_reference") {
+    await db.prepare(`INSERT INTO daily_step_completions (user_id, date_key, step, source_ref, completed_at)
+      VALUES (?, ?, 'essay', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, date_key, step) DO UPDATE SET source_ref = excluded.source_ref, completed_at = CURRENT_TIMESTAMP`)
+      .bind(userId, item.date_key, item.id).run();
+  }
+  return json({ ok: true, id, status });
+}
+
 async function effectivePracticeBankCodes(userId: string, selected: string[], membershipActive: boolean) {
   if (membershipActive) return selected;
   const row = await getD1().prepare(`SELECT uqb.bank_code
@@ -2607,6 +2787,53 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
   };
 }
 
+async function loadReviewQueue(userId: string, selectedOverride?: string[] | Promise<string[]>) {
+  const selected = (selectedOverride ? await Promise.resolve(selectedOverride) : await selectedBankCodes(userId))
+    .filter((code) => code !== STARTER_BANK_CODE).slice(0, 32);
+  if (!selected.length) return [];
+  const rows = await getD1().prepare(`SELECT uqp.question_code, uqp.state, uqp.last_correct,
+      uqp.last_duration_ms, uqp.uncertain_count, uqp.wrong_reason, uqp.next_review_at,
+      uqp.review_stage, q.module, COALESCE(NULLIF(TRIM(q.sub_type), ''), q.module) AS knowledge,
+      q.suggested_seconds, MIN(qb.name) AS bank_name
+    FROM user_question_progress uqp
+    JOIN questions q ON q.question_code = uqp.question_code
+    JOIN question_bank_items qbi ON qbi.question_id = q.id
+    JOIN question_banks qb ON qb.id = qbi.bank_id
+    WHERE uqp.user_id = ? AND uqp.next_review_at IS NOT NULL
+      AND datetime(uqp.next_review_at) <= CURRENT_TIMESTAMP
+      AND qb.status = 'published' AND q.status = 'active'
+      AND q.truth_verified = 1 AND q.review_status = 'approved'
+      AND qb.bank_code IN (${selected.map(() => "?").join(",")})
+    GROUP BY uqp.question_code
+    ORDER BY datetime(uqp.next_review_at), uqp.updated_at LIMIT 20`)
+    .bind(userId, ...selected).all<{
+      question_code: string; state: string; last_correct: number; last_duration_ms: number;
+      uncertain_count: number; wrong_reason: string; next_review_at: string; review_stage: number;
+      module: string; knowledge: string; suggested_seconds: number; bank_name: string;
+    }>();
+  return rows.results.map((row) => {
+    const reason = row.wrong_reason
+      ? row.wrong_reason
+      : !Number(row.last_correct)
+        ? "上次答错"
+        : Number(row.uncertain_count) > 0
+          ? "掌握不稳定"
+          : Number(row.last_duration_ms) > Math.max(10, Number(row.suggested_seconds)) * 1000
+            ? "上次作答超时"
+            : row.state === "weak" ? "薄弱题巩固" : "记忆周期到期";
+    return {
+      questionCode: row.question_code,
+      module: row.module,
+      knowledge: row.knowledge,
+      bankName: row.bank_name,
+      state: row.state,
+      reason,
+      nextReviewAt: row.next_review_at,
+      reviewStage: Number(row.review_stage),
+    };
+  });
+}
+
 async function loadWrongAudioQuestions(userId: string): Promise<Question[]> {
   const db = getD1();
   const rows = await db.prepare(`SELECT question_code, next_review_at FROM user_question_progress
@@ -3149,6 +3376,8 @@ async function bootstrap(request: Request) {
       },
       wrongAudioQuestions: [],
       dueEssayRewrites: [],
+      dailyQueue: [],
+      reviewQueue: [],
       firstCompletedPractice: null,
       todayKey: chinaDateKey(),
       ledger: [],
@@ -3185,6 +3414,8 @@ async function bootstrap(request: Request) {
   const questionBanksPromise = Promise.all([membershipActivePromise, examProfilePromise, selectedBanksPromise])
     .then(([active, profile, selected]) => loadQuestionBanks(identity.userId, active, profile, selected));
   const studyInsightsPromise = loadStudyInsights(identity.userId, selectedBanksPromise);
+  const reviewQueuePromise = loadReviewQueue(identity.userId, selectedBanksPromise);
+  const dailyQueuePromise = loadDailyQueue(identity.userId, todayKey, 8);
   const dailyReadinessPromise = Promise.all([
     membershipActivePromise, statePromise, examProfilePromise, selectedBanksPromise,
     effectiveBankCodesPromise, contentPromise,
@@ -3201,7 +3432,7 @@ async function bootstrap(request: Request) {
       strategy: contentValue.strategyConfig ?? null,
     });
   });
-  const [user, state, ledger, inviteStats, inviteConfig, examProfile, questionBanks, studyInsights, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice, content, dailyReadiness] = await Promise.all([
+  const [user, state, ledger, inviteStats, inviteConfig, examProfile, questionBanks, studyInsights, reviewQueue, dailyQueue, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice, content, dailyReadiness] = await Promise.all([
     userPromise,
     statePromise,
     db.prepare(`SELECT delta_days, source_type, note, created_at
@@ -3214,6 +3445,8 @@ async function bootstrap(request: Request) {
     examProfilePromise,
     questionBanksPromise,
     studyInsightsPromise,
+    reviewQueuePromise,
+    dailyQueuePromise,
     loadWrongAudioQuestions(identity.userId),
     loadDueEssayRewrites(identity.userId),
     db.prepare("SELECT date_key FROM daily_checkins WHERE user_id = ? ORDER BY date_key")
@@ -3268,6 +3501,8 @@ async function bootstrap(request: Request) {
       kind: dailyPractice.first_session_kind === "daily" ? "daily" : "diagnostic",
     } : null,
     studyInsights,
+    reviewQueue,
+    dailyQueue,
     wrongAudioQuestions,
     dueEssayRewrites,
     todayKey,
@@ -3467,6 +3702,9 @@ async function toggleQuestionBank(userId: string, payload: Record<string, unknow
             WHERE CAST(value AS TEXT) = ?)
         RETURNING id`).bind(userId, bankCode),
       db.prepare("DELETE FROM user_question_banks WHERE user_id = ? AND bank_code = ?").bind(userId, bankCode),
+      db.prepare(`UPDATE user_daily_queue_items SET status = 'removed', updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND item_type = 'bank_practice' AND source_id = ? AND status = 'scheduled'`)
+        .bind(userId, bankCode),
     ]);
     const abandonedSessionIds = ((abandonedResult as { results?: Array<{ id?: unknown }> }).results ?? [])
       .map((row) => String(row.id ?? "")).filter(Boolean);
@@ -3579,14 +3817,15 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const dateKey = chinaDateKey();
   if (dailyRequest) {
     const completed = await db.prepare(`SELECT id, status, target_count, answered_count,
-      correct_count, review_added, elapsed_seconds FROM practice_sessions
+      correct_count, review_added, elapsed_seconds, bank_codes_json FROM practice_sessions
       WHERE user_id = ? AND date_key = ? AND kind = 'daily' AND mode = 'mixed'
         AND status = 'completed' AND target_count >= 5 AND answered_count >= target_count
       ORDER BY completed_at DESC LIMIT 1`).bind(userId, dateKey).first<{
         id: string; status: string; target_count: number; answered_count: number;
-        correct_count: number; review_added: number; elapsed_seconds: number;
+        correct_count: number; review_added: number; elapsed_seconds: number; bank_codes_json: string;
       }>();
     if (completed) {
+      await completeDailyBankQueue(userId, dateKey, safeStringArray(completed.bank_codes_json, 32));
       return json({
         questions: [], mode: "mixed", limit: 0, sessionId: completed.id, dailyCompleted: true,
         session: {
@@ -3616,9 +3855,11 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   const dailyReadiness = dailyRequest ? await loadDailyReadiness(userId, active, payload.planMinutes) : null;
   const practiceAllowedCodes = dailyReadiness?.effectiveBankCodes ?? effectiveSelected;
   const allowed = new Set(practiceAllowedCodes);
+  const todayFocusCodes = dailyRequest ? await loadTodayBankFocusCodes(userId, dateKey) : [];
   const primaryBankCode = allowed.has(String(payload.primaryBankCode ?? "")) ? String(payload.primaryBankCode) : "";
   const requestedOrder = dailyRequest
-    ? [...requested.filter((code) => allowed.has(code)), ...practiceAllowedCodes.filter((code) => !requested.includes(code))]
+    ? [...todayFocusCodes.filter((code) => allowed.has(code)), ...requested.filter((code) => allowed.has(code)),
+      ...practiceAllowedCodes.filter((code) => !todayFocusCodes.includes(code) && !requested.includes(code))]
     : (requested.length ? requested : selected).filter((code) => allowed.has(code));
   const bankCodes = Array.from(new Set(requestedOrder)).slice(0, 32);
   if (primaryBankCode && bankCodes.includes(primaryBankCode)) {
@@ -4609,11 +4850,14 @@ async function submitPracticeAnswer(userId: string, payload: Record<string, unkn
   const state = finalProgress?.state ?? initialState;
   const nextReviewAt = finalProgress?.next_review_at ?? initialNextReviewAt;
   if (session && confidence !== "pending") {
-    const completed = await db.prepare(`SELECT status, kind, mode, target_count, answered_count
+    const completed = await db.prepare(`SELECT status, kind, mode, target_count, answered_count, bank_codes_json
       FROM practice_sessions WHERE id = ? AND user_id = ?`).bind(session.id, userId)
-      .first<{ status: string; kind: string; mode: string; target_count: number; answered_count: number }>();
+      .first<{ status: string; kind: string; mode: string; target_count: number; answered_count: number; bank_codes_json: string }>();
     if (completed?.status === "completed" && completed.kind === "daily" && completed.mode === "mixed"
-      && completed.target_count >= 5 && completed.answered_count >= 5) await rewardInvite(userId);
+      && completed.target_count >= 5 && completed.answered_count >= 5) {
+      await completeDailyBankQueue(userId, dateKey, safeStringArray(completed.bank_codes_json, 32));
+      await rewardInvite(userId);
+    }
   }
   return json({
     ok: true,
@@ -11888,6 +12132,7 @@ export async function POST(request: Request) {
     const verifiedLearningActions = new Set([
       "saveEssayAttempt", "redeem", "bindInvite",
       "createTestOrder", "completeTestPayment", "recordDailyCheckin", "submitContentReport",
+      "addTodayItem", "updateTodayItem",
     ]);
     if (!identity.signedIn && verifiedLearningActions.has(action)) {
       const response = json({
@@ -11925,6 +12170,8 @@ export async function POST(request: Request) {
     else if (action === "recordQuizShare") response = await recordQuizShare(identity.userId, payload);
     else if (action === "getEssayReferenceLibrary") response = await getEssayReferenceLibrary(payload);
     else if (action === "getSupportInfo") response = await getSupportInfo();
+    else if (action === "addTodayItem") response = await addTodayItem(identity.userId, payload);
+    else if (action === "updateTodayItem") response = await updateTodayItem(identity.userId, payload);
     else response = json({ error: "未知操作" }, 400);
     appendCookies(response.headers, identity.setCookie);
     return response;

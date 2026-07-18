@@ -206,9 +206,37 @@
 .questionPrompt { margin: 13px 0 0; color: #2e4659; font-size: 15px; font-weight: 650; line-height: 1.8; white-space: pre-wrap; }
 .requirements { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin-top: 14px; padding: 12px 13px; border-left: 3px solid #77a7c4; border-radius: 0 10px 10px 0; background: #f4f8fa; color: #597080; font-size: 12px; line-height: 1.65; }
 .requirements strong { color: #306c91; white-space: nowrap; }
+.questionPlanAction { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 15px; padding: 12px 13px; border: 1px solid #d5e5ed; border-radius: 13px; background: #f4f9fc; }
+.questionPlanAction > div:first-child { display: grid; min-width: 0; gap: 3px; }
+.questionPlanAction strong { color: #254b65; font-size: 13px; }
+.questionPlanAction span { color: #718998; font-size: 11px; line-height: 1.45; }
+.questionPlanAction button { flex: 0 0 auto; min-height: 36px; padding: 0 13px; border: 0; border-radius: 10px; background: var(--blue); color: #fff; font-size: 12px; font-weight: 800; cursor: pointer; }
+.questionPlanAction button:disabled { background: #dfe9ee; color: #658091; cursor: default; }
+.questionPlanButtons { display: flex; gap: 6px; }
+.questionPlanAction .questionPlanRemove { border: 1px solid #cddde6; background: #fff; color: #587386; }
 .answerHeading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 21px; padding-top: 17px; border-top: 1px solid var(--soft-line); }
 .answerHeading strong { color: #1b3549; font-size: 15px; }
 .answerHeading span { color: #84949f; font-size: 11px; }
+.answerHeading > div { display: flex; align-items: center; gap: 8px; }
+.answerHeading button { min-height: 32px; padding: 0 10px; border: 1px solid #bfd6e4; border-radius: 9px; background: #f3f9fc; color: #276b94; font-size: 11px; font-weight: 800; cursor: pointer; }
+
+.comparisonPanel { margin-top: 11px; padding: 12px; border: 1px solid #cfe0e9; border-radius: 15px; background: #f7fafc; }
+.comparisonToolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.comparisonToolbar > strong { flex: 0 0 auto; color: #49677a; font-size: 11px; }
+.comparisonToolbar > div { display: flex; justify-content: flex-end; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.comparisonToolbar > div::-webkit-scrollbar { display: none; }
+.comparisonToolbar button { flex: 0 0 auto; min-height: 30px; padding: 0 9px; border: 1px solid #d1dfe7; border-radius: 999px; background: #fff; color: #667e8d; font-size: 10px; font-weight: 750; cursor: pointer; }
+.comparisonToolbar .comparisonSourceActive { border-color: #6ea5c6; background: #eaf5fb; color: #185f8d; }
+.comparisonScroll { margin-top: 10px; overflow-x: auto; scroll-snap-type: x proximity; }
+.comparisonGrid { display: grid; min-width: calc(var(--compare-columns) * min(72vw, 360px)); grid-template-columns: repeat(var(--compare-columns), minmax(270px, 1fr)); gap: 9px; }
+.comparisonGrid article { display: flex; min-height: 260px; flex-direction: column; scroll-snap-align: start; overflow: hidden; border: 1px solid #dbe5ea; border-top: 3px solid var(--source-accent); border-radius: 12px; background: #fff; }
+.comparisonGrid article header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px; border-bottom: 1px solid #e7eef2; }
+.comparisonGrid article header strong { color: #243f52; font-size: 13px; }
+.comparisonGrid article header span { color: #82939f; font-size: 10px; }
+.comparisonGrid article > div { flex: 1; padding: 12px; color: #354e60; font-size: 13px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comparisonGrid article > a { display: inline-flex; align-items: center; align-self: flex-end; gap: 4px; margin: 0 12px 12px; color: var(--source-accent); font-size: 10px; font-weight: 750; text-decoration: none; }
+.comparisonGrid article > a .icon { width: 13px; height: 13px; }
+.comparisonHint { margin: 12px 0 2px; color: #778b98; font-size: 11px; text-align: center; }
 
 .sourceList { display: grid; gap: 9px; margin-top: 11px; }
 .sourceCard { position: relative; overflow: hidden; border: 1px solid #dce5ea; border-radius: 14px; background: #fff; }
@@ -254,6 +282,11 @@
   .questionHeader { align-items: flex-start; }
   .questionPrompt { font-size: 14px; }
   .requirements { grid-template-columns: 1fr; gap: 3px; }
+  .questionPlanAction { align-items: flex-start; }
+  .questionPlanAction > button, .questionPlanButtons { margin-top: 1px; }
+  .questionPlanButtons { flex-direction: column; }
+  .comparisonToolbar { align-items: flex-start; flex-direction: column; }
+  .comparisonToolbar > div { width: 100%; justify-content: flex-start; }
   .sourceToggle { grid-template-columns: 34px minmax(0, 1fr) 18px; padding-right: 11px; padding-left: 12px; }
   .sourceMonogram { width: 34px; height: 34px; }
 }

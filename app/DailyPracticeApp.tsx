@@ -8,7 +8,7 @@ import type { PracticeDay, Question } from "./data/content";
 import type { AudioTrack } from "./data/audio";
 import AudioHub from "./AudioHub";
 import CommercePaywall, { type PaywallReason } from "./CommercePaywall";
-import EssayReferenceLibrary, { type EssayLibraryPaper, type EssayReferencePaper } from "./EssayReferenceLibrary";
+import EssayReferenceLibrary, { type EssayLibraryPaper, type EssayReferencePaper, type EssayReferenceQuestion } from "./EssayReferenceLibrary";
 import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 import { prioritizeTodayItems, resolveCampaignDisplay, resolveDailyPrimaryTask, type DailyPrimaryState } from "./daily-orchestration.mjs";
@@ -523,6 +523,32 @@ type EssayReferenceLibraryResponse = {
   settings?: { copyrightContactEmail?: string };
 };
 
+type DailyQueueItem = {
+  id: string;
+  dateKey: string;
+  itemType: "bank_practice" | "essay_reference";
+  sourceId: string;
+  sourceParentId: string;
+  title: string;
+  detail: string;
+  estimatedMinutes: number;
+  status: "scheduled" | "completed";
+  origin: "manual" | "system";
+  sortOrder: number;
+  completedAt: string | null;
+};
+
+type ReviewQueueItem = {
+  questionCode: string;
+  module: string;
+  knowledge: string;
+  bankName: string;
+  state: string;
+  reason: string;
+  nextReviewAt: string;
+  reviewStage: number;
+};
+
 type SupportInfo = {
   supportEmail: string;
   supportWechat: string;
@@ -601,6 +627,8 @@ type Bootstrap = {
     bankCode: string;
     bankName: string;
   }>;
+  dailyQueue: DailyQueueItem[];
+  reviewQueue: ReviewQueueItem[];
   dailyPracticeCompleted?: boolean;
   firstCompletedPractice?: { sessionId: string; kind: "diagnostic" | "daily" } | null;
   todayKey: string;
@@ -1239,6 +1267,19 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value));
 }
 
+function reviewDateLabel(value: string | null | undefined, todayKey = localChinaDateKey()) {
+  if (!value) return "待系统安排";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "待系统安排";
+  const dateKey = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
+  const days = Math.round((new Date(`${dateKey}T12:00:00+08:00`).getTime() - new Date(`${todayKey}T12:00:00+08:00`).getTime()) / 86_400_000);
+  const dateText = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric" }).format(parsed);
+  if (days === 0) return `今天到期 · ${dateText}`;
+  if (days < 0) return `已逾期${Math.abs(days)}天 · ${dateText}`;
+  if (days === 1) return `明天复习 · ${dateText}`;
+  return `${dateText}复习 · ${days}天后`;
+}
+
 function daysLeft(date: string | null) {
   if (!date) return null;
   const value = Math.ceil((new Date(`${date}T23:59:59`).getTime() - Date.now()) / 86_400_000);
@@ -1430,6 +1471,7 @@ export default function DailyPracticeApp() {
   const [essayLibraryTotal, setEssayLibraryTotal] = useState(0);
   const [essayLibraryLoadingMore, setEssayLibraryLoadingMore] = useState(false);
   const [essayLibraryInitialPaperId, setEssayLibraryInitialPaperId] = useState<string | undefined>(undefined);
+  const [essayLibraryInitialQuestionId, setEssayLibraryInitialQuestionId] = useState<string | undefined>(undefined);
   const [copyrightContactEmail, setCopyrightContactEmail] = useState("");
   const [copyrightContactLoading, setCopyrightContactLoading] = useState(false);
   const [supportInfo, setSupportInfo] = useState<SupportInfo | null>(null);
@@ -1489,7 +1531,7 @@ export default function DailyPracticeApp() {
   const autoRetriedPracticeKeyRef = useRef("");
   const pendingPracticeAttemptsRef = useRef<QueuedPracticeAttempt[]>([]);
   const radarRequestSequenceRef = useRef(0);
-  const essayLibraryReturnTabRef = useRef<"banks" | "resources">("resources");
+  const essayLibraryReturnTabRef = useRef<"today" | "banks" | "resources">("resources");
   const inviteBindingRef = useRef("");
   const bootstrapRetryAttemptRef = useRef(0);
   const bootstrapRetryTimerRef = useRef<number | null>(null);
@@ -1503,6 +1545,12 @@ export default function DailyPracticeApp() {
   const day = scheduledDay ?? practiceDays[contentDayIndex(dayKey, practiceDays.length)] ?? practiceDays[0] ?? (bootstrap ? emptyPublishedDay : loadingDay);
   const insights = bootstrap?.studyInsights ?? emptyInsights;
   const profile = bootstrap?.examProfile ?? profileDraft;
+  const dailyQueue = bootstrap?.dailyQueue ?? [];
+  const todayQueueItems = dailyQueue.filter((item) => item.dateKey === dayKey);
+  const todayBankFocusItems = todayQueueItems.filter((item) => item.itemType === "bank_practice" && item.status === "scheduled");
+  const todayEssayQueueItem = todayQueueItems.find((item) => item.itemType === "essay_reference") ?? null;
+  const todayEssayReferenceItem = todayEssayQueueItem?.status === "scheduled" ? todayEssayQueueItem : null;
+  const queuedBankCodes = todayBankFocusItems.map((item) => item.sourceId);
   const examNotices = bootstrap?.content.examNotices ?? [];
   const strategyConfig = bootstrap?.content.strategyConfig;
   const drillPresets = normalizeDrillPresets(bootstrap?.content.drillPresets);
@@ -1538,7 +1586,7 @@ export default function DailyPracticeApp() {
   const activeEssayBanks = addedBanks.filter((bank) => bank.subject === "申论" && bank.practiceAvailable !== false);
   const hasMorningContent = day.morning.paragraphs.length > 0 || Boolean(day.morning.lead.trim());
   const hasEssayContent = activeEssayBanks.some((bank) => (bank.availableEssayCount ?? bank.questionCount) > 0)
-    || Boolean(bootstrap?.dueEssayRewrites?.length);
+    || Boolean(bootstrap?.dueEssayRewrites?.length) || Boolean(todayEssayReferenceItem);
   const primaryTarget = profile.targets[0] ?? null;
   const campaignAudienceMatches = (campaign: CampaignSlot) => campaign.audience === "all"
     || (campaign.audience === "new_user" && !bootstrap?.firstCompletedPractice)
@@ -1578,12 +1626,12 @@ export default function DailyPracticeApp() {
   const enabledDailySteps: DailyStep[] = [
     ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? ["morning" as const] : []),
     ...(dailyPlan.questionCount > 0 && !dailyConfigurationBlocking ? ["practice" as const] : []),
-    ...(dailyPlan.essayMinutes > 0 && hasEssayContent ? ["essay" as const] : []),
+    ...((dailyPlan.essayMinutes > 0 && hasEssayContent) || todayEssayQueueItem ? ["essay" as const] : []),
   ];
   const stepDone = {
     morning: Boolean(progress.completed[`${dayKey}-morning`]),
     practice: practiceDone,
-    essay: Boolean(progress.completed[`${dayKey}-essay`]),
+    essay: Boolean(progress.completed[`${dayKey}-essay`]) || todayEssayQueueItem?.status === "completed",
   };
   const doneCount = enabledDailySteps.filter((step) => stepDone[step]).length;
   const dailyTasksDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && doneCount === enabledDailySteps.length;
@@ -1690,6 +1738,10 @@ export default function DailyPracticeApp() {
     window.setTimeout(() => setToast(""), 2600);
   }, []);
 
+  const trackEvent = useCallback((eventName: string, eventData: Record<string, unknown> = {}) => {
+    void fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "trackEvent", eventName, eventData }), keepalive: true }).catch(() => undefined);
+  }, []);
+
   const api = useCallback(async <T,>(payload: Record<string, unknown>, options: { signal?: AbortSignal } = {}) => {
     for (let requestNumber = 1; requestNumber <= BOOTSTRAP_MAX_REQUESTS; requestNumber += 1) {
       const response = await fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: options.signal });
@@ -1712,6 +1764,39 @@ export default function DailyPracticeApp() {
     throw new Error("账号初始化未完成，请稍后重试");
   }, []);
 
+  const addQueueItem = useCallback(async (itemType: DailyQueueItem["itemType"], sourceId: string) => {
+    const result = await api<{ item: DailyQueueItem | null; scheduledDate: string; scheduledToday?: boolean; duplicate?: boolean }>({
+      action: "addTodayItem",
+      itemType,
+      sourceId,
+    });
+    if (result.item) {
+      setBootstrap((current) => current ? {
+        ...current,
+        dailyQueue: [
+          ...(current.dailyQueue ?? []).filter((item) => item.id !== result.item?.id),
+          result.item,
+        ].sort((a, b) => a.dateKey.localeCompare(b.dateKey) || a.sortOrder - b.sortOrder),
+      } : current);
+    }
+    const when = result.scheduledDate === localChinaDateKey() ? "今日计划" : `${shortDate(result.scheduledDate)}计划`;
+    notify(result.duplicate ? `已在${when}中` : `已加入${when}`);
+    trackEvent("today_item_add", { itemType, sourceId, scheduledDate: result.scheduledDate, duplicate: Boolean(result.duplicate) });
+    return result;
+  }, [api, notify, trackEvent]);
+
+  const updateQueueItem = useCallback(async (id: string, status: "completed" | "removed") => {
+    await api({ action: "updateTodayItem", id, status });
+    setBootstrap((current) => current ? {
+      ...current,
+      dailyQueue: status === "removed"
+        ? (current.dailyQueue ?? []).filter((item) => item.id !== id)
+        : (current.dailyQueue ?? []).map((item) => item.id === id ? { ...item, status: "completed", completedAt: new Date().toISOString() } : item),
+    } : current);
+    trackEvent("today_item_update", { id, status });
+    notify(status === "completed" ? "已完成今日查阅" : "已从计划中移除");
+  }, [api, notify, trackEvent]);
+
   const upsertPendingPracticeAttempt = useCallback((attempt: QueuedPracticeAttempt) => {
     const next = [...pendingPracticeAttemptsRef.current.filter((item) => item.key !== attempt.key), attempt].slice(-MAX_PENDING_PRACTICE_ATTEMPTS);
     pendingPracticeAttemptsRef.current = next;
@@ -1725,10 +1810,6 @@ export default function DailyPracticeApp() {
     setPendingPracticeAttempts(next);
     setPendingQueueDurable(writePendingPracticeAttempts(next));
     if (autoRetriedPracticeKeyRef.current === attemptKey) autoRetriedPracticeKeyRef.current = "";
-  }, []);
-
-  const trackEvent = useCallback((eventName: string, eventData: Record<string, unknown> = {}) => {
-    void fetch("/api/app", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "trackEvent", eventName, eventData }), keepalive: true }).catch(() => undefined);
   }, []);
 
   const loadEssayReferenceLibrary = useCallback(async (force = false, requestedPage = 1) => {
@@ -1844,6 +1925,7 @@ export default function DailyPracticeApp() {
 
   const clearEssayPaperLink = useCallback(() => {
     setEssayLibraryInitialPaperId(undefined);
+    setEssayLibraryInitialQuestionId(undefined);
     const url = new URL(window.location.href);
     url.searchParams.delete("essayPaper");
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
@@ -1888,7 +1970,7 @@ export default function DailyPracticeApp() {
     trackEvent("module_open", { module: nextTab, entry: "bottom_nav" });
   }, [clearEssayPaperLink, tab, trackEvent]);
 
-  const openEssayReferenceLibrary = useCallback((returnTab: "banks" | "resources" = "resources") => {
+  const openEssayReferenceLibrary = useCallback((returnTab: "today" | "banks" | "resources" = "resources") => {
     essayLibraryReturnTabRef.current = returnTab;
     setActiveModule(null);
     setTab("essayLibrary");
@@ -1901,6 +1983,45 @@ export default function DailyPracticeApp() {
     setTab("copyright");
     void loadCopyrightSettings();
   }, [loadCopyrightSettings]);
+
+  const addBankToToday = useCallback(async (bank: QuestionBank) => {
+    if (busy) return;
+    setBusy(true);
+    try { await addQueueItem("bank_practice", bank.code); }
+    catch (error) { notify(error instanceof Error ? error.message : "加入计划失败"); }
+    finally { setBusy(false); }
+  }, [addQueueItem, busy, notify]);
+
+  const addEssayQuestionToToday = useCallback(async (_paper: EssayReferencePaper, question: EssayReferenceQuestion) => {
+    try { return await addQueueItem("essay_reference", String(question.id)); }
+    catch (error) { notify(error instanceof Error ? error.message : "加入计划失败"); }
+  }, [addQueueItem, notify]);
+
+  const openQueuedEssayItem = useCallback(async (item: DailyQueueItem) => {
+    if (!item.sourceParentId) return notify("该申论资料暂时无法打开");
+    essayLibraryReturnTabRef.current = "today";
+    setEssayLibraryLoading(true);
+    setEssayLibraryError("");
+    setEssayLibraryInitialPaperId(item.sourceParentId);
+    setEssayLibraryInitialQuestionId(item.sourceId);
+    setActiveModule(null);
+    setTab("essayLibrary");
+    try {
+      const data = await api<EssayReferenceLibraryResponse>({ action: "getEssayReferenceLibrary", paperId: item.sourceParentId });
+      const detail = data.papers?.[0];
+      if (!detail) throw new Error("该试卷暂时不可用");
+      setEssayLibraryPapers((current) => {
+        const merged = new Map(current.map((paper) => [String(paper.id), paper]));
+        merged.set(String(detail.id), { ...merged.get(String(detail.id)), ...detail });
+        return [...merged.values()];
+      });
+      setEssayLibraryLoaded(true);
+      trackEvent("essay_reference_library_open", { entry: "today_plan", questionId: item.sourceId });
+    } catch (error) {
+      setEssayLibraryError(error instanceof Error ? error.message : "资料加载失败");
+      notify(error instanceof Error ? error.message : "资料加载失败");
+    } finally { setEssayLibraryLoading(false); }
+  }, [api, notify, trackEvent]);
 
   const openSupportNotice = useCallback(() => {
     setActiveModule(null);
@@ -1999,7 +2120,7 @@ export default function DailyPracticeApp() {
       bootstrapRetryTimerRef.current = null;
       bootstrapRetryAttemptRef.current = 0;
       setBootstrapLoadState("ready");
-      setBootstrap(data);
+      setBootstrap({ ...data, dailyQueue: Array.isArray(data.dailyQueue) ? data.dailyQueue : [], reviewQueue: Array.isArray(data.reviewQueue) ? data.reviewQueue : [] });
       progressVersionRef.current = Number(data.progressVersion ?? 0);
       const mergedProgress = mergeProgress(data.progress);
       const nextProgress = data.dailyPracticeCompleted
@@ -2609,6 +2730,9 @@ export default function DailyPracticeApp() {
         questionBanks: result.banks,
         examProfile: result.profile,
         dailyReadiness: result.dailyReadiness ?? current.dailyReadiness,
+        dailyQueue: bank.added
+          ? (current.dailyQueue ?? []).filter((item) => !(item.itemType === "bank_practice" && item.sourceId === bank.code && item.status === "scheduled"))
+          : (current.dailyQueue ?? []),
       } : current);
       setProfileDraft(result.profile);
       trackEvent("bank_toggle", { bankCode: bank.code, added: !bank.added });
@@ -3675,6 +3799,7 @@ export default function DailyPracticeApp() {
           </div>}
           {feedback && <div className={`answer-result ${feedback.correct ? "is-correct" : "is-wrong"}`}>
             <div><strong>{feedback.correct ? "回答正确" : `正确答案 ${String.fromCharCode(65 + feedback.correctAnswer)}`}</strong><span>{feedback.needsReview ? `${feedback.overtime ? "超时" : "需巩固"} · ${feedback.reviewDays}天后复习` : feedback.state === "mastered" ? `已掌握 · ${feedback.reviewDays}天后巩固` : `学习中 · ${feedback.reviewDays}天后复习`}</span></div>
+            <small className="review-next-date">下次安排：{reviewDateLabel(feedback.nextReviewAt, dayKey)}</small>
             <p>{feedback.explanation}</p>
             {feedback.technique && <aside><b>解题提示</b>{feedback.technique}</aside>}
             <footer><span>题源：{truthLabel || normalizeTruthLabel(undefined, undefined, currentPractice.source) || "已核验真题"}{currentPractice.reviewedAt ? ` · 校验 ${currentPractice.reviewedAt.slice(0, 10)}` : ""}</span><button onClick={() => void updateQuestionMeta({ favorite: !currentPractice.favorite })}>{currentPractice.favorite ? "★ 已收藏" : "☆ 收藏"}</button></footer>
@@ -3877,8 +4002,8 @@ export default function DailyPracticeApp() {
   const primaryTaskDetail = primaryTodayCopy.detail;
   const dailyStepItems = [
     ...(dailyPlan.morningMinutes > 0 && hasMorningContent ? [{ key: "morning" as const, icon: "读", title: "晨读", minutes: dailyPlan.morningMinutes, detail: "记住3个规范表达", done: stepDone.morning, action: () => setActiveModule("morning") }] : []),
-    ...(!dailyConfigurationBlocking ? [{ key: "practice" as const, icon: "练", title: "行测日练", minutes: dailyPlan.practiceMinutes, detail: activeDailySession ? `进度已保存，还剩${dailyRemaining}题` : `${dailyPlan.questionCount}道 · 到期错题优先`, done: stepDone.practice, action: () => void startPractice("mixed", undefined, { kind: "daily" }) }] : []),
-    ...(dailyPlan.essayMinutes > 0 && hasEssayContent ? [{ key: "essay" as const, icon: "写", title: "申论真题", minutes: dailyPlan.essayMinutes, detail: activeEssayBanks.length ? "材料作答 · 采分点自评" : "今日表达练习", done: stepDone.essay, action: () => void startEssayPractice({ daily: true }) }] : []),
+    ...(!dailyConfigurationBlocking ? [{ key: "practice" as const, icon: "练", title: "行测日练", minutes: dailyPlan.practiceMinutes, detail: activeDailySession ? `进度已保存，还剩${dailyRemaining}题` : queuedBankCodes.length ? `${dailyPlan.questionCount}道 · 优先${todayBankFocusItems.map((item) => item.title).join("、")}` : `${dailyPlan.questionCount}道 · 到期错题优先`, done: stepDone.practice, action: () => void startPractice("mixed", queuedBankCodes.length ? queuedBankCodes : undefined, { kind: "daily" }) }] : []),
+    ...((dailyPlan.essayMinutes > 0 && hasEssayContent) || todayEssayQueueItem ? [{ key: "essay" as const, icon: todayEssayQueueItem ? "查" : "写", title: todayEssayQueueItem ? "申论答案查阅" : "申论真题", minutes: todayEssayQueueItem?.estimatedMinutes ?? dailyPlan.essayMinutes, detail: todayEssayQueueItem?.title ?? (activeEssayBanks.length ? "材料作答 · 采分点自评" : "今日表达练习"), done: stepDone.essay, action: () => todayEssayQueueItem ? void openQueuedEssayItem(todayEssayQueueItem) : void startEssayPractice({ daily: true }) }] : []),
   ];
   const todayAlertCandidates = [
     ...((bootstrap?.dueEssayRewrites ?? []).slice(0, 1).map((item) => ({
@@ -3957,6 +4082,7 @@ export default function DailyPracticeApp() {
               </div>
               <button className="today-primary-action" disabled={busy} onClick={runDailyAction}>{dailyActionLabel}<span>{primaryActionMeta}</span></button>
               <div className="today-secondary-row">{!dailyConfigurationBlocking && <button disabled={Boolean(dailySessionForPlan) || practiceDone} onClick={toggleBusyMode}>{dailyPlan.minutes === 10 ? `恢复${normalizePlanMinutes(profile.dailyMinutes)}分钟计划` : "切换为10分钟精简计划"}</button>}</div>
+              <details className="plan-basis-disclosure"><summary>计划如何生成 <span>查看依据⌄</span></summary><div><span>每日时间：{dailyPlan.minutes}分钟</span><span>到期复习：{insights.dueCount}道优先</span><span>考试目标：{targetSummary}</span>{todayQueueItems.some((item) => item.status === "scheduled") && <span>自主加入：{todayQueueItems.filter((item) => item.status === "scheduled").length}项</span>}<p>系统先安排到期复习，再按主攻题库、临近考试和自主加入内容生成任务；超出当日容量的内容自动顺延。</p></div></details>
             </section>
 
             {bootstrap?.content.access === "preview" && <section className="access-card compact-access"><div><span>当前为免费版</span><h3>每天5题，体验完整流程</h3></div><button onClick={() => setTab("me")}>激活权益</button></section>}
@@ -4059,10 +4185,14 @@ export default function DailyPracticeApp() {
               const isPrimary = bank.code === primaryBank?.code;
               const bankLocked = bank.added && (bank.locked === true || bank.practiceAvailable === false);
               const fit = bankFitMap.get(bank.code) ?? resolveBankFit(bank, profile, primaryTarget, primaryBank?.code);
+              const queuedBankItem = dailyQueue.find((item) => item.itemType === "bank_practice" && item.sourceId === bank.code && item.status === "scheduled");
               return <article className={`bank-card bank-${bank.coverColor}${isPrimary ? " is-primary" : ""}${bankLocked ? " is-locked" : ""}`} key={bank.code}>
                 <div className="bank-cover"><span>{bank.examType}</span><b>{bank.subject}</b><small>{bankTruthLabel(bank)}</small></div>
                 <div className="bank-copy"><div><span>{bankTruthLabel(bank)} · {bank.questionCount}题</span><h3>{bank.name}</h3>{isPrimary && <div className="primary-bank-badge">主攻题库</div>}<p>{bank.description}</p><div className={`scope-badge ${fit.tone}`}>{fit.badge}</div>{bankFilter === "适合我" && <small className="fit-reason">推荐依据：{[fit.reason, frequencyText(bank.frequency), starText(bank.importanceStars), scoreRateText(bank.scoreRate)].filter(Boolean).join(" · ")}</small>}</div>
                   <div className="bank-progress"><div><i style={{ width: `${percent}%` }} /></div><span>{percent}%</span></div>
+                  {bank.added && !bankLocked && bank.subject !== "申论" && bank.questionCount > 0 && <div className="bank-today-action-row">{queuedBankItem
+                    ? <><span>{queuedBankItem.dateKey === dayKey ? "已优先排入今日行测" : `已排入${shortDate(queuedBankItem.dateKey)}`}</span><button type="button" onClick={() => void updateQueueItem(queuedBankItem.id, "removed")}>移除计划</button></>
+                    : <><span>将本题库设为下一次日练的优先来源</span><button type="button" disabled={busy} onClick={() => void addBankToToday(bank)}>加入今日</button></>}</div>}
                   <footer><small>{bank.questionCount === 0 ? "内容准备中，不影响基础日练" : bankLocked ? "权益已到期，学习进度已保留" : bank.added ? `已掌握${bank.masteredCount} · 薄弱${bank.weakCount} · 到期${bank.dueCount} · 预计${estimatedDays}天完成一轮` : fit.show ? fit.reason : bank.mismatchReason}</small><div>{bank.added ? <><button disabled className="added-state">{bankLocked ? "🔒 已保留" : "✓ 已加入"}</button><button disabled={busy} className="cancel-bank" onClick={() => void toggleBank(bank)}>取消</button></> : <button disabled={busy} onClick={() => void toggleBank(bank)}>{bank.targetMatch ? "+ 添加" : "+ 添加并备考"}</button>}{bank.added && !bankLocked && bank.subject !== "申论" && !isPrimary && <button className="primary-bank-button" onClick={() => setPrimaryBank(bank.code)}>设为主攻</button>}{bank.added && bankLocked && bank.questionCount > 0 ? <button className="start-bank" onClick={() => bank.subject === "申论" ? openPaywall("essay", () => startEssayPractice({ bankCodes: [bank.code], daily: false }), { tab: "banks", bankCode: bank.code, resumeAction: "start_essay" }) : openPaywall("second_bank", () => startPractice("mixed", [bank.code], { kind: "bank" }), { tab: "banks", bankCode: bank.code, resumeAction: "start_practice", mode: "mixed", bankCodes: [bank.code], practiceOptions: { kind: "bank" } })}>开通后继续</button> : bank.added && bank.subject !== "申论" ? <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startPractice("mixed", [bank.code], { kind: "bank" })}>{bank.questionCount ? "本题库练习" : "待上架"}</button> : bank.added && <button className="start-bank" disabled={bank.questionCount === 0} onClick={() => void startEssayPractice({ bankCodes: [bank.code], daily: false })}>{bank.questionCount ? "真题微练" : "待上架"}</button>}</div></footer>
                 </div>
               </article>;
@@ -4108,10 +4238,24 @@ export default function DailyPracticeApp() {
                 : <EssayReferenceLibrary
                   papers={essayLibraryPapers}
                   initialPaperId={essayLibraryInitialPaperId}
+                  initialQuestionId={essayLibraryInitialQuestionId}
                   onClose={closeEssayReferenceLibrary}
                   onPaperOpen={loadEssayPaperDetail}
                   onPaperExit={clearEssayPaperLink}
                   onSharePaper={shareEssayReferencePaper}
+                  todayQuestionIds={todayQueueItems.filter((item) => item.itemType === "essay_reference" && item.status === "scheduled").map((item) => item.sourceId)}
+                  completedTodayQuestionIds={todayQueueItems.filter((item) => item.itemType === "essay_reference" && item.status === "completed").map((item) => item.sourceId)}
+                  onAddQuestionToToday={addEssayQuestionToToday}
+                  onCompleteTodayQuestion={async (_paper, question) => {
+                    const item = todayQueueItems.find((candidate) => candidate.itemType === "essay_reference" && candidate.sourceId === String(question.id) && candidate.status === "scheduled");
+                    if (!item) return notify("该题不在今日计划中");
+                    await updateQueueItem(item.id, "completed");
+                    await complete(`${dayKey}-essay`);
+                  }}
+                  onRemoveTodayQuestion={async (_paper, question) => {
+                    const item = todayQueueItems.find((candidate) => candidate.itemType === "essay_reference" && candidate.sourceId === String(question.id) && candidate.status === "scheduled");
+                    if (item) await updateQueueItem(item.id, "removed");
+                  }}
                   hasMore={essayLibraryPapers.length < essayLibraryTotal}
                   totalCount={essayLibraryTotal}
                   loadingMore={essayLibraryLoadingMore}
@@ -4119,7 +4263,13 @@ export default function DailyPracticeApp() {
                 />}
           </>}
 
-          {tab === "review" && <div className="page-content subpage"><div className="subpage-heading"><span>智能复习</span><h1>通过再次作答验证掌握情况</h1><p>答错、超时或掌握不稳定的题目，将按期安排复习。</p></div><section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy || insights.dueCount === 0} onClick={() => void startPractice("review", undefined, { kind: "review" })}>{insights.dueCount ? "开始复习" : "今日复习已完成"}</button></section><div className="review-rules"><article><span>1天</span><div><b>答错、超时或不稳定</b><p>次日复习</p></div></article><article><span>3天</span><div><b>首次稳定答对</b><p>3天后复习</p></div></article><article><span>7/14/30天</span><div><b>连续稳定掌握</b><p>逐步延长间隔</p></div></article></div>{(insights.dueCount === 0 || practiceEmpty) && <div className="empty-state compact review-empty"><span>✓</span><h3>今日没有到期复习题</h3><p>可继续今日新题。</p><button className="primary-button" onClick={() => setTab("today")}>返回今日</button></div>}</div>}
+          {tab === "review" && <div className="page-content subpage">
+            <div className="subpage-heading"><span>智能复习</span><h1>每道题都说明为什么复习</h1><p>答错、超时或掌握不稳定的题目会按期复习；记忆周期到期也会标明原因与日期。</p></div>
+            <section className="review-hero"><div><span>今日到期</span><h2>{insights.dueCount}<small> 道</small></h2><p>薄弱 {insights.stateCounts.weak} · 学习中 {insights.stateCounts.learning} · 已掌握 {insights.stateCounts.mastered}</p></div><button disabled={busy || insights.dueCount === 0} onClick={() => void startPractice("review", undefined, { kind: "review" })}>{insights.dueCount ? "开始复习" : "今日复习已完成"}</button></section>
+            {(bootstrap.reviewQueue ?? []).length > 0 && <section className="review-queue-list" aria-label="今日复习队列">{bootstrap.reviewQueue.slice(0, 8).map((item) => <article className="review-queue-card" key={item.questionCode}><span>{item.module.slice(0, 1)}</span><div><b>{item.knowledge}</b><small>{item.bankName} · 原因：{learnerWrongReason(item.reason)}</small></div><em>{reviewDateLabel(item.nextReviewAt, dayKey)}</em></article>)}</section>}
+            <div className="review-rules"><article><span>1天</span><div><b>答错、超时或不稳定</b><p>次日复习</p></div></article><article><span>3天</span><div><b>首次稳定答对</b><p>3天后复习</p></div></article><article><span>7/14/30天</span><div><b>连续稳定掌握</b><p>逐步延长间隔</p></div></article></div>
+            {(insights.dueCount === 0 || practiceEmpty) && <div className="empty-state compact review-empty"><span>✓</span><h3>今日没有到期复习题</h3><p>可继续今日新题。</p><button className="primary-button" onClick={() => setTab("today")}>返回今日</button></div>}
+          </div>}
 
           {tab === "calendar" && <div className="page-content subpage calendar-page">
             <div className="subpage-heading calendar-heading"><div><span>公考雷达 · 报考工作台</span><h1>管理公告、职位与报名节点</h1><p>查看公告、筛选职位、管理报名节点。</p></div><button className="primary-button" onClick={() => openEventForm()}>＋ 添加节点</button></div>

@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
-const RUNTIME_SCHEMA_VERSION = "20";
+const RUNTIME_SCHEMA_VERSION = "21";
 const MIN_COMPATIBLE_RUNTIME_SCHEMA_VERSION = Number(RUNTIME_SCHEMA_VERSION);
 
 function runtimeSchemaVersionIsCompatible(value: unknown) {
@@ -180,6 +180,34 @@ function essayLibrarySchemaStatements(db: D1Database) {
   ];
 }
 
+function dailyQueueSchemaStatements(db: D1Database) {
+  return [
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_queue_items (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_parent_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      estimated_minutes INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      origin TEXT NOT NULL DEFAULT 'manual',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS user_daily_queue_items_user_date_source_uq
+      ON user_daily_queue_items(user_id, date_key, item_type, source_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_date_status_idx
+      ON user_daily_queue_items(user_id, date_key, status, sort_order)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_source_idx
+      ON user_daily_queue_items(user_id, item_type, source_id, status)`),
+  ];
+}
+
 async function initializeSchema() {
   const db = getD1();
   await db.batch([
@@ -250,6 +278,29 @@ async function initializeSchema() {
       ON daily_step_completions(user_id, date_key, step)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS daily_step_completions_user_completed_idx
       ON daily_step_completions(user_id, completed_at)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_queue_items (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_parent_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      estimated_minutes INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      origin TEXT NOT NULL DEFAULT 'manual',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS user_daily_queue_items_user_date_source_uq
+      ON user_daily_queue_items(user_id, date_key, item_type, source_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_date_status_idx
+      ON user_daily_queue_items(user_id, date_key, status, sort_order)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_source_idx
+      ON user_daily_queue_items(user_id, item_type, source_id, status)`),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_states (
       user_id TEXT PRIMARY KEY,
       progress_json TEXT NOT NULL DEFAULT '{}',
@@ -1109,6 +1160,9 @@ async function deployedSchemaIsCurrent() {
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_imports') AS content_imports,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'content_import_chunks') AS content_chunks,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_step_completions') AS daily_steps,
+      EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_daily_queue_items') AS daily_queue,
+      (SELECT COUNT(*) FROM pragma_table_info('user_daily_queue_items')
+        WHERE name IN ('user_id','date_key','item_type','source_id','source_parent_id','title','detail','estimated_minutes','status','origin','sort_order','completed_at')) AS daily_queue_columns,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_tests') AS quiz_tests,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_questions') AS quiz_questions,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quiz_attempts') AS quiz_attempts,
@@ -1131,7 +1185,8 @@ async function deployedSchemaIsCurrent() {
       .first<{
         version: string; content_access: number; content_review_columns: number; media_access: number;
         analytics_eligible: number; device_account_links: number; content_imports: number; content_chunks: number;
-        daily_steps: number; quiz_tests: number; quiz_questions: number; quiz_attempts: number;
+        daily_steps: number; daily_queue: number; daily_queue_columns: number;
+        quiz_tests: number; quiz_questions: number; quiz_attempts: number;
         essay_materials: number; essay_question_materials: number; essay_sources: number; essay_answers: number;
         essay_bank_columns: number; essay_item_columns: number; essay_material_columns: number;
         essay_question_material_columns: number; essay_source_columns: number; essay_answer_columns: number;
@@ -1141,6 +1196,7 @@ async function deployedSchemaIsCurrent() {
       && Number(state.device_account_links) === 1
       && Number(state.content_imports) === 1 && Number(state.content_chunks) === 1
       && Number(state.daily_steps) === 1
+      && Number(state.daily_queue) === 1 && Number(state.daily_queue_columns) === 12
       && Number(state.quiz_tests) === 1 && Number(state.quiz_questions) === 1 && Number(state.quiz_attempts) === 1
       && Number(state.essay_materials) === 1 && Number(state.essay_question_materials) === 1
       && Number(state.essay_sources) === 1 && Number(state.essay_answers) === 1
@@ -1191,6 +1247,7 @@ async function upgradeRuntimeSchemaFrom17() {
       ON daily_step_completions(user_id, completed_at)`),
     ...quizSchemaStatements(db),
     ...essayLibrarySchemaStatements(db),
+    ...dailyQueueSchemaStatements(db),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -1219,6 +1276,7 @@ async function upgradeRuntimeSchemaFrom18() {
   await db.batch([
     ...quizSchemaStatements(db),
     ...essayLibrarySchemaStatements(db),
+    ...dailyQueueSchemaStatements(db),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -1246,6 +1304,45 @@ async function upgradeRuntimeSchemaFrom19() {
   ]);
   await db.batch([
     ...essayLibrarySchemaStatements(db),
+    ...dailyQueueSchemaStatements(db),
+    db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
+  ]);
+  return true;
+}
+
+async function upgradeRuntimeSchemaFrom20() {
+  const db = getD1();
+  const state = await db.prepare(`SELECT
+    COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_reference_answers') AS prior_schema_ready,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_daily_queue_items') AS queue_ready`)
+    .first<{ version: string; prior_schema_ready: number; queue_ready: number }>();
+  if (String(state?.version ?? "") !== "20" || Number(state?.prior_schema_ready ?? 0) !== 1) return false;
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_queue_items (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      item_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_parent_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      estimated_minutes INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'scheduled',
+      origin TEXT NOT NULL DEFAULT 'manual',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    )`),
+    db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS user_daily_queue_items_user_date_source_uq
+      ON user_daily_queue_items(user_id, date_key, item_type, source_id)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_date_status_idx
+      ON user_daily_queue_items(user_id, date_key, status, sort_order)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS user_daily_queue_items_user_source_idx
+      ON user_daily_queue_items(user_id, item_type, source_id, status)`),
     db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(RUNTIME_SCHEMA_VERSION),
   ]);
@@ -1263,7 +1360,8 @@ export async function ensureSchema() {
       // Sites deployments do not execute Drizzle SQL automatically. Keep each
       // production upgrade bounded and explicit so a cold request can advance
       // one known schema version without invoking the legacy full bootstrap.
-      if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18() || await upgradeRuntimeSchemaFrom19()) {
+      if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18()
+        || await upgradeRuntimeSchemaFrom19() || await upgradeRuntimeSchemaFrom20()) {
         schemaReady = true;
         return;
       }

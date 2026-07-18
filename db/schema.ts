@@ -97,6 +97,35 @@ export const dailyStepCompletions = sqliteTable(
   ],
 );
 
+export const userDailyQueueItems = sqliteTable(
+  "user_daily_queue_items",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    dateKey: text("date_key").notNull(),
+    itemType: text("item_type").notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceParentId: text("source_parent_id").notNull().default(""),
+    title: text("title").notNull(),
+    detail: text("detail").notNull().default(""),
+    estimatedMinutes: integer("estimated_minutes").notNull().default(5),
+    status: text("status").notNull().default("scheduled"),
+    origin: text("origin").notNull().default("manual"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("user_daily_queue_items_user_date_source_uq")
+      .on(table.userId, table.dateKey, table.itemType, table.sourceId),
+    index("user_daily_queue_items_user_date_status_idx")
+      .on(table.userId, table.dateKey, table.status, table.sortOrder),
+    index("user_daily_queue_items_user_source_idx")
+      .on(table.userId, table.itemType, table.sourceId, table.status),
+  ],
+);
+
 export const userStates = sqliteTable("user_states", {
   userId: text("user_id").primaryKey(),
   progressJson: text("progress_json").notNull().default("{}"),

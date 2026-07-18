@@ -30,14 +30,17 @@ if ! id gongkao >/dev/null 2>&1; then
 fi
 install -d -o gongkao -g gongkao "${APP_ROOT}" "${DATA_DIR}" "${DATA_DIR}/media" "${BACKUP_DIR}"
 
+if [[ -d "${APP_DIR}" && ! -d "${APP_DIR}/.git" ]]; then
+  rm -rf "${APP_DIR}"
+fi
 if [[ ! -d "${APP_DIR}/.git" ]]; then
-  runuser -u gongkao -- git clone --depth 1 --branch main "${REPOSITORY_URL}" "${APP_DIR}"
+  runuser -u gongkao -- git -c http.version=HTTP/1.1 clone --depth 1 --branch main "${REPOSITORY_URL}" "${APP_DIR}"
 else
-  runuser -u gongkao -- git -C "${APP_DIR}" pull --ff-only origin main
+  runuser -u gongkao -- git -c http.version=HTTP/1.1 -C "${APP_DIR}" pull --ff-only origin main
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  ADMIN_TOKEN="$(openssl rand -hex 20)"
+  ADMIN_TOKEN="${ADMIN_PASSWORD:-$(openssl rand -hex 20)}"
   INTERNAL_JOB_SECRET="$(openssl rand -hex 32)"
   cat >"${ENV_FILE}" <<EOF
 NODE_ENV=production
@@ -141,7 +144,7 @@ EOF
 cat >/usr/local/sbin/gongkaorilian-update <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
-runuser -u gongkao -- git -C "${APP_DIR}" pull --ff-only origin main
+runuser -u gongkao -- git -c http.version=HTTP/1.1 -C "${APP_DIR}" pull --ff-only origin main
 runuser -u gongkao -- bash -lc "cd '${APP_DIR}' && pnpm install --frozen-lockfile && pnpm run build:node"
 systemctl restart gongkaorilian
 curl --fail --silent --show-error --retry 10 --retry-delay 2 http://127.0.0.1:3000/ >/dev/null

@@ -71,7 +71,7 @@ Group=gongkao
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${ENV_FILE}
 ExecStartPre=/usr/bin/node scripts/migrate-node.mjs
-ExecStart=/usr/bin/node node_modules/vinext/dist/cli.js start
+ExecStart=/usr/bin/node node_modules/vinext/dist/cli.js start --hostname 127.0.0.1
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
@@ -157,6 +157,7 @@ nginx -t
 systemctl daemon-reload
 systemctl enable --now gongkaorilian
 systemctl enable --now nginx
+systemctl restart nginx
 systemctl enable --now gongkaorilian-backup.timer
 
 curl --fail --silent --show-error --retry 20 --retry-delay 2 http://127.0.0.1:3000/ >/dev/null

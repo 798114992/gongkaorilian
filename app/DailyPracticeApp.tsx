@@ -13,7 +13,7 @@ import QuizFeature from "./QuizFeature";
 import { BOOTSTRAP_MAX_REQUESTS, bootstrapRetryDecision } from "./bootstrap-retry.mjs";
 import { prioritizeTodayItems, resolveCampaignDisplay, resolveDailyPrimaryTask, type DailyPrimaryState } from "./daily-orchestration.mjs";
 
-type Tab = "today" | "banks" | "resources" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "copyright";
+type Tab = "today" | "banks" | "resources" | "essayLibrary" | "audio" | "review" | "report" | "calendar" | "me" | "about" | "support" | "copyright";
 type Module = "morning" | "practice" | "affairs" | "essay" | null;
 type PracticeMode = "mixed" | "review";
 type PlanMinutes = 10 | 30 | 45 | 60;
@@ -521,6 +521,20 @@ type EssayReferenceLibraryResponse = {
   contactEmail?: string;
   copyrightContactEmail?: string;
   settings?: { copyrightContactEmail?: string };
+};
+
+type SupportInfo = {
+  supportEmail: string;
+  supportWechat: string;
+  serviceHours: string;
+  officialAccountName: string;
+  purchaseUrl: string;
+  purchaseInstructions: string;
+  wrongAccountPolicy: string;
+  unusedCodePolicy: string;
+  accountMergePolicy: string;
+  codeTransferPolicy: string;
+  miniProgramStatus: "preparing";
 };
 
 type PracticeSummary = {
@@ -1406,6 +1420,7 @@ export default function DailyPracticeApp() {
   const [bonusDrillOffset, setBonusDrillOffset] = useState(0);
   const [todayGainExpanded, setTodayGainExpanded] = useState(false);
   const [campaignVisibility, setCampaignVisibility] = useState<Record<string, boolean>>({});
+  const [campaignNow] = useState(() => Date.now());
   const [bankFilter, setBankFilter] = useState("适合我");
   const [essayLibraryPapers, setEssayLibraryPapers] = useState<EssayLibraryPaper[]>([]);
   const [essayLibraryLoading, setEssayLibraryLoading] = useState(false);
@@ -1417,6 +1432,8 @@ export default function DailyPracticeApp() {
   const [essayLibraryInitialPaperId, setEssayLibraryInitialPaperId] = useState<string | undefined>(undefined);
   const [copyrightContactEmail, setCopyrightContactEmail] = useState("");
   const [copyrightContactLoading, setCopyrightContactLoading] = useState(false);
+  const [supportInfo, setSupportInfo] = useState<SupportInfo | null>(null);
+  const [supportInfoLoading, setSupportInfoLoading] = useState(false);
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("mixed");
@@ -1531,13 +1548,13 @@ export default function DailyPracticeApp() {
     || (campaign.audience === "first_practice_done" && Boolean(bootstrap?.firstCompletedPractice));
   const todayCampaign = campaignSlots.find((campaign) => campaign.slot === "today_after_alerts"
     && campaignAudienceMatches(campaign)
-    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > campaignNow)) ?? null;
   const resourcesCampaign = campaignSlots.find((campaign) => campaign.slot === "resources_after_primary"
     && campaignAudienceMatches(campaign)
-    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > campaignNow)) ?? null;
   const meCampaign = campaignSlots.find((campaign) => campaign.slot === "me_benefits"
     && campaignAudienceMatches(campaign)
-    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > Date.now())) ?? null;
+    && (!campaign.endAt || Number.isNaN(Date.parse(campaign.endAt)) || Date.parse(campaign.endAt) > campaignNow)) ?? null;
   const validLearningBanks = activeLearningBanks.filter((bank) => profile.targets.some((target) => bankCanPowerDailyPractice(target, bank)));
   const savedPrimaryBank = validLearningBanks.find((bank) => bank.code === progress.primaryBankCode);
   const primaryBank = savedPrimaryBank
@@ -1571,7 +1588,6 @@ export default function DailyPracticeApp() {
   const doneCount = enabledDailySteps.filter((step) => stepDone[step]).length;
   const dailyTasksDone = !dailyConfigurationBlocking && enabledDailySteps.length > 0 && doneCount === enabledDailySteps.length;
   const dailyCheckinDone = progress.checkins.includes(dayKey);
-  const dailyCheckinPending = dailyTasksDone && !dailyCheckinDone;
   const allDailyDone = dailyTasksDone && dailyCheckinDone;
   const nextDailyStep = enabledDailySteps.find((step) => !stepDone[step]) ?? null;
   const essayQuestion = essayPracticeQuestions[essayPracticeIndex] ?? null;
@@ -1782,6 +1798,17 @@ export default function DailyPracticeApp() {
     }
   }, [api]);
 
+  const loadSupportInfo = useCallback(async () => {
+    setSupportInfoLoading(true);
+    try {
+      setSupportInfo(await api<SupportInfo>({ action: "getSupportInfo" }));
+    } catch {
+      setSupportInfo(null);
+    } finally {
+      setSupportInfoLoading(false);
+    }
+  }, [api]);
+
   useEffect(() => {
     const visibleSlots: Array<[CampaignSlot["slot"], CampaignSlot | null]> = [
       ["today_after_alerts", tab === "today" ? todayCampaign : null],
@@ -1874,6 +1901,12 @@ export default function DailyPracticeApp() {
     setTab("copyright");
     void loadCopyrightSettings();
   }, [loadCopyrightSettings]);
+
+  const openSupportNotice = useCallback(() => {
+    setActiveModule(null);
+    setTab("support");
+    void loadSupportInfo();
+  }, [loadSupportInfo]);
 
   const loadEssayReferenceDeepLink = useCallback(async (paperCode: string, signal?: AbortSignal) => {
     essayLibraryReturnTabRef.current = "resources";
@@ -2103,12 +2136,6 @@ export default function DailyPracticeApp() {
       window.location.assign(url.toString());
     }
   }, [openEssayReferenceLibrary, openPaywall, tab, trackEvent]);
-
-  const activateCampaign = useCallback((campaign: CampaignSlot) => {
-    recordCampaignClick(campaign);
-    if (campaign.actionType !== "quiz") markCampaignComplete(campaign);
-    runConfiguredAction(campaign.actionType, campaign.actionTarget, `campaign:${campaign.id}`);
-  }, [markCampaignComplete, recordCampaignClick, runConfiguredAction]);
 
   const closePaywall = useCallback(() => {
     resumeAfterPaywallRef.current = null;
@@ -4234,7 +4261,7 @@ export default function DailyPracticeApp() {
             </article> : <article className="report-card three-day-report progress">
               <div className="three-day-report-heading"><div><span>3天体验报告</span><h2>再完成 {Math.max(0, 3 - threeDayReportProgress)} 个有效学习日</h2></div><em>{threeDayReportProgress}/3 天</em></div>
               <div className="three-day-progress-dots" aria-label={`三天体验进度：已完成${threeDayReportProgress}天`}>{[1, 2, 3].map((dayNumber) => <i key={dayNumber} className={dayNumber <= threeDayReportProgress ? "done" : ""}>{dayNumber <= threeDayReportProgress ? "✓" : dayNumber}</i>)}</div>
-              <p>累计3个有效学习日后生成报告，不提供排名或提分预测。</p>
+              <p>累计3个学习日后生成完整报告，不提供排名或提分预测。</p>
               <button type="button" className="secondary-button" onClick={() => setTab("today")}>继续今日练习</button>
             </article>}
             {insights.total === 0 ? <div className="empty-state report-empty"><span>报</span><h3>完成第一组日练后生成诊断</h3><p>系统分析正确率、用时和薄弱模块；样本不足时不下结论。</p><button className="primary-button" onClick={runDailyAction}>开始今日日练</button></div> : <>
@@ -4265,15 +4292,47 @@ export default function DailyPracticeApp() {
             <article className="panel-card redeem-panel" id="redeem-membership"><div className="panel-title"><h3>兑换码激活</h3><span>支持 7 / 30 / 365 天 / 终身</span></div><div className="redeem-row"><input aria-label="兑换码" value={redeemCode} onChange={(event) => setRedeemCode(event.target.value.toUpperCase())} placeholder="请输入兑换码" /><button onClick={() => void redeem()} disabled={busy}>{busy ? "处理中" : "立即激活"}</button></div><small>激活后返回今日；时长自动累计，终身权益不被覆盖。</small></article>
             <article className="panel-card invite-panel"><div className="panel-title"><h3>邀请好友共同备考</h3><span>邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天 · 受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天</span></div><p>好友完成账号验证和首次有效日练后，双方自动获得时长。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></article>
             <article className="panel-card ledger-card"><div className="panel-title"><h3>会员时长记录</h3><span>自动累计</span></div>{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">暂无时长变动记录</p>}</article>
-            <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看产品、内容来源和版权说明。</p></div><strong>›</strong></button>
+            <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看账号售后、内容来源和版权说明。</p></div><strong>›</strong></button>
           </div>}
 
           {tab === "about" && <div className="page-content subpage about-page">
             <div className="subpage-back-heading"><button type="button" onClick={() => setTab("me")}>‹ 返回</button><span>关于公考日练</span></div>
             <section className="about-intro-card"><div className="brand-mark">公</div><div><h1>公考日练</h1><p>面向公务员考试备考人群的精简日练与资料查询工具。</p></div></section>
             <section className="about-menu" aria-label="关于公考日练">
+              <button type="button" onClick={openSupportNotice}><div><b>账号、权益与售后</b><small>账号同步、兑换异常、权益找回与服务联系方式</small></div><strong>›</strong></button>
               <button type="button" onClick={openCopyrightNotice}><div><b>版权与内容来源说明</b><small>内容来源、第三方名称使用及权利投诉方式</small></div><strong>›</strong></button>
             </section>
+          </div>}
+
+          {tab === "support" && <div className="page-content subpage legal-page support-page">
+            <div className="subpage-back-heading"><button type="button" onClick={() => setTab("about")}>‹ 返回</button><span>账号、权益与售后</span></div>
+            <article className="legal-copy">
+              <h1>账号、权益与售后</h1>
+              <div className="support-status-grid">
+                <div><span>当前账号</span><b>{bootstrap?.user.displayName ?? "公考日练用户"}</b><small>账号尾号 {bootstrap?.user.id ? bootstrap.user.id.slice(-6) : "未生成"}</small></div>
+                <div><span>同步状态</span><b>{bootstrap?.user.signedIn ? "已登录并同步" : "仅当前设备"}</b><small>{bootstrap?.user.signedIn ? "目标、题库、记录和权益以服务端账号为准" : "登录后会合并当前学习进度"}</small></div>
+                <div><span>会员权益</span><b>{bootstrap?.user.membershipActive ? bootstrap.user.membershipType === "lifetime" ? "终身有效" : `有效至 ${formatDate(bootstrap.user.membershipEnd)}` : "当前未激活"}</b><small>兑换时长自动累计，终身权益不会被覆盖</small></div>
+              </div>
+              <h2>遇到兑换或权益问题</h2>
+              <p>请准备当前账号尾号、兑换码后4位、购买时间和问题截图。请勿发送完整兑换码、登录凭证或任何账号密码。</p>
+              <ul>
+                <li><b>兑换到错误账号：</b>{supportInfo?.wrongAccountPolicy || "需核验购买凭证和两个账号后人工处理。"}</li>
+                <li><b>未使用兑换码：</b>{supportInfo?.unusedCodePolicy || "按购买渠道公示规则人工核验。"}</li>
+                <li><b>账号合并：</b>{supportInfo?.accountMergePolicy || "核验账号归属后处理，权益变更会留痕。"}</li>
+                <li><b>兑换码转让：</b>{supportInfo?.codeTransferPolicy || "激活后不得转让，未激活码请妥善保管。"}</li>
+              </ul>
+              <div className="legal-contact">
+                <span>售后联系</span>
+                <b>{supportInfoLoading ? "正在读取配置" : supportInfo?.supportWechat ? `微信：${supportInfo.supportWechat}` : supportInfo?.supportEmail ? <a href={`mailto:${supportInfo.supportEmail}`}>{supportInfo.supportEmail}</a> : "请通过购买公众号联系"}</b>
+                <small>{supportInfo?.officialAccountName ? `公众号：${supportInfo.officialAccountName} · ` : ""}{supportInfo?.serviceHours || "工作日 9:00—18:00"}</small>
+              </div>
+              <div className="support-purchase-note">
+                <b>购买与激活</b>
+                <p>{supportInfo?.purchaseInstructions || "在官方公众号完成购买并领取兑换码，再返回“我的”页面激活。"}</p>
+                {supportInfo?.purchaseUrl && <a href={supportInfo.purchaseUrl} target="_blank" rel="noreferrer">查看购买说明</a>}
+              </div>
+              <p className="support-mini-note">微信小程序正在准备中。上线后将采用账号绑定方式承接既有学习记录和权益；在完成真机验收前，本产品不会宣称已支持微信登录或订阅消息。</p>
+            </article>
           </div>}
 
           {tab === "copyright" && <div className="page-content subpage legal-page">
@@ -4326,7 +4385,7 @@ export default function DailyPracticeApp() {
           }}
         />}
 
-        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => navigateFromBottom("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => navigateFromBottom("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => navigateFromBottom("review")}><span>复</span>复习</button><button className={tab === "resources" || tab === "essayLibrary" || tab === "audio" ? "active" : ""} onClick={() => navigateFromBottom("resources")}><span>资</span>资料</button><button className={tab === "me" || tab === "report" || tab === "calendar" || tab === "about" || tab === "copyright" ? "active" : ""} onClick={() => navigateFromBottom("me")}><span>我</span>我的</button></nav>}
+        {!activeModule && <nav className="bottom-nav" aria-label="主导航"><button className={tab === "today" ? "active" : ""} onClick={() => navigateFromBottom("today")}><span>今</span>今日</button><button className={tab === "banks" ? "active" : ""} onClick={() => navigateFromBottom("banks")}><span>库</span>题库</button><button className={tab === "review" ? "active" : ""} onClick={() => navigateFromBottom("review")}><span>复</span>复习</button><button className={tab === "resources" || tab === "essayLibrary" || tab === "audio" ? "active" : ""} onClick={() => navigateFromBottom("resources")}><span>资</span>资料</button><button className={tab === "me" || tab === "report" || tab === "calendar" || tab === "about" || tab === "support" || tab === "copyright" ? "active" : ""} onClick={() => navigateFromBottom("me")}><span>我</span>我的</button></nav>}
 
         {eventFormOpen && bootstrap && (
           <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-labelledby="event-form-title" aria-describedby="event-form-description">

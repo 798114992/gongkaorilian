@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://gongkao-rilian-2026.bobanbeerbohm2055.chatgpt.site"),
+  metadataBase: new URL("https://gongkao-rilian-2026.sanzhu7758.chatgpt.site"),
   applicationName: "公考日练",
   title: "公考日练｜每日30分钟，聚焦重点训练",
   description: "依据报考地区、真题年份、考频、重要星级与拿分率，生成每日10–60分钟训练安排。",

@@ -2478,6 +2478,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .about-intro-card p { margin: 0; color: #6a7e8c; font-size: 13px; line-height: 1.65; }
 .about-menu { margin-top: 16px; overflow: hidden; border: 1px solid #dce5eb; border-radius: 18px; background: #fff; }
 .about-menu button { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 18px 20px; border: 0; background: #fff; text-align: left; cursor: pointer; }
+.about-menu button + button { border-top: 1px solid #edf1f4; }
 .about-menu button:hover { background: #f8fbfd; }
 .about-menu b { display: block; color: #1b3143; font-size: 15px; }
 .about-menu small { display: block; margin-top: 5px; color: #7b8d99; font-size: 12px; line-height: 1.5; }
@@ -2490,6 +2491,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   color: #2d4353;
 }
 .legal-copy h1 { margin: 0 0 22px; color: #142b3d; font-size: 23px; line-height: 1.4; }
+.legal-copy h2 { margin: 25px 0 12px; color: #173247; font-size: 17px; line-height: 1.5; }
 .legal-copy p { margin: 0 0 16px; font-size: 14px; line-height: 1.9; }
 .legal-copy ul { margin: -2px 0 18px; padding-left: 22px; }
 .legal-copy li { margin: 7px 0; font-size: 14px; line-height: 1.75; }
@@ -2498,6 +2500,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .legal-contact b { overflow-wrap: anywhere; color: #184f75; font-size: 15px; }
 .legal-contact b a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .legal-contact small { color: #728692; font-size: 12px; }
+.support-status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.support-status-grid > div { display: grid; gap: 4px; min-width: 0; padding: 14px; border: 1px solid #dce8ee; border-radius: 14px; background: #f7fafc; }
+.support-status-grid span { color: #6c8190; font-size: 11px; font-weight: 750; }
+.support-status-grid b { overflow-wrap: anywhere; color: #173a54; font-size: 14px; }
+.support-status-grid small { color: #738794; font-size: 10px; line-height: 1.55; }
+.support-purchase-note { margin-top: 14px; padding: 16px 18px; border: 1px solid #d9e5ec; border-radius: 16px; background: #fbfcfd; }
+.support-purchase-note b { color: #173a54; font-size: 14px; }
+.support-purchase-note p { margin: 6px 0 0; font-size: 13px; line-height: 1.7; }
+.support-purchase-note a { display: inline-block; margin-top: 8px; color: #1e648f; font-size: 13px; font-weight: 800; }
+.support-mini-note { margin-top: 18px !important; padding: 13px 15px; border-radius: 14px; color: #596e7c; background: #f0f5f8; font-size: 12px !important; line-height: 1.7 !important; }
 
 @media (max-width: 560px) {
   .resource-primary-card { padding: 19px 17px; border-radius: 21px; }
@@ -2518,6 +2530,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .legal-copy { padding: 21px 18px; border-radius: 18px; }
   .legal-copy h1 { font-size: 21px; }
   .legal-copy p, .legal-copy li { font-size: 13px; }
+  .support-status-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

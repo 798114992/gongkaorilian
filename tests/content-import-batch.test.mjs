@@ -17,7 +17,7 @@ function section(source, start, end) {
 }
 
 function contentBatchSql(route) {
-  const processor = section(route, "async function processContentImportChunk", "async function adminFinishContentImport");
+  const processor = section(route, "async function processContentImportChunk", "async function adminFinishContentImport").replaceAll("\r\n", "\n");
   const batch = section(processor, "await db.batch([", "]);\n      const persisted");
   const statements = [...batch.matchAll(/db\.prepare\(`([\s\S]*?)`\)\s*\.bind/g)].map((match) => match[1]);
   assert.equal(statements.length, 5, "content row persistence must stay one five-statement atomic batch");
@@ -26,7 +26,7 @@ function contentBatchSql(route) {
 }
 
 function contentCatchSql(route) {
-  const processor = section(route, "async function processContentImportChunk", "async function adminFinishContentImport");
+  const processor = section(route, "async function processContentImportChunk", "async function adminFinishContentImport").replaceAll("\r\n", "\n");
   const catchBlock = section(processor, "} catch (error) {", "\n  }\n}");
   const statements = [...catchBlock.matchAll(/db\.prepare\(`([\s\S]*?)`\)\s*\.bind/g)].map((match) => match[1]);
   assert.equal(statements.length, 6, "content import catch must atomically arbitrate cancellation and failure");

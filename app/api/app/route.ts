@@ -64,11 +64,11 @@ const PUBLIC_ACTIONS = new Set([
   "submitContentReport", "getPracticeSessionSummary", "recordDailyStep", "recordDailyCheckin", "authorizeAudioPlayback", "bindInvite", "redeem",
   "getCommerceProducts", "createTestOrder", "completeTestPayment", "trackEvent",
   "getQuiz", "startQuizAttempt", "submitQuizAnswer", "completeQuizAttempt", "recordQuizShare",
-  "getEssayReferenceLibrary",
+  "getEssayReferenceLibrary", "getSupportInfo",
 ]);
 const PASSIVE_PUBLIC_ACTIONS = new Set([
   "searchJobPositions", "getEssayPracticeBatch", "getPracticeSessionSummary", "getCommerceProducts",
-  "getEssayReferenceLibrary",
+  "getEssayReferenceLibrary", "getSupportInfo",
 ]);
 const TRIAL_DAYS = 3;
 const TRIAL_SOURCE = "welcome-trial-v1";
@@ -1543,6 +1543,100 @@ async function loadInviteConfig() {
     inviteeRewardDays: numberOr("invitee_reward_days", 3),
     monthlyCap: numberOr("invite_monthly_cap", 30),
   };
+}
+
+type LaunchOperationPolicy = {
+  supportEmail: string;
+  supportWechat: string;
+  serviceHours: string;
+  officialAccountName: string;
+  purchaseUrl: string;
+  purchaseInstructions: string;
+  wrongAccountPolicy: string;
+  unusedCodePolicy: string;
+  accountMergePolicy: string;
+  codeTransferPolicy: string;
+};
+
+type MiniProgramLaunchConfig = {
+  appId: string;
+  serviceDomain: string;
+  privacyVerified: boolean;
+  identityMappingVerified: boolean;
+  nativeShareVerified: boolean;
+  subscribeMessageVerified: boolean;
+  uploadPipelineVerified: boolean;
+  paymentMode: "official_account_redemption";
+  lastVerifiedAt: string;
+};
+
+const DEFAULT_LAUNCH_OPERATION_POLICY: LaunchOperationPolicy = {
+  supportEmail: "",
+  supportWechat: "",
+  serviceHours: "工作日 9:00—18:00",
+  officialAccountName: "",
+  purchaseUrl: "",
+  purchaseInstructions: "在官方公众号完成购买并领取兑换码，返回公考日练激活权益。",
+  wrongAccountPolicy: "提交购买时间、兑换码后4位和当前账号尾号，由人工核验后处理。",
+  unusedCodePolicy: "未使用兑换码的退款或换码，以购买渠道公示规则和人工核验结果为准。",
+  accountMergePolicy: "账号合并须核验原账号、现账号与购买凭证，权益变更全程留痕。",
+  codeTransferPolicy: "兑换码一经激活不得转让；未激活兑换码不得公开传播。",
+};
+
+const DEFAULT_MINI_PROGRAM_LAUNCH_CONFIG: MiniProgramLaunchConfig = {
+  appId: "",
+  serviceDomain: "",
+  privacyVerified: false,
+  identityMappingVerified: false,
+  nativeShareVerified: false,
+  subscribeMessageVerified: false,
+  uploadPipelineVerified: false,
+  paymentMode: "official_account_redemption",
+  lastVerifiedAt: "",
+};
+
+function parseConfigObject<T extends Record<string, unknown>>(value: unknown, fallback: T): T {
+  try {
+    const parsed = JSON.parse(String(value ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...fallback, ...parsed } as T
+      : { ...fallback };
+  } catch {
+    return { ...fallback };
+  }
+}
+
+async function loadLaunchConfiguration() {
+  const rows = await getD1().prepare(`SELECT key, value FROM configs
+    WHERE key IN ('launch_operation_policy_v1','mini_program_launch_v1','launch_last_audit_v1')`)
+    .all<{ key: string; value: string }>();
+  const values = new Map(rows.results.map((row) => [row.key, row.value]));
+  return {
+    policy: parseConfigObject(values.get("launch_operation_policy_v1"), DEFAULT_LAUNCH_OPERATION_POLICY),
+    miniProgram: parseConfigObject(values.get("mini_program_launch_v1"), DEFAULT_MINI_PROGRAM_LAUNCH_CONFIG),
+    lastAudit: parseConfigObject(values.get("launch_last_audit_v1"), {} as Record<string, unknown>),
+  };
+}
+
+function validPublicEmail(value: string) {
+  return !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+async function getSupportInfo() {
+  const { policy } = await loadLaunchConfiguration();
+  return json({
+    supportEmail: validPublicEmail(policy.supportEmail) ? policy.supportEmail : "",
+    supportWechat: policy.supportWechat,
+    serviceHours: policy.serviceHours,
+    officialAccountName: policy.officialAccountName,
+    purchaseUrl: validHttpsUrl(policy.purchaseUrl) ? policy.purchaseUrl : "",
+    purchaseInstructions: policy.purchaseInstructions,
+    wrongAccountPolicy: policy.wrongAccountPolicy,
+    unusedCodePolicy: policy.unusedCodePolicy,
+    accountMergePolicy: policy.accountMergePolicy,
+    codeTransferPolicy: policy.codeTransferPolicy,
+    miniProgramStatus: "preparing",
+  });
 }
 
 function mergeStrategyConfig(base: Record<string, unknown>, incoming: Record<string, unknown>) {
@@ -10513,6 +10607,208 @@ function parseContentRows(rows: Array<Record<string, unknown>>) {
   });
 }
 
+type LaunchCheck = {
+  id: string;
+  category: "framework" | "business" | "operations" | "mini_program";
+  target: "h5" | "mini_program" | "both";
+  label: string;
+  state: "pass" | "warning" | "fail";
+  blocking: boolean;
+  detail: string;
+  href?: string;
+};
+
+function launchCheck(check: LaunchCheck) {
+  return check;
+}
+
+function scoreLaunchChecks(checks: LaunchCheck[], category: LaunchCheck["category"]) {
+  const selected = checks.filter((check) => check.category === category);
+  if (!selected.length) return 100;
+  const points = selected.reduce((sum, check) => sum + (check.state === "pass" ? 1 : check.state === "warning" ? .6 : 0), 0);
+  return Math.round(points / selected.length * 100);
+}
+
+function launchScenarioMatrix(checks: LaunchCheck[]) {
+  const checkState = (id: string) => checks.find((check) => check.id === id)?.state ?? "warning";
+  const covered = (id: string) => checkState(id) === "pass";
+  return [
+    { id: "new-device", user: "首次访问、未登录", expected: "可浏览并建立临时设备身份；进入需留存数据的操作前提示登录。", status: covered("schema") ? "covered" : "blocked", evidence: "设备身份与服务端会话" },
+    { id: "signed-new", user: "已登录、未选考试目标", expected: "进入目标选择，保存后自动匹配可练题库。", status: covered("schema") ? "covered" : "blocked", evidence: "账号会话与目标配置" },
+    { id: "goal-no-bank", user: "已选目标、未加入题库", expected: "提示备考组合缺口；存在可练题库时允许一键加入并开始。", status: checkState("bank-coverage") === "fail" ? "blocked" : "covered", evidence: "题库覆盖检查" },
+    { id: "multi-target-partial", user: "国考＋多个省考，部分目标暂无题库", expected: "区分“可以开始”与“全部目标已覆盖”，不阻断已有题库训练。", status: checkState("bank-coverage") === "warning" ? "attention" : "covered", evidence: "多目标部分覆盖" },
+    { id: "free-first-five", user: "免费用户首次5题", expected: "5题可完成当日日练，并形成初始作答快照。", status: "covered", evidence: "统一免费任务量" },
+    { id: "free-quota-used", user: "免费额度已用完", expected: "保留当前进度，展示公众号购买或兑换激活路径。", status: covered("purchase-entry") ? "covered" : "attention", evidence: "权益门禁与返回上下文" },
+    { id: "duration-member", user: "7/30/365天会员", expected: "权益按服务端到期时间判断，新增时长自动顺延。", status: covered("product") ? "covered" : "blocked", evidence: "会员账本" },
+    { id: "lifetime-member", user: "29.8元终身会员", expected: "终身权益不被时长兑换码覆盖或缩短。", status: covered("product") ? "covered" : "blocked", evidence: "终身SKU与权益账本" },
+    { id: "valid-redemption", user: "新兑换码激活", expected: "服务端原子核销并发放权益；重复提交返回同一结果。", status: covered("redemption-config") ? "covered" : "blocked", evidence: "兑换码幂等与对账" },
+    { id: "invalid-redemption", user: "过期、停用或已使用兑换码", expected: "不发放权益，返回明确原因并提供售后入口。", status: covered("support-contact") ? "covered" : "attention", evidence: "兑换校验与售后承接" },
+    { id: "wrong-account", user: "兑换到错误账号", expected: "不自动转移；按凭证核验、人工合并和审计流程处理。", status: covered("support-contact") ? "covered" : "attention", evidence: "账号找回政策" },
+    { id: "due-review", user: "存在到期错题", expected: "首页、复习页和学习时间线使用同一到期数量。", status: "covered", evidence: "服务端复习状态" },
+    { id: "paid-without-grant", user: "订单已支付但权益未到账", expected: "对账门禁报警并阻止宣告上线，进入人工处理。", status: covered("order-reconciliation") ? "covered" : "blocked", evidence: "订单—权益对账" },
+    { id: "h5-to-wechat", user: "H5用户迁移到微信小程序", expected: "核验后绑定微信身份，不以设备ID覆盖原账号权益。", status: covered("wechat-identity") ? "covered" : "attention", evidence: "微信身份映射验收" },
+    { id: "wechat-reminder", user: "用户订阅考试提醒", expected: "取得授权后由服务端发送；未接通前只展示站内提醒。", status: covered("wechat-subscribe") ? "covered" : "attention", evidence: "订阅消息实测" },
+    { id: "wechat-share", user: "分享题库、试卷或趣味测试", expected: "原生分享路径不携带临时登录码，接收方可正常打开。", status: covered("wechat-share") ? "covered" : "attention", evidence: "原生分享冒烟测试" },
+  ];
+}
+
+async function loadLaunchReadiness() {
+  const db = getD1();
+  const [configuration, schemaVersion, product, invalidCodes, workableBanks, brokenBanks, orphanOrders,
+    orphanTransactions, failedImports, pendingReports, frameworkConfig, copyrightEmail, health] = await Promise.all([
+    loadLaunchConfiguration(),
+    db.prepare("SELECT value FROM configs WHERE key = 'runtime_schema_version'").first<{ value: string }>(),
+    db.prepare(`SELECT id, price_cents, grant_type, duration_days, public_promise, status FROM products
+      WHERE id = 'gkrl-lifetime-2980'`).first<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM redemption_codes WHERE status = 'active' AND (
+      grant_type NOT IN ('duration','lifetime')
+      OR (grant_type = 'duration' AND duration_days NOT IN (7,30,365))
+      OR (grant_type = 'lifetime' AND duration_days <> 0))`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM question_banks qb WHERE qb.status = 'published'
+      AND ${QUESTION_BANK_CAN_PUBLISH_SQL}`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM question_banks qb WHERE qb.status = 'published'
+      AND NOT ${QUESTION_BANK_CAN_PUBLISH_SQL}`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM orders
+      WHERE status = 'paid' AND COALESCE(entitlement_grant_id,'') = ''`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM payment_transactions pt
+      LEFT JOIN orders o ON o.id = pt.order_id WHERE o.id IS NULL`).first<{ count: number }>(),
+    db.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT id FROM question_imports WHERE status IN ('failed','completed_with_errors')
+      UNION ALL SELECT id FROM content_imports WHERE status IN ('failed','completed_with_errors'))`).first<{ count: number }>(),
+    db.prepare("SELECT COUNT(*) AS count FROM content_reports WHERE status = 'pending'").first<{ count: number }>(),
+    db.prepare(`SELECT content_type, COUNT(*) AS count FROM content_items
+      WHERE content_type IN ('resource_card','paywall_policy') AND status IN ('published','scheduled')
+      GROUP BY content_type`).all<{ content_type: string; count: number }>(),
+    db.prepare("SELECT value FROM configs WHERE key = 'copyright_contact_email'").first<{ value: string }>(),
+    db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN event_name = 'app_open' AND created_at >= datetime('now','-7 days') THEN user_id END) AS active_7d,
+      COUNT(DISTINCT CASE WHEN event_name = 'practice_batch' AND created_at >= datetime('now','-7 days') THEN user_id END) AS practice_7d,
+      COUNT(DISTINCT CASE WHEN event_name = 'redeem_success' AND created_at >= datetime('now','-30 days') THEN user_id END) AS redeemed_30d
+      FROM analytics_events WHERE user_id <> 'system'`).first<Record<string, unknown>>(),
+  ]);
+  const count = (value: { count: number } | null | undefined) => Number(value?.count ?? 0);
+  const schemaReady = Number.parseInt(String(schemaVersion?.value ?? ""), 10) >= 20;
+  const productReady = Boolean(product && product.status === "active" && Number(product.price_cents) === 2980
+    && product.grant_type === "lifetime" && product.duration_days === null);
+  const supportReady = Boolean(configuration.policy.supportEmail || configuration.policy.supportWechat);
+  const purchaseReady = Boolean(configuration.policy.officialAccountName && validHttpsUrl(configuration.policy.purchaseUrl)
+    && configuration.policy.purchaseUrl);
+  const copyrightReady = validPublicEmail(String(copyrightEmail?.value ?? "")) && Boolean(String(copyrightEmail?.value ?? ""));
+  const frameworkCounts = new Map(frameworkConfig.results.map((row) => [row.content_type, Number(row.count)]));
+  const mini = configuration.miniProgram;
+  const checks: LaunchCheck[] = [
+    launchCheck({ id: "schema", category: "framework", target: "both", label: "数据库与安全会话", state: schemaReady ? "pass" : "fail", blocking: true, detail: schemaReady ? `运行时结构版本 ${schemaVersion?.value}，账号和会话表可用。` : "数据库结构版本未达到当前代码要求。", href: "/admin/system" }),
+    launchCheck({ id: "product", category: "business", target: "both", label: "29.8元终身SKU", state: productReady ? "pass" : "fail", blocking: true, detail: productReady ? "现有终身商品保持29.8元，不修改已承诺权益。" : "终身商品价格、权益类型或状态不一致。", href: "/admin/growth" }),
+    launchCheck({ id: "redemption-config", category: "business", target: "both", label: "兑换码权益配置", state: count(invalidCodes) === 0 ? "pass" : "fail", blocking: true, detail: count(invalidCodes) === 0 ? "在用兑换码仅发放7/30/365天或终身权益。" : `${count(invalidCodes)}个在用兑换码的权益配置异常。`, href: "/admin/growth" }),
+    launchCheck({ id: "purchase-entry", category: "business", target: "both", label: "公众号购买入口", state: purchaseReady ? "pass" : "fail", blocking: true, detail: purchaseReady ? `已配置“${configuration.policy.officialAccountName}”购买入口和返回激活说明。` : "需配置公众号名称和HTTPS购买/说明页面，才能形成购买—兑换闭环。", href: "/admin/launch#business" }),
+    launchCheck({ id: "support-contact", category: "operations", target: "both", label: "账号与售后承接", state: supportReady ? "pass" : "fail", blocking: true, detail: supportReady ? "用户端可获取售后联系方式、服务时间和处理规则。" : "至少配置一个长期可用的售后邮箱或微信号。", href: "/admin/launch#business" }),
+    launchCheck({ id: "copyright-contact", category: "operations", target: "both", label: "版权联系通道", state: copyrightReady ? "pass" : "fail", blocking: true, detail: copyrightReady ? "版权联系邮箱格式有效。" : "版权说明页尚未配置有效联系邮箱。", href: "/admin/essay-library" }),
+    launchCheck({ id: "order-reconciliation", category: "business", target: "both", label: "订单与权益对账", state: count(orphanOrders) + count(orphanTransactions) === 0 ? "pass" : "fail", blocking: true, detail: count(orphanOrders) + count(orphanTransactions) === 0 ? "未发现已支付未发权益或无主交易。" : `发现${count(orphanOrders)}笔已支付未发权益、${count(orphanTransactions)}笔无主交易。`, href: "/admin/growth" }),
+    launchCheck({ id: "bank-coverage", category: "framework", target: "both", label: "可练题库覆盖", state: count(brokenBanks) > 0 ? "fail" : count(workableBanks) > 0 ? "pass" : "warning", blocking: count(brokenBanks) > 0, detail: count(brokenBanks) > 0 ? `${count(brokenBanks)}个已发布题库不可练，需先修复或下架。` : count(workableBanks) > 0 ? `${count(workableBanks)}个已发布题库满足开始训练条件。` : "框架可验收；正式开放学习前需至少发布一个可练题库。", href: "/admin/question-banks" }),
+    launchCheck({ id: "framework-entry", category: "framework", target: "both", label: "资料与权益入口配置", state: Number(frameworkCounts.get("resource_card") ?? 0) > 0 && Number(frameworkCounts.get("paywall_policy") ?? 0) > 0 ? "pass" : "warning", blocking: false, detail: `资料入口${frameworkCounts.get("resource_card") ?? 0}个，权益策略${frameworkCounts.get("paywall_policy") ?? 0}个。`, href: "/admin/content" }),
+    launchCheck({ id: "operations-queue", category: "operations", target: "both", label: "运营异常队列", state: count(failedImports) > 0 || count(pendingReports) > 0 ? "warning" : "pass", blocking: false, detail: `失败/有误导入${count(failedImports)}个，待处理用户报错${count(pendingReports)}条。`, href: count(failedImports) ? "/admin/imports" : "/admin/content?queue=reports" }),
+    launchCheck({ id: "wechat-appid", category: "mini_program", target: "mini_program", label: "小程序主体与AppID", state: /^wx[0-9a-f]{16}$/i.test(mini.appId) ? "pass" : "fail", blocking: true, detail: mini.appId ? "AppID格式已记录，仍需以微信公众平台为准。" : "尚未录入已认证小程序AppID。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-domain", category: "mini_program", target: "mini_program", label: "业务域名与HTTPS", state: Boolean(mini.serviceDomain && validHttpsUrl(mini.serviceDomain)) ? "pass" : "fail", blocking: true, detail: mini.serviceDomain ? `当前服务域名：${mini.serviceDomain}` : "尚未配置并核验小程序业务域名。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-privacy", category: "mini_program", target: "mini_program", label: "隐私保护指引", state: mini.privacyVerified ? "pass" : "fail", blocking: true, detail: mini.privacyVerified ? "已人工核验隐私指引和数据用途声明。" : "需在微信公众平台完成隐私保护指引并实测。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-identity", category: "mini_program", target: "mini_program", label: "微信登录与账号合并", state: mini.identityMappingVerified ? "pass" : "fail", blocking: true, detail: mini.identityMappingVerified ? "已实测微信身份绑定、换设备同步和权益合并。" : "当前仅有H5账号能力，微信openid映射尚未验收。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-share", category: "mini_program", target: "mini_program", label: "原生分享", state: mini.nativeShareVerified ? "pass" : "fail", blocking: true, detail: mini.nativeShareVerified ? "已实测分享卡片、落地页和参数清理。" : "需实测题库、资料和趣味测试的原生分享。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-subscribe", category: "mini_program", target: "mini_program", label: "订阅提醒发送闭环", state: mini.subscribeMessageVerified ? "pass" : "fail", blocking: true, detail: mini.subscribeMessageVerified ? "已实测授权、服务端发送、失败重试和退订。" : "未接通前用户端只能承诺站内提醒。", href: "/admin/launch#mini-program" }),
+    launchCheck({ id: "wechat-upload", category: "mini_program", target: "mini_program", label: "上传、体验版与回滚", state: mini.uploadPipelineVerified ? "pass" : "fail", blocking: true, detail: mini.uploadPipelineVerified ? "已实测开发版上传、体验版验收和版本回滚。" : "尚未完成微信开发者工具上传和体验版冒烟测试。", href: "/admin/launch#mini-program" }),
+  ];
+  const h5Blocking = checks.filter((check) => check.target !== "mini_program" && check.blocking);
+  const miniBlocking = checks.filter((check) => check.blocking);
+  const h5Ready = h5Blocking.every((check) => check.state !== "fail");
+  const miniProgramReady = h5Ready && miniBlocking.every((check) => check.state !== "fail");
+  return {
+    readiness: { h5Ready, miniProgramReady, checks, lastAudit: configuration.lastAudit },
+    policy: configuration.policy,
+    miniProgram: configuration.miniProgram,
+    scenarios: launchScenarioMatrix(checks),
+    scores: {
+      framework: scoreLaunchChecks(checks, "framework"),
+      business: scoreLaunchChecks(checks, "business"),
+      operations: scoreLaunchChecks(checks, "operations"),
+      miniProgram: scoreLaunchChecks(checks, "mini_program"),
+    },
+    health: {
+      activeUsers7d: Number(health?.active_7d ?? 0),
+      practiceUsers7d: Number(health?.practice_7d ?? 0),
+      redeemedUsers30d: Number(health?.redeemed_30d ?? 0),
+      pendingReports: count(pendingReports),
+      failedImports: count(failedImports),
+    },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+async function adminListLaunch(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "system.read") && !canAdmin(payload, "dashboard.read")) return adminForbidden("system.read");
+  return json(await loadLaunchReadiness());
+}
+
+async function adminUpdateLaunchPolicy(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "users.manage")) return adminForbidden("users.manage");
+  const scope = String(payload.scope ?? "");
+  const input = payload.values && typeof payload.values === "object" ? payload.values as Record<string, unknown> : {};
+  const db = getD1();
+  if (scope === "business") {
+    const policy: LaunchOperationPolicy = {
+      supportEmail: trimmed(input.supportEmail, 160),
+      supportWechat: trimmed(input.supportWechat, 80),
+      serviceHours: trimmed(input.serviceHours, 120) || DEFAULT_LAUNCH_OPERATION_POLICY.serviceHours,
+      officialAccountName: trimmed(input.officialAccountName, 80),
+      purchaseUrl: trimmed(input.purchaseUrl, 500),
+      purchaseInstructions: trimmed(input.purchaseInstructions, 500) || DEFAULT_LAUNCH_OPERATION_POLICY.purchaseInstructions,
+      wrongAccountPolicy: trimmed(input.wrongAccountPolicy, 500) || DEFAULT_LAUNCH_OPERATION_POLICY.wrongAccountPolicy,
+      unusedCodePolicy: trimmed(input.unusedCodePolicy, 500) || DEFAULT_LAUNCH_OPERATION_POLICY.unusedCodePolicy,
+      accountMergePolicy: trimmed(input.accountMergePolicy, 500) || DEFAULT_LAUNCH_OPERATION_POLICY.accountMergePolicy,
+      codeTransferPolicy: trimmed(input.codeTransferPolicy, 500) || DEFAULT_LAUNCH_OPERATION_POLICY.codeTransferPolicy,
+    };
+    if (!validPublicEmail(policy.supportEmail)) return json({ error: "售后邮箱格式无效" }, 400);
+    if (policy.purchaseUrl && !validHttpsUrl(policy.purchaseUrl)) return json({ error: "购买入口必须使用HTTPS地址" }, 400);
+    await db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('launch_operation_policy_v1', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+      .bind(JSON.stringify(policy)).run();
+  } else if (scope === "mini_program") {
+    const appId = trimmed(input.appId, 40);
+    const serviceDomain = trimmed(input.serviceDomain, 500);
+    if (appId && !/^wx[0-9a-f]{16}$/i.test(appId)) return json({ error: "小程序AppID格式无效" }, 400);
+    if (serviceDomain && !validHttpsUrl(serviceDomain)) return json({ error: "小程序服务域名必须使用HTTPS地址" }, 400);
+    const miniProgram: MiniProgramLaunchConfig = {
+      appId,
+      serviceDomain,
+      privacyVerified: input.privacyVerified === true,
+      identityMappingVerified: input.identityMappingVerified === true,
+      nativeShareVerified: input.nativeShareVerified === true,
+      subscribeMessageVerified: input.subscribeMessageVerified === true,
+      uploadPipelineVerified: input.uploadPipelineVerified === true,
+      paymentMode: "official_account_redemption",
+      lastVerifiedAt: new Date().toISOString(),
+    };
+    await db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('mini_program_launch_v1', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+      .bind(JSON.stringify(miniProgram)).run();
+  } else {
+    return json({ error: "上线配置范围无效" }, 400);
+  }
+  return json(await loadLaunchReadiness());
+}
+
+async function adminRunLaunchAudit(payload: Record<string, unknown>) {
+  if (!canAdmin(payload, "system.read") && !canAdmin(payload, "dashboard.read")) return adminForbidden("system.read");
+  const target = payload.target === "mini_program" ? "mini_program" : "h5";
+  const result = await loadLaunchReadiness();
+  const allowed = target === "mini_program" ? result.readiness.miniProgramReady : result.readiness.h5Ready;
+  const failedCheckIds = result.readiness.checks
+    .filter((check) => check.blocking && check.state === "fail" && (target === "mini_program" || check.target !== "mini_program"))
+    .map((check) => check.id);
+  const audit = { target, allowed, failedCheckIds, checkedAt: new Date().toISOString(), checkedBy: adminFromPayload(payload)?.username ?? "admin" };
+  await getD1().prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('launch_last_audit_v1', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).bind(JSON.stringify(audit)).run();
+  result.readiness.lastAudit = audit;
+  return json({ ...result, audit }, allowed ? 200 : 409);
+}
+
 async function adminDashboard(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "dashboard.read")) return adminForbidden("dashboard.read");
   const db = getD1();
@@ -11218,6 +11514,9 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
   adminListRadar: ["radar.read"],
   adminListGrowth: ["growth.read"],
   adminListAnalytics: ["analytics.read"],
+  adminListLaunch: ["system.read", "dashboard.read"],
+  adminRunLaunchAudit: ["system.read", "dashboard.read"],
+  adminUpdateLaunchPolicy: ["users.manage"],
   adminSetAnalyticsEligibility: ["users.manage"],
   adminListSystem: ["system.read", "users.manage", "audit.read"],
   adminListUsers: ["system.read", "users.manage"],
@@ -11285,6 +11584,7 @@ const ADMIN_ACTION_PERMISSIONS: Record<string, AdminPermission[]> = {
 };
 
 const ADMIN_WRITE_ACTIONS = new Set([
+  "adminRunLaunchAudit", "adminUpdateLaunchPolicy",
   "adminCreateCodes", "adminDisableCode", "adminUpdateConfig", "adminSetMediaAccess", "adminUpsertContentBatch",
   "adminDisableContent", "adminSetContentStatus", "adminRollbackContent", "adminDuplicateContent",
   "adminUpsertQuestionBank", "adminSetQuestionBankStatus", "adminUpsertQuestion", "adminSetQuestionStatus", "adminStartQuestionImport",
@@ -11301,6 +11601,7 @@ const ADMIN_WRITE_ACTIONS = new Set([
 ]);
 
 function resourceTypeForAdminAction(action: string) {
+  if (action.includes("Launch")) return "launch_readiness";
   if (action.includes("Essay")) return "essay_reference_library";
   if (action.includes("ContentReport")) return "content_report";
   if (action.includes("Media")) return "media";
@@ -11381,6 +11682,9 @@ async function dispatchAdminAction(request: Request, payload: Record<string, unk
   else if (action === "adminListRadar") response = await adminListRadar(payload);
   else if (action === "adminListGrowth") response = await adminListGrowth(payload);
   else if (action === "adminListAnalytics") response = await adminListAnalytics(payload);
+  else if (action === "adminListLaunch") response = await adminListLaunch(payload);
+  else if (action === "adminRunLaunchAudit") response = await adminRunLaunchAudit(payload);
+  else if (action === "adminUpdateLaunchPolicy") response = await adminUpdateLaunchPolicy(payload);
   else if (action === "adminSetAnalyticsEligibility") response = await adminSetAnalyticsEligibility(payload);
   else if (action === "adminListSystem") response = await adminListSystem(payload);
   else if (action === "adminListUsers") response = await adminListUsers(payload);
@@ -11620,6 +11924,7 @@ export async function POST(request: Request) {
     else if (action === "completeQuizAttempt") response = await completeQuizAttempt(identity.userId, payload);
     else if (action === "recordQuizShare") response = await recordQuizShare(identity.userId, payload);
     else if (action === "getEssayReferenceLibrary") response = await getEssayReferenceLibrary(payload);
+    else if (action === "getSupportInfo") response = await getSupportInfo();
     else response = json({ error: "未知操作" }, 400);
     appendCookies(response.headers, identity.setCookie);
     return response;

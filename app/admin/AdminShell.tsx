@@ -13,6 +13,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   RadarChartOutlined,
+  RocketOutlined,
   SafetyCertificateOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -178,6 +179,15 @@ const NAVIGATION: NavigationItem[] = [
     icon: <BarChartOutlined />,
     section: "数据中心",
     keywords: "活跃 留存 答题 正确率 转化 漏斗 事件 趋势",
+  },
+  {
+    key: "launch",
+    label: "上线中心",
+    path: "/admin/launch",
+    permission: "system.read",
+    icon: <RocketOutlined />,
+    section: "系统管理",
+    keywords: "上线 验收 门禁 小程序 微信 售后 模拟 回滚",
   },
   {
     key: "system",

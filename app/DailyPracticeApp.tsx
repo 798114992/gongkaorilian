@@ -3517,8 +3517,9 @@ export default function DailyPracticeApp() {
     if (!bootstrap?.user.signedIn) return;
     if (!bootstrap.user.inviteCode) return notify("邀请码正在生成");
     const url = `${window.location.origin}/?invite=${bootstrap.user.inviteCode}`;
-    try { await navigator.clipboard.writeText(url); notify("邀请链接已复制；好友完成奖励条件后，双方会员时长将自动发放"); }
-    catch { notify(url); }
+    const shareText = `我的公考日练邀请码：${bootstrap.user.inviteCode}\n${url}`;
+    try { await navigator.clipboard.writeText(shareText); notify("邀请码和邀请链接已复制；好友完成奖励条件后，双方会员时长将自动发放"); }
+    catch { notify(shareText); }
   };
 
   useEffect(() => {
@@ -4439,6 +4440,13 @@ export default function DailyPracticeApp() {
               <small>激活后返回今日；时长自动累计，终身权益不被覆盖。</small>
             </article>
 
+            <article className="panel-card invite-panel invite-panel-primary" id="invite-friends">
+              <div className="invite-primary-heading"><div><span>邀请有礼</span><h3>分享邀请码，双方得会员时长</h3></div><em>邀请人 +{bootstrap?.inviteConfig.rewardDays ?? 7}天 · 好友 +{bootstrap?.inviteConfig.inviteeRewardDays ?? 3}天</em></div>
+              <div className="invite-primary-code"><div><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button type="button" onClick={() => void copyInvite()}>复制并分享</button> : <a href={signInHref}>登录后生成邀请链接</a>}</div>
+              <small>好友完成账号验证和首次有效日练后，双方自动获得时长。</small>
+              {bootstrap?.user.signedIn && <div className="invite-primary-stats"><span>已邀请 <b>{bootstrap?.inviteStats.total ?? 0}</b> 人</span><span>待完成 <b>{bootstrap?.inviteStats.pending ?? 0}</b></span><span>已奖励 <b>{bootstrap?.inviteStats.rewarded ?? 0}</b></span></div>}
+            </article>
+
             <section className="me-section" aria-labelledby="me-learning-overview">
               <div className="me-section-heading"><h3 id="me-learning-overview">学习概览</h3><span>进度与报考提醒</span></div>
               <div className="me-overview-card">
@@ -4457,7 +4465,6 @@ export default function DailyPracticeApp() {
             </section>
 
             {meCampaign && isCampaignVisible(meCampaign) && <section className={`configured-campaign-card tone-${meCampaign.tone}`}><div><span>{meCampaign.eyebrow}</span><h2>{meCampaign.title}</h2><p>{meCampaign.summary}</p></div><button onClick={() => { recordCampaignClick(meCampaign); runConfiguredAction(meCampaign.actionType, meCampaign.actionTarget, `campaign:${meCampaign.id}`); }}>{meCampaign.actionLabel}</button></section>}
-            <details className="panel-card invite-panel me-fold-card"><summary><div><h3>邀请好友共同备考</h3><span>双方完成条件后获得会员时长</span></div><strong>展开</strong></summary><div className="me-fold-content"><p>好友完成账号验证和首次有效日练后，邀请人奖励 {bootstrap?.inviteConfig.rewardDays ?? 7} 天，受邀人奖励 {bootstrap?.inviteConfig.inviteeRewardDays ?? 3} 天。</p><div className="invite-code"><span>我的邀请码</span><strong>{bootstrap?.user.signedIn ? bootstrap.user.inviteCode ?? "生成中" : "登录后生成"}</strong></div>{bootstrap?.user.signedIn ? <button className="primary-button full-button" onClick={() => void copyInvite()}>复制专属邀请链接</button> : <a className="primary-button full-button invite-login-cta" href={signInHref}>登录后生成邀请链接</a>}<div className="invite-stats"><span><b>{bootstrap?.inviteStats.total ?? 0}</b>已邀请</span><span><b>{bootstrap?.inviteStats.pending ?? 0}</b>待完成首练</span><span><b>{bootstrap?.inviteStats.rewarded ?? 0}</b>已奖励</span></div></div></details>
             <details className="panel-card ledger-card me-fold-card"><summary><div><h3>会员时长记录</h3><span>{bootstrap?.ledger.length ? `${bootstrap.ledger.length} 条变动记录` : "暂无变动记录"}</span></div><strong>展开</strong></summary><div className="me-fold-content">{bootstrap?.ledger.length ? bootstrap.ledger.map((item, index) => <div className="ledger-row" key={item.created_at + "-" + index}><div><b>{item.note}</b><span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span></div><strong>+{item.delta_days}天</strong></div>) : <p className="muted">激活或获得邀请奖励后，将在这里记录。</p>}</div></details>
             <button type="button" className="about-entry-card" onClick={() => setTab("about")}><div><span>产品与服务说明</span><h3>关于公考日练</h3><p>查看账号售后、内容来源和版权说明。</p></div><strong>›</strong></button>
           </div>}

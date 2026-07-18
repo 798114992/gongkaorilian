@@ -1993,6 +1993,32 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .redeem-panel-primary.member-active { border-color: #a9d7c6; background: linear-gradient(145deg, #f2fbf7, #fff); }
 .redeem-panel-primary.member-active::before { background: linear-gradient(#2b8a6d, #72bda5); }
 
+.invite-panel-primary {
+  position: relative;
+  overflow: hidden;
+  margin-top: 12px;
+  border-color: #b9d3e7;
+  border-radius: 22px;
+  padding: 17px 19px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(48, 124, 177, .13), transparent 34%),
+    linear-gradient(145deg, #f4f9fd, #fff);
+  box-shadow: 0 10px 24px rgba(35, 88, 129, .08);
+}
+.invite-primary-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.invite-primary-heading span { color: var(--blue); font-size: 9px; font-weight: 900; letter-spacing: .08em; }
+.invite-primary-heading h3 { margin: 4px 0 0; color: var(--navy); font-size: 15px; line-height: 1.35; }
+.invite-primary-heading em { flex: 0 0 auto; border-radius: 999px; padding: 6px 9px; color: #246493; background: #e5f1f9; font-size: 8px; font-style: normal; font-weight: 900; }
+.invite-primary-code { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #d1e1ed; border-radius: 15px; padding: 11px 11px 11px 14px; background: rgba(255,255,255,.88); }
+.invite-primary-code > div { min-width: 0; }
+.invite-primary-code span { display: block; color: var(--muted); font-size: 8px; }
+.invite-primary-code strong { display: block; overflow: hidden; margin-top: 2px; color: var(--navy); font-size: 17px; letter-spacing: .08em; text-overflow: ellipsis; white-space: nowrap; }
+.invite-primary-code > button,
+.invite-primary-code > a { flex: 0 0 auto; border: 0; border-radius: 11px; padding: 10px 13px; color: #fff; background: var(--blue); font-size: 10px; font-weight: 900; text-decoration: none; }
+.invite-panel-primary > small { margin-top: 9px; color: #5e7181; }
+.invite-primary-stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 8px; }
+.invite-primary-stats b { color: var(--blue); font-size: 10px; }
+
 .me-section { margin-top: 20px; }
 .me-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 3px 9px; }
 .me-section-heading h3 { margin: 0; color: var(--navy); font-size: 14px; }
@@ -2057,6 +2083,9 @@ button.me-overview-row:active { background: #f7fafc; }
   .redeem-primary-heading em { display: inline-flex; margin-top: 8px; }
   .redeem-panel-primary .redeem-row { grid-template-columns: 1fr; }
   .redeem-panel-primary .redeem-row button { min-height: 44px; }
+  .invite-primary-heading { display: block; }
+  .invite-primary-heading em { display: inline-flex; margin-top: 8px; }
+  .invite-primary-code strong { font-size: 14px; }
   .me-section-heading span { display: none; }
 }
 

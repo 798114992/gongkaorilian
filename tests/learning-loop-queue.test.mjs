@@ -40,17 +40,20 @@ test("复习原因日期和申论并排对比已经进入前端闭环", async ()
   assert.match(css, /\.comparisonGrid/);
 });
 
-test("我的页面将兑换激活置顶，并折叠低频账户内容", async () => {
+test("我的页面将兑换与邀请入口置顶，并只折叠低频账户内容", async () => {
   const [app, css] = await Promise.all([
     read("app/DailyPracticeApp.tsx"),
     read("app/globals.css"),
   ]);
   const meStart = app.indexOf('{tab === "me"');
   const redeem = app.indexOf('id="redeem-membership"', meStart);
+  const invite = app.indexOf('id="invite-friends"', meStart);
   const overview = app.indexOf('id="me-learning-overview"', meStart);
-  assert.ok(meStart >= 0 && redeem > meStart && overview > redeem);
-  assert.match(app, /<details className="panel-card invite-panel me-fold-card"/);
+  assert.ok(meStart >= 0 && redeem > meStart && invite > redeem && overview > invite);
+  assert.match(app, /分享邀请码，双方得会员时长/);
+  assert.match(app, /邀请码和邀请链接已复制/);
   assert.match(app, /<details className="panel-card ledger-card me-fold-card"/);
   assert.match(css, /\.redeem-panel-primary/);
+  assert.match(css, /\.invite-panel-primary/);
   assert.match(css, /\.me-overview-card/);
 });

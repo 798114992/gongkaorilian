@@ -100,6 +100,10 @@ server {
     }
 }
 EOF
+if [[ "${PRIVATE_MODE:-false}" == "true" ]]; then
+  sed -i 's/listen 80 default_server;/listen 127.0.0.1:80 default_server;/' "${NGINX_FILE}"
+  sed -i '/listen \[::\]:80 default_server;/d' "${NGINX_FILE}"
+fi
 ln -sfn "${NGINX_FILE}" /etc/nginx/sites-enabled/gongkaorilian
 rm -f /etc/nginx/sites-enabled/default
 

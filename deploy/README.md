@@ -8,6 +8,12 @@
 curl -fsSL https://raw.githubusercontent.com/798114992/gongkaorilian/main/deploy/install-aliyun.sh | bash
 ```
 
+备案完成前，可使用私有模式部署。该模式仅在服务器本机监听 HTTP：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/798114992/gongkaorilian/main/deploy/install-aliyun.sh | sudo env PRIVATE_MODE=true bash
+```
+
 以后更新：
 
 ```bash

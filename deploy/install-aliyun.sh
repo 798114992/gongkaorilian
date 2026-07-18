@@ -160,6 +160,13 @@ systemctl enable --now nginx
 systemctl restart nginx
 systemctl enable --now gongkaorilian-backup.timer
 
+if [[ "${PRIVATE_MODE:-false}" == "true" ]]; then
+  ufw allow 22/tcp
+  ufw deny 80/tcp
+  ufw deny 3000/tcp
+  ufw --force enable
+fi
+
 curl --fail --silent --show-error --retry 20 --retry-delay 2 http://127.0.0.1:3000/ >/dev/null
 curl --fail --silent --show-error --retry 5 --retry-delay 2 http://127.0.0.1:3000/api/app >/dev/null
 

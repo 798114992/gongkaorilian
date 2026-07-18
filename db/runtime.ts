@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env } from "@runtime-env";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
@@ -1353,6 +1353,15 @@ export async function ensureSchema() {
   if (schemaReady) return;
   if (!schemaPromise) {
     schemaPromise = (async () => {
+      const allowLegacyBootstrap = String((env as unknown as { RUNTIME_SCHEMA_BOOTSTRAP?: string })
+        .RUNTIME_SCHEMA_BOOTSTRAP ?? "").toLowerCase() === "local-only";
+      // A self-hosted SQLite database starts empty. Its process is not subject
+      // to D1's per-request statement budget, so the idempotent bootstrap is
+      // the safest way to create or repair the complete schema on startup.
+      if (allowLegacyBootstrap) {
+        await initializeSchema();
+        return;
+      }
       if (await deployedSchemaIsCurrent()) {
         schemaReady = true;
         return;
@@ -1369,8 +1378,6 @@ export async function ensureSchema() {
       // The legacy bootstrap contains more statements than D1 Free permits in
       // one Worker invocation, so it is opt-in for local recovery only instead
       // of silently exhausting the cold-request query budget.
-      const allowLegacyBootstrap = String((env as unknown as { RUNTIME_SCHEMA_BOOTSTRAP?: string })
-        .RUNTIME_SCHEMA_BOOTSTRAP ?? "").toLowerCase() === "local-only";
       if (!allowLegacyBootstrap) {
         throw new Error("数据库迁移尚未应用；请先部署 drizzle 迁移，禁止在生产请求中执行超预算建表。");
       }

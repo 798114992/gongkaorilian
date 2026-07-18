@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env } from "@runtime-env";
 import { ensureSchema, getD1 } from "../../../db/runtime";
 import { practiceDays as defaultPracticeDays, type PracticeDay, type Question } from "../../data/content";
 import { audioTracks as defaultAudioTracks, type AudioTrack } from "../../data/audio";
@@ -12020,7 +12020,10 @@ export async function GET(request: Request) {
     if (mediaId) return serveAuthorizedMedia(mediaId, request);
     await dispatchDueImportWork(request).catch(() => false);
     return await bootstrap(request);
-  } catch { return json({ error: "服务暂时不可用，请稍后重试", code: "INTERNAL_ERROR" }, 500); }
+  } catch (error) {
+    console.error("GET /api/app failed", error);
+    return json({ error: "服务暂时不可用，请稍后重试", code: "INTERNAL_ERROR" }, 500);
+  }
 }
 
 export async function POST(request: Request) {
@@ -12175,7 +12178,8 @@ export async function POST(request: Request) {
     else response = json({ error: "未知操作" }, 400);
     appendCookies(response.headers, identity.setCookie);
     return response;
-  } catch {
+  } catch (error) {
+    console.error("POST /api/app failed", error);
     return json({ error: "请求暂时失败，请稍后重试", code: "INTERNAL_ERROR" }, 500);
   }
 }

@@ -1960,6 +1960,106 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .redeem-row input { background: rgba(255,255,255,.92); }
 .redeem-panel small { color: #755d4b; line-height: 1.65; }
 
+/* 我的：先完成权益激活，再查看学习概览和账户服务。 */
+.me-page { padding-top: 18px; }
+.me-profile-card { padding-bottom: 14px; }
+.me-page .profile-card + .target-chip-row { margin-bottom: 14px; }
+.redeem-panel-primary {
+  position: relative;
+  overflow: hidden;
+  margin-top: 0;
+  border: 1.5px solid #e8b185;
+  border-radius: 24px;
+  padding: 19px;
+  background:
+    radial-gradient(circle at 102% -8%, rgba(232, 116, 43, .2), transparent 34%),
+    linear-gradient(145deg, #fff7ef, #fffdfb 68%);
+  box-shadow: 0 14px 30px rgba(177, 91, 36, .12);
+}
+.redeem-panel-primary::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: linear-gradient(#df6f2c, #f1aa70);
+  content: "";
+}
+.redeem-primary-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.redeem-primary-heading span { color: #b3511f; font-size: 9px; font-weight: 900; letter-spacing: .08em; }
+.redeem-primary-heading h3 { margin: 4px 0 0; color: var(--navy); font-size: 18px; line-height: 1.35; }
+.redeem-primary-heading em { flex: 0 0 auto; border-radius: 999px; padding: 6px 9px; color: #9a4c21; background: rgba(232, 116, 43, .1); font-size: 8px; font-style: normal; font-weight: 900; }
+.redeem-panel-primary .redeem-row { grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
+.redeem-panel-primary .redeem-row input { min-height: 48px; border-color: #e2c9b7; font-size: 15px; }
+.redeem-panel-primary .redeem-row button { min-width: 104px; min-height: 48px; background: linear-gradient(145deg, #174c7c, #246ba7); box-shadow: 0 8px 18px rgba(27, 83, 132, .16); }
+.redeem-panel-primary.member-active { border-color: #a9d7c6; background: linear-gradient(145deg, #f2fbf7, #fff); }
+.redeem-panel-primary.member-active::before { background: linear-gradient(#2b8a6d, #72bda5); }
+
+.me-section { margin-top: 20px; }
+.me-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 3px 9px; }
+.me-section-heading h3 { margin: 0; color: var(--navy); font-size: 14px; }
+.me-section-heading span { color: var(--muted); font-size: 9px; }
+.me-overview-card,
+.me-account-card { overflow: hidden; border: 1px solid #dce5ec; border-radius: 21px; background: #fff; box-shadow: 0 8px 22px rgba(28, 54, 78, .05); }
+.me-overview-row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  border: 0;
+  border-bottom: 1px solid #edf1f4;
+  padding: 13px 14px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+.me-overview-row:last-child { border-bottom: 0; }
+button.me-overview-row { cursor: pointer; }
+button.me-overview-row:active { background: #f7fafc; }
+.me-overview-row span,
+.me-account-row span { color: var(--muted); font-size: 8px; font-weight: 800; }
+.me-overview-row h3,
+.me-account-row h3 { margin: 3px 0; color: var(--navy); font-size: 12px; line-height: 1.35; }
+.me-overview-row p,
+.me-account-row p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.me-overview-row > strong { color: #8da0b0; font-size: 19px; }
+.me-overview-row:first-child > strong { display: grid; width: 31px; height: 31px; place-items: center; border-radius: 50%; color: #fff; background: linear-gradient(145deg, #db6d2d, #f0a36b); font-size: 12px; }
+.me-overview-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 13px; color: #fff; font-size: 12px; font-weight: 900; }
+.me-overview-icon.streak { background: linear-gradient(145deg, #d7682a, #ef9a5d); }
+.me-overview-icon.radar { background: linear-gradient(145deg, #236b9c, #55a0c8); }
+.me-overview-icon.report { background: linear-gradient(145deg, #2d856d, #62b394); }
+
+.me-account-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px; }
+.me-account-row + .me-account-row { border-top: 1px solid #edf1f4; }
+.me-account-row > div { min-width: 0; }
+.me-account-row > b,
+.me-account-row > a,
+.me-account-row > button { flex: 0 0 auto; }
+.membership-summary > b { border-radius: 999px; padding: 7px 10px; color: #27755f; background: #e8f5f0; font-size: 10px; }
+.membership-summary .profile-edit { border-radius: 999px; padding: 8px 11px; color: #fff; background: var(--blue); }
+.sync-summary > b,
+.sync-summary > a { border-radius: 999px; padding: 7px 10px; color: var(--blue); background: var(--blue-soft); font-size: 9px; font-weight: 900; text-decoration: none; }
+.sync-summary.signed > b { color: #27755f; background: #e8f5f0; }
+
+.me-fold-card { overflow: hidden; border-color: #dce5ec; background: #fff; }
+.me-fold-card summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.me-fold-card summary::-webkit-details-marker { display: none; }
+.me-fold-card summary h3 { margin: 0 0 4px; font-size: 13px; }
+.me-fold-card summary span { color: var(--muted); font-size: 9px; }
+.me-fold-card summary > strong { color: var(--blue); font-size: 9px; font-weight: 900; }
+.me-fold-card[open] summary > strong { font-size: 0; }
+.me-fold-card[open] summary > strong::after { font-size: 9px; content: "收起"; }
+.me-fold-content { margin-top: 14px; border-top: 1px solid #edf1f4; padding-top: 13px; }
+.me-fold-content > p { margin-top: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+
+@media (max-width: 420px) {
+  .redeem-primary-heading { display: block; }
+  .redeem-primary-heading em { display: inline-flex; margin-top: 8px; }
+  .redeem-panel-primary .redeem-row { grid-template-columns: 1fr; }
+  .redeem-panel-primary .redeem-row button { min-height: 44px; }
+  .me-section-heading span { display: none; }
+}
+
 .bottom-nav {
   border-top-color: rgba(209, 220, 230, .88);
   box-shadow: 0 -10px 28px rgba(16, 41, 67, .08);

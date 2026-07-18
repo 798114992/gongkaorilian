@@ -39,3 +39,18 @@ test("复习原因日期和申论并排对比已经进入前端闭环", async ()
   assert.match(library, /Array\.from\(String\(source\.content/);
   assert.match(css, /\.comparisonGrid/);
 });
+
+test("我的页面将兑换激活置顶，并折叠低频账户内容", async () => {
+  const [app, css] = await Promise.all([
+    read("app/DailyPracticeApp.tsx"),
+    read("app/globals.css"),
+  ]);
+  const meStart = app.indexOf('{tab === "me"');
+  const redeem = app.indexOf('id="redeem-membership"', meStart);
+  const overview = app.indexOf('id="me-learning-overview"', meStart);
+  assert.ok(meStart >= 0 && redeem > meStart && overview > redeem);
+  assert.match(app, /<details className="panel-card invite-panel me-fold-card"/);
+  assert.match(app, /<details className="panel-card ledger-card me-fold-card"/);
+  assert.match(css, /\.redeem-panel-primary/);
+  assert.match(css, /\.me-overview-card/);
+});

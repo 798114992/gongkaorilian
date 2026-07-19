@@ -43,11 +43,18 @@ test("daily practice completion advances the step before the full-day check-in",
     "runtime repair must not create a check-in before the remaining daily steps are complete");
 });
 
-test("confidence is one-shot in the UI and duplicate replies return server truth", () => {
+test("confidence is one-shot, enables next immediately and duplicate replies return server truth", () => {
   const app = readFileSync(join(root, "app/DailyPracticeApp.tsx"), "utf8");
   const route = readFileSync(join(root, "app/api/app/route.ts"), "utf8");
   assert.match(app, /if \(answerConfidence\) return notify\("\u638c\u63e1\u7a0b\u5ea6\u5df2\u4fdd\u5b58/);
-  assert.match(app, /disabled=\{busy \|\| Boolean\(answerConfidence\)\}/);
+  assert.match(app, /disabled=\{Boolean\(answerConfidence\)\}/);
+  assert.match(app, /disabled=\{feedback\.correct && !answerConfidence\}/);
+  assert.doesNotMatch(app, /disabled=\{busy \|\| Boolean\(answerConfidence\)\}/,
+    "the background confidence save must not block the next-question action");
+  assert.match(app, /visiblePracticeIdRef\.current === savedQuestionId/,
+    "a late background response must never overwrite the next question UI");
+  assert.match(app, /currentSessionIdentity === savedSessionIdentity/,
+    "a late background response must stay inside the practice session that created it");
   assert.match(app, /const serverConfidence = result\.confidence/);
   assert.match(route, /duplicate: true,[\s\S]*?confidence: serverConfidence,[\s\S]*?needsReview:/);
 });

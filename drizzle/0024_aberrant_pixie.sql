@@ -1,0 +1,1 @@
+ALTER TABLE `question_banks` ADD `library_access_level` text DEFAULT 'free' NOT NULL;

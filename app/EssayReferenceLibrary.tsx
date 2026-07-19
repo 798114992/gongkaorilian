@@ -32,6 +32,8 @@ export type EssayReferencePaper = {
   materials?: EssayReferenceMaterial[];
   questionCount?: number;
   sourceCount?: number;
+  accessLevel?: "free" | "member";
+  locked?: boolean;
 };
 
 export type EssayReferenceQuestion = {
@@ -119,6 +121,8 @@ export type EssayLibraryPaper = {
   questions?: EssayLibraryQuestion[];
   questionCount?: number;
   sourceCount?: number;
+  accessLevel?: "free" | "member";
+  locked?: boolean;
 };
 
 export type EssayReferenceLibraryProps = {
@@ -134,6 +138,8 @@ export type EssayReferenceLibraryProps = {
   onFavoritePaperIdsChange?: (ids: string[]) => void;
   onRecentPaperIdsChange?: (ids: string[]) => void;
   onPaperOpen?: (paperId: string) => void | Promise<void>;
+  memberAccess?: boolean;
+  onUnlockPaper?: (paper: EssayReferencePaper) => void;
   onPaperExit?: () => void;
   onSharePaper?: (paper: EssayReferencePaper) => void | Promise<void>;
   todayQuestionIds?: string[];
@@ -265,6 +271,8 @@ function normalizeLibraryData(
       materials: paper.materials?.map((material) => ({ ...material, id: String(material.id) })),
       questionCount: paper.questionCount,
       sourceCount: paper.sourceCount,
+      accessLevel: paper.accessLevel === "member" ? "member" : "free",
+      locked: paper.locked === true,
     };
     return {
       id: String(paper.id),
@@ -280,6 +288,8 @@ function normalizeLibraryData(
       tags: paper.tags,
       questionCount: paper.questionCount,
       sourceCount: paper.sourceCount,
+      accessLevel: paper.accessLevel === "member" ? "member" : "free",
+      locked: paper.locked === true,
       materials: paper.materials?.map((material) => ({
         id: String(material.id),
         label: material.label,
@@ -356,6 +366,8 @@ export default function EssayReferenceLibrary({
   onFavoritePaperIdsChange,
   onRecentPaperIdsChange,
   onPaperOpen,
+  memberAccess = false,
+  onUnlockPaper,
   onPaperExit,
   onSharePaper,
   todayQuestionIds = [],
@@ -515,6 +527,11 @@ export default function EssayReferenceLibrary({
 
   const openPaper = async (paperId: string) => {
     if (openingPaperId) return;
+    const targetPaper = papers.find((paper) => paper.id === paperId);
+    if (targetPaper?.accessLevel === "member" && targetPaper.locked && !memberAccess) {
+      onUnlockPaper?.(targetPaper);
+      return;
+    }
     setOpeningPaperId(paperId);
     try {
       await onPaperOpen?.(paperId);
@@ -693,9 +710,10 @@ export default function EssayReferenceLibrary({
                   const paperQuestions = questionsByPaper.get(paper.id) ?? [];
                   const isFavorite = favorites.includes(paper.id);
                   const opening = openingPaperId === paper.id;
+                  const locked = paper.accessLevel === "member" && paper.locked && !memberAccess;
                   return (
-                    <article key={paper.id} className={styles.paperCard}>
-                      <button type="button" className={styles.paperMain} onClick={() => void openPaper(paper.id)} disabled={Boolean(openingPaperId)} aria-busy={opening || undefined}>
+                    <article key={paper.id} className={`${styles.paperCard} ${locked ? styles.paperCardLocked : ""}`}>
+                      <button type="button" className={styles.paperMain} onClick={() => void openPaper(paper.id)} disabled={Boolean(openingPaperId)} aria-busy={opening || undefined} aria-label={locked ? `解锁会员资料：${paper.title}` : `查看资料：${paper.title}`}>
                         <div className={styles.paperStamp} aria-hidden="true">
                           <b>{paper.year}</b><span>{paper.region.slice(0, 4)}</span>
                         </div>
@@ -703,6 +721,7 @@ export default function EssayReferenceLibrary({
                           <div className={styles.paperLabels}>
                             {paper.examType && <span>{paper.examType}</span>}
                             <span>{paper.volumeType}</span>
+                            <span className={paper.accessLevel === "member" ? styles.memberLabel : styles.freeLabel}>{paper.accessLevel === "member" ? "会员" : "免费"}</span>
                           </div>
                           <h2>{paper.title}</h2>
                           {paper.description && <p>{paper.description}</p>}
@@ -713,7 +732,7 @@ export default function EssayReferenceLibrary({
                             {paper.updatedAt && <><i aria-hidden="true" /><span>{compactDate(paper.updatedAt)} 更新</span></>}
                           </div>
                         </div>
-                        {opening ? <span className={styles.paperOpening}>加载中</span> : <ChevronIcon direction="right" />}
+                        {locked ? <span className={styles.paperAccessAction}>解锁</span> : opening ? <span className={styles.paperOpening}>加载中</span> : <ChevronIcon direction="right" />}
                       </button>
                       <button
                         type="button"

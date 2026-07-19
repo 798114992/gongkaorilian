@@ -49,7 +49,7 @@ test("all migrations build a fresh database with the current durable schema", ()
     assert.ok(tableColumns(db, "practice_attempts").includes(column), `missing practice_attempts.${column}`);
   for (const column of ["truth_verified", "review_status", "reviewed_by", "reviewed_at", "review_note", "version"])
     assert.ok(tableColumns(db, "questions").includes(column), `missing questions.${column}`);
-  for (const column of ["paper_type", "source_url", "resource_url", "library_enabled", "library_status"])
+  for (const column of ["paper_type", "source_url", "resource_url", "library_enabled", "library_access_level", "library_status"])
     assert.ok(tableColumns(db, "question_banks").includes(column), `missing question_banks.${column}`);
   for (const column of ["question_number", "score"])
     assert.ok(tableColumns(db, "question_bank_items").includes(column), `missing question_bank_items.${column}`);

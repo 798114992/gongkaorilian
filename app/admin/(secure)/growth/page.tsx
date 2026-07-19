@@ -15,6 +15,7 @@ type CodeItem = {
   grant_type?: "duration" | "lifetime";
   duration_days: number;
   channel?: string;
+  created_by?: string;
   max_uses: number;
   used_count: number;
   status: string;
@@ -22,7 +23,22 @@ type CodeItem = {
   created_at: string;
 };
 
-type Redemption = { redeemed_at: string; user_id: string; code_preview: string; grant_type?: "duration" | "lifetime"; duration_days: number };
+type Redemption = {
+  redeemed_at: string;
+  completed_at?: string | null;
+  status: string;
+  user_id: string;
+  code_preview: string;
+  batch_name?: string;
+  channel?: string;
+  created_by?: string;
+  grant_type?: "duration" | "lifetime";
+  duration_days: number;
+  membership_before_type?: string | null;
+  membership_before_end?: string | null;
+  membership_after_type?: string | null;
+  membership_after_end?: string | null;
+};
 type EventCount = { event_name: string; count: number | string };
 type GrowthDomain = {
   codes: CodeItem[];
@@ -63,6 +79,7 @@ export default function GrowthPage() {
     { title: "grant_type", dataIndex: "grant_type", key: "grantType", render: (value: CodeItem["grant_type"]) => <Tag color={value === "lifetime" ? "purple" : "blue"}>{value === "lifetime" ? "lifetime" : "duration"}</Tag> },
     { title: "权益", key: "benefit", render: (_: unknown, row: CodeItem) => row.grant_type === "lifetime" ? <Tag color="purple">终身</Tag> : <Tag color="blue">{row.duration_days}天</Tag> },
     { title: "渠道", dataIndex: "channel", key: "channel", render: (value?: string) => value || "manual" },
+    { title: "生成人", dataIndex: "created_by", key: "createdBy", render: (value?: string) => value || "system" },
     { title: "使用", key: "uses", render: (_: unknown, row: CodeItem) => `${row.used_count}/${row.max_uses}` },
     { title: "有效期", dataIndex: "valid_until", key: "validUntil", render: (value: string | null) => value ? new Date(value).toLocaleDateString("zh-CN") : "长期" },
     { title: "状态", dataIndex: "status", key: "status", render: (value: string) => <Tag color={value === "active" ? "green" : "default"}>{value === "active" ? "可用" : "已停用"}</Tag> },
@@ -123,7 +140,12 @@ export default function GrowthPage() {
     { title: "兑换时间", dataIndex: "redeemed_at", key: "time", render: (value: string) => new Date(value).toLocaleString("zh-CN") },
     { title: "用户", dataIndex: "user_id", key: "user", render: (value: string) => <Typography.Text copyable={{ text: value }}>{value.slice(0, 12)}…</Typography.Text> },
     { title: "兑换码", dataIndex: "code_preview", key: "code" },
+    { title: "批次 / 渠道", key: "source", render: (_: unknown, row: Redemption) => `${row.batch_name || "未命名批次"} / ${row.channel || "manual"}` },
+    { title: "生成人", dataIndex: "created_by", key: "createdBy", render: (value?: string) => value || "system" },
     { title: "发放权益", key: "benefit", render: (_: unknown, row: Redemption) => row.grant_type === "lifetime" ? <Tag color="purple">终身</Tag> : <Tag color="blue">+{row.duration_days}天</Tag> },
+    { title: "兑换前到期", key: "before", render: (_: unknown, row: Redemption) => row.membership_before_type === "lifetime" ? "终身" : row.membership_before_end ? new Date(row.membership_before_end).toLocaleString("zh-CN") : "无会员" },
+    { title: "兑换后到期", key: "after", render: (_: unknown, row: Redemption) => row.membership_after_type === "lifetime" ? "终身" : row.membership_after_end ? new Date(row.membership_after_end).toLocaleString("zh-CN") : "未完成" },
+    { title: "状态", dataIndex: "status", key: "status", render: (value: string) => <Tag color={value === "completed" ? "green" : "orange"}>{value === "completed" ? "已完成" : "处理中"}</Tag> },
   ];
 
   return (
@@ -147,7 +169,7 @@ export default function GrowthPage() {
         </Row>
         <Tabs items={[
           { key: "codes", label: "兑换码管理", children: <Card><Alert showIcon type="info" message="权益类型固定为 7天 / 30天 / 365天 / 终身" description="批次同时记录渠道、生成数量、每码可用次数与兑换截止日期，便于后续核对投放效果。" style={{ marginBottom: 16 }} /><Table<CodeItem> rowKey="id" columns={codeColumns} dataSource={data.codes} pagination={{ pageSize: 20, showSizeChanger: false }} scroll={{ x: 1080 }} /></Card> },
-          { key: "records", label: "兑换记录", children: <Card><Table<Redemption> rowKey={(row) => `${row.redeemed_at}-${row.user_id}-${row.code_preview}`} columns={redemptionColumns} dataSource={data.redemptions} pagination={{ pageSize: 20, showSizeChanger: false }} scroll={{ x: 720 }} /></Card> },
+          { key: "records", label: "兑换记录", children: <Card><Table<Redemption> rowKey={(row) => `${row.redeemed_at}-${row.user_id}-${row.code_preview}`} columns={redemptionColumns} dataSource={data.redemptions} pagination={{ pageSize: 20, showSizeChanger: false }} scroll={{ x: 1420 }} /></Card> },
           { key: "invite", label: "邀请奖励", children: <Card title="邀请奖励配置"><Alert showIcon type="success" message="被邀请人 3 天，邀请人 7 天" description="被邀请人完成账号验证并绑定邀请关系后进入待奖励状态；只有被邀请人完成首次有效日练，才向被邀请人发放3天、向邀请人发放7天。仅记录直接邀请，不返现、不形成多级分销。" style={{ marginBottom: 16 }} /><Form<InviteForm> form={inviteForm} layout="vertical" onFinish={updateInvite} style={{ maxWidth: 760 }}><Row gutter={16}><Col xs={24} sm={8}><Form.Item label="被邀请人奖励天数" name="inviteeRewardDays" rules={[{ required: true }]} extra="首次有效日练后发放"><InputNumber min={0} max={365} style={{ width: "100%" }} /></Form.Item></Col><Col xs={24} sm={8}><Form.Item label="邀请人奖励天数" name="rewardDays" rules={[{ required: true }]} extra="被邀请人首次有效日练后发放"><InputNumber min={0} max={365} style={{ width: "100%" }} /></Form.Item></Col><Col xs={24} sm={8}><Form.Item label="邀请人月度奖励上限" name="monthlyCap" rules={[{ required: true }]} extra="防止异常刷奖励"><InputNumber min={0} max={3650} style={{ width: "100%" }} /></Form.Item></Col></Row><Button type="primary" htmlType="submit" disabled={!canWrite} loading={saving}>保存配置</Button></Form></Card> },
         ]} />
       </>}

@@ -32,7 +32,12 @@ type DashboardMetrics = {
   redemptions7d: number;
 };
 
-type Funnel7d = { goals: number; banks: number; practiceStarted: number; practiceCompleted: number; paywallViewed: number; redeemed: number };
+type Funnel7d = {
+  goals: number; banks: number; snapshotStarted: number; snapshotCompleted: number; loginGateViewed: number;
+  formalStarted: number; practiceCompleted: number; reviewViewed: number; nextDayReturned: number; paywallViewed: number; redeemed: number;
+  quizStarted: number; quizCompleted: number; quizShared: number; quizFriendOpened: number; quizFriendStarted: number; quizToDaily: number;
+};
+const EMPTY_FUNNEL: Funnel7d = { goals: 0, banks: 0, snapshotStarted: 0, snapshotCompleted: 0, loginGateViewed: 0, formalStarted: 0, practiceCompleted: 0, reviewViewed: 0, nextDayReturned: 0, paywallViewed: 0, redeemed: 0, quizStarted: 0, quizCompleted: 0, quizShared: 0, quizFriendOpened: 0, quizFriendStarted: 0, quizToDaily: 0 };
 type FrameworkConfig = Record<"resource_card" | "campaign_slot" | "paywall_policy", { published: number; pending: number; draft: number }>;
 
 type DashboardNotice = {
@@ -61,6 +66,7 @@ type DashboardData = {
   recentActivity: ActivityItem[];
   funnel7d: Funnel7d;
   frameworkConfig: FrameworkConfig;
+  coreFlow7d: { started: number; succeeded: number; failed: number; successRate: number | null; medianFirstQuestionMs: number | null; firstQuestionWithin60s: boolean | null };
 };
 
 const EMPTY_METRICS: DashboardMetrics = {
@@ -126,7 +132,8 @@ function normalizeDashboard(raw: Record<string, unknown>): DashboardData {
     todos: normalizeNotices(raw.todos),
     anomalies: normalizeNotices(raw.anomalies),
     recentActivity: normalizeActivities(raw.recentActivity ?? raw.recent_activity),
-    funnel7d: (() => { const value = (raw.funnel7d && typeof raw.funnel7d === "object" ? raw.funnel7d : {}) as Record<string, unknown>; return { goals: number(value.goals), banks: number(value.banks), practiceStarted: number(value.practiceStarted), practiceCompleted: number(value.practiceCompleted), paywallViewed: number(value.paywallViewed), redeemed: number(value.redeemed) }; })(),
+    funnel7d: (() => { const value = (raw.funnel7d && typeof raw.funnel7d === "object" ? raw.funnel7d : {}) as Record<string, unknown>; return Object.fromEntries(Object.keys(EMPTY_FUNNEL).map((key) => [key, number(value[key])])) as unknown as Funnel7d; })(),
+    coreFlow7d: (() => { const value = (raw.coreFlow7d && typeof raw.coreFlow7d === "object" ? raw.coreFlow7d : {}) as Record<string, unknown>; return { started: number(value.started), succeeded: number(value.succeeded), failed: number(value.failed), successRate: value.successRate === null || value.successRate === undefined ? null : number(value.successRate), medianFirstQuestionMs: value.medianFirstQuestionMs === null || value.medianFirstQuestionMs === undefined ? null : number(value.medianFirstQuestionMs), firstQuestionWithin60s: typeof value.firstQuestionWithin60s === "boolean" ? value.firstQuestionWithin60s : null }; })(),
     frameworkConfig: (() => {
       const value = (raw.frameworkConfig && typeof raw.frameworkConfig === "object" ? raw.frameworkConfig : {}) as Record<string, unknown>;
       const row = (key: string) => { const item = (value[key] && typeof value[key] === "object" ? value[key] : {}) as Record<string, unknown>; return { published: number(item.published), pending: number(item.pending), draft: number(item.draft) }; };
@@ -157,7 +164,7 @@ function formatActivityTime(value: string) {
 export default function AdminDashboardPage() {
   const { admin, can } = useAdminSession();
   const { message } = App.useApp();
-  const [data, setData] = useState<DashboardData>({ metrics: EMPTY_METRICS, todos: [], anomalies: [], recentActivity: [], funnel7d: { goals: 0, banks: 0, practiceStarted: 0, practiceCompleted: 0, paywallViewed: 0, redeemed: 0 }, frameworkConfig: { resource_card: { published: 0, pending: 0, draft: 0 }, campaign_slot: { published: 0, pending: 0, draft: 0 }, paywall_policy: { published: 0, pending: 0, draft: 0 } } });
+  const [data, setData] = useState<DashboardData>({ metrics: EMPTY_METRICS, todos: [], anomalies: [], recentActivity: [], funnel7d: EMPTY_FUNNEL, coreFlow7d: { started: 0, succeeded: 0, failed: 0, successRate: null, medianFirstQuestionMs: null, firstQuestionWithin60s: null }, frameworkConfig: { resource_card: { published: 0, pending: 0, draft: 0 }, campaign_slot: { published: 0, pending: 0, draft: 0 }, paywall_policy: { published: 0, pending: 0, draft: 0 } } });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -211,9 +218,14 @@ export default function AdminDashboardPage() {
     can("radar.read") && { label: "更新公考雷达", description: "公告、节点与职位数据", href: "/admin/radar", icon: <RadarChartOutlined /> },
     can("growth.read") && { label: "生成兑换码", description: "配置会员时长与批次", href: "/admin/growth", icon: <GiftOutlined /> },
   ].filter(Boolean) as Array<{ label: string; description: string; href: string; icon: React.ReactNode }>;
-  const funnelStages = [
-    ["完成目标配置", data.funnel7d.goals], ["加入可练题库", data.funnel7d.banks], ["开始首次训练", data.funnel7d.practiceStarted],
-    ["完成至少5题", data.funnel7d.practiceCompleted], ["查看权益", data.funnel7d.paywallViewed], ["兑换激活", data.funnel7d.redeemed],
+  const learningFunnelStages = [
+    ["选择目标", data.funnel7d.goals], ["开始快照", data.funnel7d.snapshotStarted], ["完成快照", data.funnel7d.snapshotCompleted],
+    ["进入登录", data.funnel7d.loginGateViewed], ["正式训练", data.funnel7d.formalStarted], ["完成日练", data.funnel7d.practiceCompleted],
+    ["查看复盘", data.funnel7d.reviewViewed], ["次日返回", data.funnel7d.nextDayReturned], ["兑换激活", data.funnel7d.redeemed],
+  ] as Array<[string, number]>;
+  const quizFunnelStages = [
+    ["开始测试", data.funnel7d.quizStarted], ["生成结果", data.funnel7d.quizCompleted], ["点击分享", data.funnel7d.quizShared],
+    ["好友打开", data.funnel7d.quizFriendOpened], ["好友开测", data.funnel7d.quizFriendStarted], ["进入日练", data.funnel7d.quizToDaily],
   ] as Array<[string, number]>;
   const configRows = [
     ["资料入口", "resource_card"], ["营销活动", "campaign_slot"], ["权益策略", "paywall_policy"],
@@ -253,15 +265,36 @@ export default function AdminDashboardPage() {
           </div>
 
           <div className="admin-dashboard-grid primary admin-framework-overview">
-            <ProCard className="admin-work-card" title="关键转化漏斗" extra={<Text type="secondary">近7日去重用户</Text>}>
-              <div className="admin-funnel-row">{funnelStages.map(([label, value], index) => {
-                const previous = index > 0 ? funnelStages[index - 1][1] : value;
+            <ProCard className="admin-work-card" title="核心流程验收" extra={<Text type="secondary">近7日真实用户</Text>}>
+              <div className="admin-health-list">
+                <div><span><strong>首次进入第一题中位时间</strong><small>目标不超过60秒</small></span><b className={data.coreFlow7d.firstQuestionWithin60s === false ? "warning" : "success"}>{data.coreFlow7d.medianFirstQuestionMs === null ? "待积累" : `${Math.round(data.coreFlow7d.medianFirstQuestionMs / 100) / 10}秒`}</b></div>
+                <div><span><strong>核心流程成功率</strong><small>{data.coreFlow7d.succeeded}/{data.coreFlow7d.started} 次</small></span><b className={(data.coreFlow7d.successRate ?? 100) < 99.5 ? "warning" : "success"}>{data.coreFlow7d.successRate === null ? "待积累" : `${data.coreFlow7d.successRate}%`}</b></div>
+              </div>
+            </ProCard>
+            <ProCard className="admin-work-card" title="关键转化漏斗（学习）" extra={<Text type="secondary">近7日去重用户</Text>}>
+              <div className="admin-funnel-row">{learningFunnelStages.map(([label, value], index) => {
+                const previous = index > 0 ? learningFunnelStages[index - 1][1] : value;
+                const rate = previous > 0 ? Math.min(100, Math.round(value / previous * 100)) : 0;
+                return <article key={label}><span>{index + 1}</span><b>{value}</b><small>{label}</small>{index > 0 && <em>{rate}%</em>}</article>;
+              })}</div>
+            </ProCard>
+            <ProCard className="admin-work-card" title="局长思维传播漏斗" extra={<Text type="secondary">独立于学习诊断</Text>}>
+              <div className="admin-funnel-row">{quizFunnelStages.map(([label, value], index) => {
+                const previous = index > 0 ? quizFunnelStages[index - 1][1] : value;
                 const rate = previous > 0 ? Math.min(100, Math.round(value / previous * 100)) : 0;
                 return <article key={label}><span>{index + 1}</span><b>{value}</b><small>{label}</small>{index > 0 && <em>{rate}%</em>}</article>;
               })}</div>
             </ProCard>
             <ProCard className="admin-work-card" title="框架配置运行状态" extra={<Link href="/admin/content">进入配置</Link>}>
-              <div className="admin-config-health">{configRows.map(([label, key]) => { const item = data.frameworkConfig[key]; return <article key={key}><div><strong>{label}</strong><small>已发布 {item.published} · 待审核 {item.pending} · 草稿 {item.draft}</small></div><Tag color={item.published ? "success" : "warning"}>{item.published ? "运行中" : "待配置"}</Tag></article>; })}</div>
+              <div className="admin-health-list">
+                {configRows.map(([label, key]) => {
+                  const item = data.frameworkConfig[key];
+                  return <div key={key}>
+                    <span><strong>{label}</strong><small>待审核 {item.pending} · 草稿 {item.draft}</small></span>
+                    <b className={item.published > 0 ? "success" : "warning"}>{item.published > 0 ? `已发布 ${item.published}` : "暂无已发布配置"}</b>
+                  </div>;
+                })}
+              </div>
             </ProCard>
           </div>
 

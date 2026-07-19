@@ -276,12 +276,17 @@ function requestMetadata(request: Request) {
   };
 }
 
+function adminCookieSecurityAttributes() {
+  if (process.env.ADMIN_INSECURE_LOCAL_PREVIEW === "1") return "HttpOnly; SameSite=Strict";
+  return "HttpOnly; Secure; SameSite=Strict";
+}
+
 function sessionCookie(token: string) {
-  return `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_SESSION_SECONDS}`;
+  return `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; ${adminCookieSecurityAttributes()}; Max-Age=${ADMIN_SESSION_SECONDS}`;
 }
 
 export function expiredAdminCookie() {
-  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  return `${ADMIN_SESSION_COOKIE}=; Path=/; ${adminCookieSecurityAttributes()}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 }
 
 function serializeAdmin(row: AdminUserRow, sessionId: string, expiresAt: string): AdminIdentity | null {

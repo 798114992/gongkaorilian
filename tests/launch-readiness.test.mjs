@@ -52,5 +52,5 @@ test("考生可从我的页面查看账号同步、权益找回和售后规则",
   assert.match(learner, /账号、权益与售后/);
   assert.match(learner, /请勿发送完整兑换码、登录凭证或任何账号密码/);
   assert.match(learner, /在完成真机验收前，本产品不会宣称已支持微信登录或订阅消息/);
-  assert.match(layout, /gongkao-rilian-2026\.sanzhu7758\.chatgpt\.site/);
+  assert.match(layout, /kaogongchensilu\.com/);
 });

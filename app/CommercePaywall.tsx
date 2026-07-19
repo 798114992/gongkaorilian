@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import styles from "./CommercePaywall.module.css";
 
-export type PaywallReason = "daily_limit" | "second_bank" | "essay" | "radar" | "value_loop";
+export type PaywallReason = "daily_limit" | "second_bank" | "essay" | "radar" | "value_loop" | "resource";
 
 type CommerceProduct = {
   id: string;
@@ -32,6 +32,9 @@ type ProductsResponse = {
   testMode: boolean;
   membershipActive: boolean;
   notice: string;
+  officialAccountName: string;
+  purchaseUrl: string;
+  purchaseInstructions: string;
 };
 
 type OrderResponse = {
@@ -87,9 +90,14 @@ const reasonCopy: Record<PaywallReason, { eyebrow: string; title: string; detail
     title: "根据报考条件筛选职位",
     detail: "开通后可同时筛国考和多个省考，按学历、专业、身份等条件匹配，并收藏、横向对比职位。",
   },
+  resource: {
+    eyebrow: "会员资料",
+    title: "解锁完整资料内容",
+    detail: "资料目录可免费查询；激活会员权益后，可查看标注为会员专享的试卷、材料与参考答案。",
+  },
   value_loop: {
     eyebrow: "公考日练终身会员",
-    title: "按每日10–60分钟完成重点训练",
+    title: "每天10—60分钟，系统根据你的考试目标和学习情况，直接安排今天最值得完成的训练",
     detail: "会员可使用多题库组合、每日真题、申论微练、错题间隔复习和学习诊断。",
   },
 };
@@ -190,6 +198,15 @@ export default function CommercePaywall({
     onOpenRedemption();
   };
 
+  const openOfficialPurchase = () => {
+    if (!catalog?.purchaseUrl) return;
+    trackEvent("paywall_action", { reason, action: "open_official_account", officialAccountName: catalog.officialAccountName });
+    try {
+      window.sessionStorage.setItem("gkr-official-purchase-return-v1", JSON.stringify({ returnContext, reason, href: window.location.href, createdAt: Date.now() }));
+    } catch { /* 返回页仍可通过兑换码继续 */ }
+    window.location.assign(catalog.purchaseUrl);
+  };
+
   return (
     <div className={styles.backdrop} role="dialog" aria-modal="true" aria-labelledby="commerce-paywall-title">
       <section className={styles.card}>
@@ -241,11 +258,11 @@ export default function CommercePaywall({
               ? <button className={styles.primary} type="button" disabled={submitting} onClick={() => void completeOrder()}>{submitting ? "发放中…" : "确认测试支付并发放权益（不扣款）"}</button>
               : <button className={styles.primary} type="button" disabled={submitting || !product} onClick={() => void createOrder()}>{submitting ? "创建中…" : "创建测试订单（不会扣款）"}</button>
           ) : (
-            <button className={styles.primary} type="button" disabled>请前往官方公众号购买兑换码</button>
+            <button className={styles.primary} type="button" disabled={!catalog?.purchaseUrl} onClick={openOfficialPurchase}>{catalog?.purchaseUrl ? `前往${catalog.officialAccountName || "官方公众号"}购买` : "公众号购买入口待配置"}</button>
           )}
           <button className={styles.secondary} type="button" onClick={openRedemption}>已有兑换码，立即激活</button>
         </div>
-        <p className={styles.footnote}>当前不支持应用内直接付款；请通过官方公众号购买兑换码后返回激活。</p>
+        <p className={styles.footnote}>{catalog?.purchaseInstructions || "当前不支持应用内直接付款；请通过官方公众号购买兑换码后返回激活。"}</p>
       </section>
     </div>
   );

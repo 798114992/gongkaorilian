@@ -2,7 +2,7 @@ import { env } from "@runtime-env";
 
 let schemaReady = false;
 let schemaPromise: Promise<void> | null = null;
-const RUNTIME_SCHEMA_VERSION = "21";
+const RUNTIME_SCHEMA_VERSION = "22";
 const MIN_COMPATIBLE_RUNTIME_SCHEMA_VERSION = Number(RUNTIME_SCHEMA_VERSION);
 
 function runtimeSchemaVersionIsCompatible(value: unknown) {
@@ -315,6 +315,7 @@ async function initializeSchema() {
       grant_type TEXT NOT NULL DEFAULT 'duration',
       duration_days INTEGER NOT NULL,
       channel TEXT NOT NULL DEFAULT 'manual',
+      created_by TEXT NOT NULL DEFAULT 'system',
       max_uses INTEGER NOT NULL DEFAULT 1,
       used_count INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'active',
@@ -327,6 +328,10 @@ async function initializeSchema() {
       code_id INTEGER NOT NULL,
       user_id TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
+      membership_before_type TEXT,
+      membership_before_end TEXT,
+      membership_after_type TEXT,
+      membership_after_end TEXT,
       redeemed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       completed_at TEXT
     )`),
@@ -932,10 +937,15 @@ async function initializeSchema() {
   await ensureColumns(db, "redemption_codes", [
     { name: "grant_type", definition: "TEXT NOT NULL DEFAULT 'duration'" },
     { name: "channel", definition: "TEXT NOT NULL DEFAULT 'manual'" },
+    { name: "created_by", definition: "TEXT NOT NULL DEFAULT 'system'" },
   ]);
   await ensureColumns(db, "redemptions", [
     { name: "status", definition: "TEXT NOT NULL DEFAULT 'pending'" },
     { name: "completed_at", definition: "TEXT" },
+    { name: "membership_before_type", definition: "TEXT" },
+    { name: "membership_before_end", definition: "TEXT" },
+    { name: "membership_after_type", definition: "TEXT" },
+    { name: "membership_after_end", definition: "TEXT" },
   ]);
   await ensureColumns(db, "user_states", [
     { name: "version", definition: "INTEGER NOT NULL DEFAULT 0" },
@@ -1030,6 +1040,7 @@ async function initializeSchema() {
     { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
     { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
   ]);
   await ensureColumns(db, "question_bank_items", [
@@ -1171,7 +1182,7 @@ async function deployedSchemaIsCurrent() {
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_answer_sources') AS essay_sources,
       EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'essay_reference_answers') AS essay_answers,
       (SELECT COUNT(*) FROM pragma_table_info('question_banks')
-        WHERE name IN ('paper_type','source_url','resource_url','library_enabled','library_status')) AS essay_bank_columns,
+        WHERE name IN ('paper_type','source_url','resource_url','library_enabled','library_access_level','library_status')) AS essay_bank_columns,
       (SELECT COUNT(*) FROM pragma_table_info('question_bank_items')
         WHERE name IN ('question_number','score')) AS essay_item_columns,
       (SELECT COUNT(*) FROM pragma_table_info('essay_library_materials')
@@ -1200,7 +1211,7 @@ async function deployedSchemaIsCurrent() {
       && Number(state.quiz_tests) === 1 && Number(state.quiz_questions) === 1 && Number(state.quiz_attempts) === 1
       && Number(state.essay_materials) === 1 && Number(state.essay_question_materials) === 1
       && Number(state.essay_sources) === 1 && Number(state.essay_answers) === 1
-      && Number(state.essay_bank_columns) === 5 && Number(state.essay_item_columns) === 2
+      && Number(state.essay_bank_columns) === 6 && Number(state.essay_item_columns) === 2
       && Number(state.essay_material_columns) === 5 && Number(state.essay_question_material_columns) === 3
       && Number(state.essay_source_columns) === 4 && Number(state.essay_answer_columns) === 9
       // Database migrations are forward-only. A failed application rollback can
@@ -1226,6 +1237,7 @@ async function upgradeRuntimeSchemaFrom17() {
     { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
     { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
   ]);
   await ensureColumns(db, "question_bank_items", [
@@ -1267,6 +1279,7 @@ async function upgradeRuntimeSchemaFrom18() {
     { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
     { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
   ]);
   await ensureColumns(db, "question_bank_items", [
@@ -1296,6 +1309,7 @@ async function upgradeRuntimeSchemaFrom19() {
     { name: "source_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "resource_url", definition: "TEXT NOT NULL DEFAULT ''" },
     { name: "library_enabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
     { name: "library_status", definition: "TEXT NOT NULL DEFAULT 'draft'" },
   ]);
   await ensureColumns(db, "question_bank_items", [
@@ -1319,6 +1333,9 @@ async function upgradeRuntimeSchemaFrom20() {
     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user_daily_queue_items') AS queue_ready`)
     .first<{ version: string; prior_schema_ready: number; queue_ready: number }>();
   if (String(state?.version ?? "") !== "20" || Number(state?.prior_schema_ready ?? 0) !== 1) return false;
+  await ensureColumns(db, "question_banks", [
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
+  ]);
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS user_daily_queue_items (
       id TEXT PRIMARY KEY,
@@ -1349,6 +1366,22 @@ async function upgradeRuntimeSchemaFrom20() {
   return true;
 }
 
+async function upgradeRuntimeSchemaFrom21() {
+  const db = getD1();
+  const state = await db.prepare(`SELECT
+    COALESCE((SELECT value FROM configs WHERE key = 'runtime_schema_version'), '') AS version,
+    EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'question_banks') AS question_banks_ready`)
+    .first<{ version: string; question_banks_ready: number }>();
+  if (String(state?.version ?? "") !== "21" || Number(state?.question_banks_ready ?? 0) !== 1) return false;
+  await ensureColumns(db, "question_banks", [
+    { name: "library_access_level", definition: "TEXT NOT NULL DEFAULT 'free'" },
+  ]);
+  await db.prepare(`INSERT INTO configs (key, value, updated_at) VALUES ('runtime_schema_version', ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+    .bind(RUNTIME_SCHEMA_VERSION).run();
+  return true;
+}
+
 export async function ensureSchema() {
   if (schemaReady) return;
   if (!schemaPromise) {
@@ -1370,7 +1403,8 @@ export async function ensureSchema() {
       // production upgrade bounded and explicit so a cold request can advance
       // one known schema version without invoking the legacy full bootstrap.
       if (await upgradeRuntimeSchemaFrom17() || await upgradeRuntimeSchemaFrom18()
-        || await upgradeRuntimeSchemaFrom19() || await upgradeRuntimeSchemaFrom20()) {
+        || await upgradeRuntimeSchemaFrom19() || await upgradeRuntimeSchemaFrom20()
+        || await upgradeRuntimeSchemaFrom21()) {
         schemaReady = true;
         return;
       }

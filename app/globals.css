@@ -2018,6 +2018,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .invite-panel-primary > small { margin-top: 9px; color: #5e7181; }
 .invite-primary-stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 8px; }
 .invite-primary-stats b { color: var(--blue); font-size: 10px; }
+.invite-share-link { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-top: 9px; border-radius: 11px; padding: 8px 10px; background: #eef5fa; color: var(--muted); font-size: 8px; }
+.invite-share-link code { overflow: hidden; color: var(--navy); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.invite-share-link button { border: 0; padding: 4px 6px; color: var(--blue); background: transparent; font-size: 8px; font-weight: 900; }
+.invite-rules { margin-top: 8px; color: var(--muted); font-size: 8px; }
+.invite-rules summary { color: var(--blue); cursor: pointer; font-weight: 800; }
+.invite-rules p { margin: 7px 0 0; line-height: 1.65; }
 
 .me-section { margin-top: 20px; }
 .me-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 3px 9px; }

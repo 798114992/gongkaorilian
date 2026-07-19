@@ -612,6 +612,22 @@ export default function AdminContentManager({
     }
   };
 
+  const uploadResourceAsset = async (file: File) => {
+    if (!file.type.startsWith("image/") && file.type !== "application/pdf") return onMessage("资料入口支持上传PDF或图片文件");
+    setUploadingAsset(true);
+    try {
+      const url = await uploadMediaFile(file);
+      setLastAsset({ name: file.name, url });
+      setField("actionType", "resource_asset");
+      setField("actionTarget", url);
+      onMessage("资料已上传并自动关联到当前入口");
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "资料上传失败");
+    } finally {
+      setUploadingAsset(false);
+    }
+  };
+
   const setMediaAccess = async (id: string, accessLevel: "free" | "member") => {
     try {
       await api({ action: "adminSetMediaAccess", id, accessLevel });
@@ -976,7 +992,8 @@ export default function AdminContentManager({
     </>;
     if (draft.contentType === "resource_card") return <>
       {selectInput("placement", "展示层级", [["primary", "主资料入口"], ["support", "辅助资料入口"]])}{textInput("eyebrow", "栏目角标", "免费开放")}{textInput("icon", "图标文字", "资")}{selectInput("tone", "主题颜色", [["blue", "公考蓝"], ["green", "成长绿"], ["orange", "活力橙"], ["purple", "进阶紫"]])}
-      {selectInput("actionType", "点击动作", [["tab", "打开站内板块"], ["essay_library", "打开申论答案对比"], ["quiz", "打开趣味测试"], ["paywall", "打开权益说明"]])}{textInput("actionTarget", "动作目标", "resources / calendar / radar")}{textInput("actionLabel", "按钮文案", "查看资料")}{numberInput("sortOrder", "展示顺序", 0, 9999)}
+      {selectInput("actionType", "点击动作", [["tab", "打开站内板块"], ["essay_library", "打开申论答案对比"], ["resource_asset", "打开上传的资料文件"], ["quiz", "打开趣味测试"], ["paywall", "打开权益说明"]])}{textInput("actionTarget", "动作目标或资料地址", "resources / /api/app?media=...")}{textInput("actionLabel", "按钮文案", "查看资料")}{numberInput("sortOrder", "展示顺序", 0, 9999)}
+      <label className="wide">上传资料文件<div className={styles.mediaRow}><input value={asText(p.actionTarget)} readOnly placeholder="上传后自动回填站内受保护地址" /><label className={styles.uploadButton}><input disabled={!canUpload} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadResourceAsset(file); }} />{uploadingAsset ? "上传中…" : canUpload ? "选择PDF或图片" : "无上传权限"}</label></div><small>资料权限由上方“免费/会员”控制；免费资料需审核后开放，会员资料只向有效会员提供。</small></label>
       {textInput("targetCodes", "适用考试", "留空表示全部")}{textArea("summary", "入口说明", "说明用户进入后能获得什么")}{textArea("meta", "辅助信息", "筛选维度、资料范围或使用提示")}
     </>;
     if (draft.contentType === "campaign_slot") return <>
@@ -986,8 +1003,8 @@ export default function AdminContentManager({
       {textArea("summary", "活动说明", "一句话说明参与价值")}
     </>;
     if (draft.contentType === "paywall_policy") return <>
-      {selectInput("triggerEvent", "触发事件", [["free_daily_limit_hit", "免费题量已用完"], ["second_bank_attempt", "添加第二套题库"], ["essay_practice_attempt", "进入会员申论练习"], ["radar_position_save_attempt", "收藏会员职位"], ["radar_position_compare_attempt", "对比会员职位"], ["audio_member_attempt", "播放会员音频"], ["manual_benefits_open", "主动查看权益"]])}
-      {selectInput("reason", "权益类型", [["daily_limit", "日练题量"], ["second_bank", "多题库"], ["essay", "申论练习"], ["radar", "公考雷达"], ["value_loop", "完整会员权益"]])}{textInput("eyebrow", "权益角标", "公考日练会员")}{selectInput("audience", "适用人群", [["non_member", "非会员"], ["new_user", "新用户"], ["all", "全部用户"], ["member", "会员"]])}
+      {selectInput("triggerEvent", "触发事件", [["free_daily_limit_hit", "免费题量已用完"], ["second_bank_attempt", "添加第二套题库"], ["essay_practice_attempt", "进入会员申论练习"], ["radar_position_save_attempt", "收藏会员职位"], ["radar_position_compare_attempt", "对比会员职位"], ["audio_member_attempt", "播放会员音频"], ["member_resource_attempt", "查看会员资料"], ["manual_benefits_open", "主动查看权益"]])}
+      {selectInput("reason", "权益类型", [["daily_limit", "日练题量"], ["second_bank", "多题库"], ["essay", "申论练习"], ["radar", "公考雷达"], ["resource", "会员资料"], ["value_loop", "完整会员权益"]])}{textInput("eyebrow", "权益角标", "公考日练会员")}{selectInput("audience", "适用人群", [["non_member", "非会员"], ["new_user", "新用户"], ["all", "全部用户"], ["member", "会员"]])}
       {numberInput("priority", "策略优先级", 0, 999)}{numberInput("maxPerDay", "每日最多弹出", 1, 10)}{numberInput("cooldownHours", "关闭冷却小时", 0, 720)}{textArea("detail", "权益说明", "说明当前进度会保留，以及激活后可继续的能力")}
     </>;
     return <>

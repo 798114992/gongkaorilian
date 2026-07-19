@@ -1,6 +1,6 @@
 const STATES = new Set([
-  "needs_target", "needs_bank", "critical_exam", "resume_session", "sync_checkin",
-  "first_practice", "first_result", "due_review", "morning", "practice", "essay", "complete",
+  "needs_target", "needs_bank", "resume_session", "first_practice", "first_result", "needs_login", "sync_checkin",
+  "due_review", "morning", "practice", "essay", "complete",
 ]);
 
 /**
@@ -14,11 +14,12 @@ export function resolveDailyPrimaryTask(input) {
   let state = "complete";
   if (!input.onboarded || input.targetCount < 1) state = "needs_target";
   else if (!input.dailyReady) state = "needs_bank";
-  else if (input.criticalReminderId) state = "critical_exam";
-  else if (activeToday) state = "resume_session";
-  else if (input.dailyTasksDone && !input.checkinDone) state = "sync_checkin";
+  else if (activeToday && input.activeSessionKind === "diagnostic") state = "resume_session";
   else if (!input.firstCompletedSessionId) state = "first_practice";
   else if (input.firstCompletedSessionId !== input.firstResultSeenSessionId) state = "first_result";
+  else if (!input.signedIn) state = "needs_login";
+  else if (activeToday) state = "resume_session";
+  else if (input.dailyTasksDone && !input.checkinDone) state = "sync_checkin";
   else if (input.dueCount > 0 && input.practiceEnabled && !input.practiceDone) state = "due_review";
   else if (input.morningEnabled && !input.morningDone) state = "morning";
   else if (input.practiceEnabled && !input.practiceDone) state = "practice";

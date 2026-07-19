@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("today page prioritizes urgent exam actions and evidence-based point recommendations", async () => {
+test("today page keeps one training primary action and demotes urgent exam actions to reminders", async () => {
   const [app, route, css, quiz] = await Promise.all([
     readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
@@ -12,7 +12,8 @@ test("today page prioritizes urgent exam actions and evidence-based point recomm
 
   assert.match(app, /criticalReminder/);
   assert.match(app, /resolveDailyPrimaryTask/);
-  assert.match(app, /primaryTodayState === "critical_exam"/);
+  assert.doesNotMatch(app, /primaryTodayState === "critical_exam"/);
+  assert.match(app, /className="today-primary-action"/);
   assert.match(app, /recommendationPoint/);
   assert.match(app, /recommendationEvidence/);
   assert.match(app, /today-gain-disclosure/);

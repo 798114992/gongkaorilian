@@ -23,6 +23,21 @@ test("资料、营销位和权益策略共用受审核的内容配置体系", as
   assert.match(app, /isCampaignVisible/);
 });
 
+test("资料入口可混合展示免费和会员文件且文件继续使用服务端鉴权", async () => {
+  const [route, app] = await files;
+  const admin = await readFile(new URL("../app/admin/AdminContentManager.tsx", import.meta.url), "utf8");
+  assert.deepEqual(validatePublishableContent("resource_card", {
+    title: "会员资料", summary: "示例", actionLabel: "查看资料", actionType: "resource_asset",
+    actionTarget: "/api/app?media=12345678-1234-1234-1234-123456789abc",
+  }), []);
+  assert.match(route, /access_level = 'free' OR content_type = 'resource_card'/);
+  assert.match(route, /actionType === "resource_asset" && managedMediaAssetId/);
+  assert.match(app, /card\.accessLevel === "member" && !bootstrap\?\.user\.membershipActive/);
+  assert.match(app, /window\.open\(`\$\{target\.pathname\}\$\{target\.search\}`/);
+  assert.match(admin, /uploadResourceAsset/);
+  assert.match(admin, /打开上传的资料文件/);
+});
+
 test("首次训练状态在启动数据加载前保持空值安全", async () => {
   const [, app] = await files;
   assert.match(app, /const firstCompletedPractice = bootstrap\?\.firstCompletedPractice \?\? null/);

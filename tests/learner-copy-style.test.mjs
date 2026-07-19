@@ -44,7 +44,7 @@ test("learner-facing study copy uses consistent professional terminology", async
     "完成练习后展示实际学习结果",
   ]) assert.doesNotMatch(learnerCopy, new RegExp(phrase));
 
-  assert.match(daily, /每天10–60分钟，完成重点训练/);
+  assert.match(daily, /每天10—60分钟，系统根据你的考试目标和学习情况，直接安排今天最值得完成的训练/);
   assert.match(daily, /仅统计地区、年份匹配且已核验的非重复真题/);
   assert.match(daily, /时间与资格条件以招录机关官方发布为准/);
 

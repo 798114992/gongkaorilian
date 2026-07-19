@@ -13,7 +13,7 @@ test("加入今日使用云端队列表，并由日练组题读取优先题库",
     read("app/DailyPracticeApp.tsx"),
   ]);
   assert.match(schema, /userDailyQueueItems/);
-  assert.match(runtime, /RUNTIME_SCHEMA_VERSION = "21"/);
+  assert.match(runtime, /RUNTIME_SCHEMA_VERSION = "22"/);
   assert.match(runtime, /upgradeRuntimeSchemaFrom20/);
   assert.match(route, /async function addTodayItem/);
   assert.match(route, /async function updateTodayItem/);

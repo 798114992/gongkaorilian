@@ -196,10 +196,10 @@ function runRedemptionBatch(db, sql, userId, { fail = false, codeId = 1 } = {}) 
   const sourceId = `redeem:${codeId}:${userId}`;
   return atomic(db, () => {
     db.prepare(sql.cleanup).run(codeId);
-    db.prepare(sql.claim).run(userId, codeId);
+    db.prepare(sql.claim).run(userId, userId, codeId);
     const ledger = db.prepare(sql.ledger).run(userId, 7, sourceId, "兑换 7 天会员", codeId, userId);
     db.prepare(sql.extend).run("+7 days", userId);
-    db.prepare(sql.complete).run(codeId, userId, userId, sourceId);
+    db.prepare(sql.complete).run(userId, userId, codeId, userId, userId, sourceId);
     db.prepare(sql.recount).run(codeId, codeId);
     if (fail) db.exec("INSERT INTO table_that_does_not_exist VALUES (1)");
     return ledger.changes;
@@ -226,7 +226,10 @@ test("redemption claim, ledger, membership and completed capacity commit or roll
     );
     CREATE TABLE redemptions (
       id INTEGER PRIMARY KEY AUTOINCREMENT, code_id INTEGER NOT NULL, user_id TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending', completed_at TEXT, redeemed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      status TEXT NOT NULL DEFAULT 'pending',
+      membership_before_type TEXT, membership_before_end TEXT,
+      membership_after_type TEXT, membership_after_end TEXT,
+      completed_at TEXT, redeemed_at TEXT DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(code_id, user_id)
     );
     CREATE TABLE membership_ledger (
@@ -246,6 +249,13 @@ test("redemption claim, ledger, membership and completed capacity commit or roll
   assert.equal(runRedemptionBatch(db, sql, "user_a"), 1);
   const firstEnd = db.prepare("SELECT membership_end FROM users WHERE id = 'user_a'").get().membership_end;
   assert.equal(db.prepare("SELECT status FROM redemptions WHERE user_id = 'user_a'").get().status, "completed");
+  assert.deepEqual({ ...db.prepare(`SELECT membership_before_type, membership_before_end,
+    membership_after_type, membership_after_end FROM redemptions WHERE user_id = 'user_a'`).get() }, {
+    membership_before_type: "duration",
+    membership_before_end: null,
+    membership_after_type: "duration",
+    membership_after_end: firstEnd,
+  });
   assert.equal(db.prepare("SELECT used_count FROM redemption_codes WHERE id = 1").get().used_count, 1);
   assert.equal(runRedemptionBatch(db, sql, "user_a"), 0);
   assert.equal(db.prepare("SELECT membership_end FROM users WHERE id = 'user_a'").get().membership_end, firstEnd,
@@ -271,7 +281,7 @@ test("redemption claim, ledger, membership and completed capacity commit or roll
       (user_id, delta_days, source_type, source_id, note) VALUES (?, 7, 'redeem', ?, '旧版本在途发放')`)
       .run("old_user", oldSource);
     db.prepare(sql.extend).run("+7 days", "old_user");
-    db.prepare(sql.complete).run(2, "old_user", "old_user", oldSource);
+    db.prepare(sql.complete).run("old_user", "old_user", 2, "old_user", "old_user", oldSource);
     db.prepare(sql.recount).run(2, 2);
   });
   assert.equal(db.prepare("SELECT used_count FROM redemption_codes WHERE id = 2").get().used_count, 1);

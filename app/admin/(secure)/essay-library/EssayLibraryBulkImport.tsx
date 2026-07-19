@@ -39,6 +39,7 @@ type PaperRow = {
   paperType: string;
   sourceUrl: string;
   resourceUrl: string;
+  accessLevel: "free" | "member";
 };
 
 type MaterialRow = {
@@ -106,7 +107,7 @@ type Props = {
 };
 
 const SHEET_HEADERS: Record<SheetName, string[]> = {
-  试卷: ["试卷编码", "试卷名称", "考试类型", "地区", "年份", "卷种", "试卷来源链接", "PDF或资料链接"],
+  试卷: ["试卷编码", "试卷名称", "考试类型", "地区", "年份", "卷种", "查看权益", "试卷来源链接", "PDF或资料链接"],
   材料: ["试卷编码", "材料编号", "材料标题", "材料正文", "排序"],
   题目: ["试卷编码", "题目编码", "题号", "题干", "题型", "分值", "字数限制", "关联材料编号", "排序"],
   答案来源: ["来源标识", "显示名称", "官方主页", "排序", "状态"],
@@ -162,6 +163,7 @@ function parseRows(rowsBySheet: Partial<Record<SheetName, RawRow[]>>) {
 
   for (const [index, row] of (rowsBySheet.试卷 ?? []).entries()) {
     const rowNumber = index + 2;
+    const accessLabel = text(row.查看权益, 20).toLowerCase();
     const value: PaperRow = {
       code: text(row.试卷编码, 80).toLowerCase(),
       title: text(row.试卷名称, 160),
@@ -171,6 +173,7 @@ function parseRows(rowsBySheet: Partial<Record<SheetName, RawRow[]>>) {
       paperType: text(row.卷种, 60),
       sourceUrl: text(row.试卷来源链接, 1000),
       resourceUrl: text(row.PDF或资料链接, 1000),
+      accessLevel: ["会员", "会员专享", "member"].includes(accessLabel) ? "member" : "free",
     };
     if (!value.code) issues.push(issue("error", "试卷", rowNumber, "试卷编码", "不能为空"));
     else if (!CODE_PATTERN.test(value.code)) issues.push(issue("error", "试卷", rowNumber, "试卷编码", "仅允许2—80位小写字母、数字、下划线和连字符"));
@@ -179,6 +182,9 @@ function parseRows(rowsBySheet: Partial<Record<SheetName, RawRow[]>>) {
     if (value.examYear < 2000 || value.examYear > 2200) issues.push(issue("error", "试卷", rowNumber, "年份", "须为2000—2200之间的年份"));
     if (!isHttps(value.sourceUrl)) issues.push(issue("error", "试卷", rowNumber, "试卷来源链接", "必须是HTTPS链接"));
     if (!isHttps(value.resourceUrl)) issues.push(issue("error", "试卷", rowNumber, "PDF或资料链接", "必须是HTTPS链接"));
+    if (accessLabel && !["免费", "免费开放", "free", "会员", "会员专享", "member"].includes(accessLabel)) {
+      issues.push(issue("error", "试卷", rowNumber, "查看权益", "仅支持免费或会员"));
+    }
     parsed.papers.push({ sheet: "试卷", row: rowNumber, value });
   }
 

@@ -3,7 +3,7 @@ import test from "node:test";
 import { prioritizeTodayItems, resolveCampaignDisplay, resolveDailyPrimaryTask } from "../app/daily-orchestration.mjs";
 
 const ready = {
-  onboarded: true, targetCount: 1, dailyReady: true, criticalReminderId: null,
+  onboarded: true, targetCount: 1, dailyReady: true, signedIn: true,
   activeSessionKind: null, activeSessionDateKey: null, todayKey: "2026-07-17",
   firstCompletedSessionId: "first-1", firstResultSeenSessionId: "first-1",
   dailyTasksDone: false, checkinDone: false, dueCount: 0,
@@ -14,11 +14,11 @@ const ready = {
 for (const [name, overrides, expected] of [
   ["未建目标", { onboarded: false, targetCount: 0 }, "needs_target"],
   ["题库不可执行", { dailyReady: false }, "needs_bank"],
-  ["紧急报考事项优先", { criticalReminderId: "exam-1" }, "critical_exam"],
   ["中断首次体验可恢复", { activeSessionKind: "diagnostic", activeSessionDateKey: "2026-07-17", firstCompletedSessionId: null }, "resume_session"],
-  ["完成任务后同步打卡", { dailyTasksDone: true, checkinDone: false }, "sync_checkin"],
   ["未完成首轮5题", { firstCompletedSessionId: null }, "first_practice"],
   ["首次结果尚未查看", { firstCompletedSessionId: "first-2", firstResultSeenSessionId: "" }, "first_result"],
+  ["游客完成快照后先登录", { signedIn: false }, "needs_login"],
+  ["完成任务后同步打卡", { dailyTasksDone: true, checkinDone: false }, "sync_checkin"],
   ["到期复习优先于晨读", { dueCount: 3 }, "due_review"],
   ["晨读", {}, "morning"],
   ["行测新题", { morningDone: true }, "practice"],

@@ -1,12 +1,12 @@
 export type DailyPrimaryState =
-  | "needs_target" | "needs_bank" | "critical_exam" | "resume_session" | "sync_checkin"
-  | "first_practice" | "first_result" | "due_review" | "morning" | "practice" | "essay" | "complete";
+  | "needs_target" | "needs_bank" | "resume_session" | "first_practice" | "first_result" | "needs_login" | "sync_checkin"
+  | "due_review" | "morning" | "practice" | "essay" | "complete";
 
 export type DailyOrchestrationInput = {
   onboarded: boolean;
   targetCount: number;
   dailyReady: boolean;
-  criticalReminderId: string | null;
+  signedIn: boolean;
   activeSessionKind: "daily" | "diagnostic" | null;
   activeSessionDateKey: string | null;
   todayKey: string;

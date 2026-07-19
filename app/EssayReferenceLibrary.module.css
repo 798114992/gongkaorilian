@@ -141,16 +141,21 @@
 .paperList { display: grid; gap: 12px; }
 .paperCard { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 19px; background: #fff; box-shadow: 0 6px 18px rgb(34 59 76 / 4%); }
 .paperCard:hover { border-color: #bfd3df; box-shadow: 0 10px 24px rgb(34 59 76 / 8%); }
+.paperCardLocked { border-color: #ead8bd; background: linear-gradient(135deg, #fff 0%, #fffaf2 100%); }
+.paperCardLocked:hover { border-color: #d8b77f; }
 .paperMain { display: grid; width: 100%; grid-template-columns: 58px minmax(0, 1fr) 20px; gap: 14px; align-items: center; padding: 17px 54px 17px 17px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .paperMain:disabled { cursor: wait; opacity: .72; }
 .paperMain > .icon { color: #9aacb7; }
 .paperOpening { color: var(--blue); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.paperAccessAction { color: #9a641b; font-size: 11px; font-weight: 850; white-space: nowrap; }
 .paperStamp { display: grid; width: 58px; height: 64px; align-content: center; border: 1px solid #cfe0eb; border-radius: 14px; background: linear-gradient(155deg, #f4faff, #e8f3fa); color: var(--blue); text-align: center; }
 .paperStamp b { font-size: 17px; line-height: 1.1; }
 .paperStamp span { margin-top: 5px; overflow: hidden; font-size: 10px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .paperCopy { min-width: 0; }
 .paperLabels { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
 .paperLabels span { padding: 3px 7px; border-radius: 6px; background: #edf4f8; color: #52738a; font-size: 10px; font-weight: 750; }
+.paperLabels .freeLabel { background: #e9f6ef; color: #287454; }
+.paperLabels .memberLabel { background: #fff0d9; color: #9a641b; }
 .paperCopy h2 { margin: 0; overflow-wrap: anywhere; color: #183247; font-size: 16px; font-weight: 820; line-height: 1.4; }
 .paperCopy p { display: -webkit-box; margin: 5px 0 0; overflow: hidden; color: #718493; font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .paperMeta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 9px; color: #81919d; font-size: 11px; }

@@ -12,6 +12,7 @@ const routeFile = new URL("../app/api/app/route.ts", import.meta.url);
 const libraryFile = new URL("../app/EssayReferenceLibrary.tsx", import.meta.url);
 const learnerAppFile = new URL("../app/DailyPracticeApp.tsx", import.meta.url);
 const schemaFile = new URL("../db/schema.ts", import.meta.url);
+const adminPageFile = new URL("../app/admin/(secure)/essay-library/page.tsx", import.meta.url);
 
 const fullAnswer = {
   id: 101,
@@ -104,6 +105,31 @@ test("the public library API applies the policy before returning answers", async
   assert.match(handler, /publication_status/);
   assert.match(handler, /source_active/);
   assert.match(handler, /contactEmail/);
+});
+
+test("free and member essay resources share one catalog while member bodies stay server protected", async () => {
+  const [route, schema, library, learnerApp, adminPage] = await Promise.all([
+    readFile(routeFile, "utf8"),
+    readFile(schemaFile, "utf8"),
+    readFile(libraryFile, "utf8"),
+    readFile(learnerAppFile, "utf8"),
+    readFile(adminPageFile, "utf8"),
+  ]);
+  const handler = functionSection(route, "getEssayReferenceLibrary");
+
+  assert.match(schema, /libraryAccessLevel: text\("library_access_level"\)\.notNull\(\)\.default\("free"\)/);
+  assert.match(handler, /membershipIsActive\(membership\)/);
+  assert.match(handler, /accessLevel: row\.library_access_level === "member" \? "member" : "free"/);
+  assert.match(handler, /locked: row\.library_access_level === "member" && !memberAccess/);
+  assert.match(handler, /code: "PAYWALL_RESOURCE"/);
+  assert.match(route, /getEssayReferenceLibrary\(identity\.userId, payload\)/);
+  assert.match(library, /paper\.accessLevel === "member"/);
+  assert.match(library, /onUnlockPaper\?\.\(targetPaper\)/);
+  assert.match(library, /"会员" : "免费"/);
+  assert.match(learnerApp, /memberAccess=\{Boolean\(bootstrap\?\.user\.membershipActive\)\}/);
+  assert.match(learnerApp, /openPaywall\("resource"/);
+  assert.match(adminPage, /name="accessLevel" label="查看权益"/);
+  assert.match(adminPage, /value: "member", label: "会员专享"/);
 });
 
 test("answer sources can be disabled at the persistence and RBAC boundaries", async () => {

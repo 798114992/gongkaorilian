@@ -162,6 +162,20 @@
       "when": 1784350426133,
       "tag": "0022_dear_mantis",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1784451215602,
+      "tag": "0023_tearful_the_fallen",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1784453310329,
+      "tag": "0024_aberrant_pixie",
+      "breakpoints": true
     }
   ]
 }

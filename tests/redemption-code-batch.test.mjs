@@ -49,7 +49,7 @@ test("a 200-code admin batch uses one atomic JSON insert and remains collision-s
   assert.doesNotMatch(createCodes, /INSERT OR IGNORE INTO redemption_codes/);
 
   const insertSql = preparedSql(createCodes, "INSERT INTO redemption_codes");
-  assert.equal((insertSql.match(/\?/g) ?? []).length, 7, "the statement must use a bounded parameter count");
+  assert.equal((insertSql.match(/\?/g) ?? []).length, 8, "the statement must use a bounded parameter count");
 
   const db = new DatabaseSync(":memory:");
   db.exec(createTableSql(runtime, "redemption_codes"));
@@ -57,11 +57,11 @@ test("a 200-code admin batch uses one atomic JSON insert and remains collision-s
     codeHash: index.toString(16).padStart(64, "0"),
     codePreview: `TEST-****-${String(index).padStart(4, "0")}`,
   }));
-  db.prepare(insertSql).run("capacity-test", "duration", 365, "manual", 1, null, JSON.stringify(generated));
+  db.prepare(insertSql).run("capacity-test", "duration", 365, "manual", "admin", 1, null, JSON.stringify(generated));
 
   const summary = db.prepare(`SELECT COUNT(*) AS count, COUNT(DISTINCT code_hash) AS unique_count,
     MIN(batch_name) AS batch_name, MIN(grant_type) AS grant_type, MIN(duration_days) AS duration_days,
-    MIN(channel) AS channel, MIN(max_uses) AS max_uses FROM redemption_codes`).get();
+    MIN(channel) AS channel, MIN(created_by) AS created_by, MIN(max_uses) AS max_uses FROM redemption_codes`).get();
   assert.deepEqual({ ...summary }, {
     count: 200,
     unique_count: 200,
@@ -69,6 +69,7 @@ test("a 200-code admin batch uses one atomic JSON insert and remains collision-s
     grant_type: "duration",
     duration_days: 365,
     channel: "manual",
+    created_by: "admin",
     max_uses: 1,
   });
 
@@ -77,7 +78,7 @@ test("a 200-code admin batch uses one atomic JSON insert and remains collision-s
     codePreview: `NEXT-****-${String(index).padStart(4, "0")}`,
   }));
   assert.throws(() => db.prepare(insertSql)
-    .run("collision-test", "duration", 30, "manual", 1, null, JSON.stringify(conflicting)),
+    .run("collision-test", "duration", 30, "manual", "admin", 1, null, JSON.stringify(conflicting)),
   /UNIQUE constraint failed: redemption_codes\.code_hash/);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM redemption_codes").get().count, 200,
     "a conflict must roll back every row in the attempted export");

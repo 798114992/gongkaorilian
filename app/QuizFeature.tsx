@@ -44,6 +44,7 @@ type QuizResult = {
   correctCount: number;
   total: number;
   scorePercent: number;
+  beatPercent: number;
   result: {
     key: string;
     title: string;
@@ -215,6 +216,7 @@ export default function QuizFeature({
         challengeId: incomingChallengeId,
         quizSlug: data.quiz.slug,
       });
+      if (incomingChallengeId) trackEvent("quiz_friend_open", { challengeId: incomingChallengeId, quizSlug: data.quiz.slug });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "测试暂时不可用");
     }
@@ -269,6 +271,7 @@ export default function QuizFeature({
       setSelectedIndex(null);
       setView("question");
       trackEvent("quiz_start", { challengeId: sameChallenge ? challengeId : "" });
+      if (sameChallenge && challengeId) trackEvent("quiz_friend_start", { challengeId });
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "测试暂时无法开始");
     } finally {
@@ -297,6 +300,7 @@ export default function QuizFeature({
         setResult(completed);
         setView("result");
         trackEvent("quiz_complete", { correctCount: completed.correctCount, resultKey: completed.result.key });
+        trackEvent("quiz_result_generated", { correctCount: completed.correctCount, resultKey: completed.result.key, beatPercent: completed.beatPercent });
         onComplete?.();
       } else {
         setCurrentIndex((value) => value + 1);
@@ -349,6 +353,64 @@ export default function QuizFeature({
     } catch {
       notify("复制失败，可以手动复制浏览器地址栏链接");
     }
+  };
+
+  const generateSharePoster = async () => {
+    if (!result) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 1200;
+    const context = canvas.getContext("2d");
+    if (!context) return notify("当前设备暂时无法生成分享图");
+    const gradient = context.createLinearGradient(0, 0, 900, 1200);
+    gradient.addColorStop(0, "#0f4c81");
+    gradient.addColorStop(1, "#2d7fb8");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 900, 1200);
+    context.fillStyle = "rgba(255,255,255,.94)";
+    context.roundRect(70, 70, 760, 1010, 42);
+    context.fill();
+    context.textAlign = "center";
+    context.fillStyle = "#0f4c81";
+    context.font = "700 34px sans-serif";
+    context.fillText("公考日练 · 局长思维小测", 450, 145);
+    context.fillStyle = "#f4a261";
+    context.beginPath();
+    context.arc(450, 330, 112, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = "#fff";
+    context.font = "800 120px sans-serif";
+    context.fillText("局", 450, 373);
+    context.fillStyle = "#14263d";
+    context.font = "800 54px sans-serif";
+    context.fillText(result.result.title, 450, 520);
+    context.font = "700 40px sans-serif";
+    context.fillText(`答对 ${result.correctCount}/${result.total} 题`, 450, 600);
+    context.fillStyle = "#c85a2b";
+    context.font = "800 44px sans-serif";
+    context.fillText(`超过 ${result.beatPercent}% 的测试者`, 450, 675);
+    context.fillStyle = "#53657a";
+    context.font = "30px sans-serif";
+    context.fillText("这只是趣味测试，不构成能力诊断", 450, 760);
+    context.fillStyle = "#0f4c81";
+    context.font = "700 34px sans-serif";
+    context.fillText("长按识别或分享给朋友同题挑战", 450, 920);
+    context.fillStyle = "#8b98a8";
+    context.font = "26px sans-serif";
+    context.fillText("每天10—60分钟，根据目标与学情安排今日训练", 450, 995);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png", 0.92));
+    if (!blob) return notify("分享图生成失败，请稍后重试");
+    await quizApi({ action: "recordQuizShare", attemptId: result.attemptId, eventName: "poster_view" });
+    const file = new File([blob], `公考日练-${result.result.title}.png`, { type: "image/png" });
+    if (navigator.canShare?.({ files: [file] }) && navigator.share) {
+      try { await navigator.share({ files: [file], title: shareTitleFor(result) }); return; } catch (error) { if (error instanceof DOMException && error.name === "AbortError") return; }
+    }
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = file.name;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    notify("分享图已生成并保存");
   };
 
   return (
@@ -452,7 +514,7 @@ export default function QuizFeature({
               <p>{result.result.description}</p>
               <div className="quiz-result-mini-stats">
                 <div><b>{result.correctCount}/{result.total}</b><span>答对题数</span></div>
-                <div><b>{avatarTitleFor(result)}</b><span>头像判词</span></div>
+                <div><b>{result.beatPercent}%</b><span>超过测试者</span></div>
               </div>
               <button className="quiz-card-share-button" onClick={() => void shareResult()}>一键分享结果</button>
               <small className="quiz-share-hint">发给朋友后，对方会进入同一套题的挑战页</small>
@@ -465,11 +527,12 @@ export default function QuizFeature({
             </div>}
             <div className="quiz-result-actions">
               <button className="primary-button" onClick={() => void shareResult()}>一键分享结果</button>
+              <button className="secondary-button" onClick={() => void generateSharePoster()}>生成分享图</button>
               <button className="secondary-button" onClick={() => void copyChallengeLink()}>复制挑战链接</button>
               <button className="secondary-button" onClick={() => setView("review")}>查看全部答案</button>
               <button className="secondary-button" onClick={restart}>不服，再测10道</button>
             </div>
-            <button className="quiz-learn-more" onClick={closeQuiz}>回到今日训练</button>
+            <button className="quiz-learn-more" onClick={() => { trackEvent("quiz_to_daily", { resultKey: result.result.key }); closeQuiz(); }}>进入公考日练</button>
             <small className="quiz-disclaimer">{result.quiz?.disclaimer ?? meta?.disclaimer}</small>
           </div>}
 

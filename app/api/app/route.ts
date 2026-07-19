@@ -29,6 +29,7 @@ import { ABANDONED_DAILY_CARRY_SQL, summarizeDailyCarry } from "./daily-carry.mj
 import { audioReferencePolicy, managedMediaAssetId, mediaUrlForAsset } from "./media-policy.mjs";
 import { validatePublishableContent } from "./content-publishability.mjs";
 import { BOOTSTRAP_MAX_REQUESTS } from "../../bootstrap-retry.mjs";
+import { buildDiagnosisSummary, FORMAL_DIAGNOSIS_POLICY } from "../../diagnosis-policy.mjs";
 import { effectiveDailyPlanMinutes, requiredDailyQuestionCount } from "./daily-plan-policy.mjs";
 import { practiceSessionSubmissionPolicy } from "./practice-session-policy.mjs";
 import {
@@ -102,6 +103,20 @@ const EVENT_NAMES = new Set([
   "plan_override",
   "bank_toggle",
   "profile_save",
+  "target_selected",
+  "snapshot_start",
+  "snapshot_complete",
+  "login_gate_view",
+  "formal_practice_start",
+  "daily_review_view",
+  "next_day_return",
+  "quiz_result_generated",
+  "quiz_friend_open",
+  "quiz_friend_start",
+  "quiz_to_daily",
+  "core_flow_start",
+  "core_flow_success",
+  "core_flow_failure",
   "calendar_event_save",
   "reminder_enable",
   "micro_drill_open",
@@ -1468,7 +1483,7 @@ async function seedDefaultContentOnce() {
     VALUES ('strategy_config', 'strategy-default', '默认日练策略', ?, 'free', 'published', 1)`)
     .bind(JSON.stringify(DEFAULT_STRATEGY)));
   const frameworkContent = [
-    { type: "resource_card", key: "resource-essay-reference", title: "申论真题答案对比", payload: { placement: "primary", eyebrow: "免费开放", summary: "按地区、年份和题型查询同一道申论真题的不同来源参考答案。", meta: "按地区年份筛选｜同题切换来源｜材料与题目对应", actionLabel: "进入答案对比", actionType: "essay_library", actionTarget: "essayLibrary", icon: "对", tone: "blue", sortOrder: 10, enabled: true } },
+    { type: "resource_card", key: "resource-essay-reference", title: "申论真题答案对比", payload: { placement: "primary", eyebrow: "免费与会员资料", summary: "按地区、年份和题型查询同一道申论真题的不同来源参考答案。", meta: "按地区年份筛选｜同题切换来源｜材料与题目对应", actionLabel: "进入答案对比", actionType: "essay_library", actionTarget: "essayLibrary", icon: "对", tone: "blue", sortOrder: 10, enabled: true } },
     { type: "resource_card", key: "resource-radar", title: "公考雷达", payload: { placement: "support", eyebrow: "报考工具", summary: "集中查询公告、考试节点与职位筛选。", meta: "公告｜节点｜职位", actionLabel: "查看雷达", actionType: "tab", actionTarget: "calendar", icon: "雷", tone: "green", sortOrder: 20, enabled: true } },
     { type: "campaign_slot", key: "campaign-director-quiz", title: "测测你有没有“局长”思维？", payload: { slot: "today_after_alerts", eyebrow: "轻松测一测 · 可分享", summary: "独立趣味测试，不计入日练进度。随机10道题，生成段位卡并邀请朋友同题挑战。", actionLabel: "开始测试", actionType: "quiz", actionTarget: "director-thinking", audience: "all", priority: 100, maxPerDay: 1, cooldownHours: 24, hideAfterCompleteDays: 30, tone: "orange", enabled: true } },
     ...[
@@ -1477,6 +1492,7 @@ async function seedDefaultContentOnce() {
       ["essay-practice", "essay_practice_attempt", "essay", "继续申论真题微练"],
       ["radar-save", "radar_position_save_attempt", "radar", "使用完整职位筛选与收藏"],
       ["radar-compare", "radar_position_compare_attempt", "radar", "使用完整职位横向对比"],
+      ["member-resource", "member_resource_attempt", "resource", "查看会员专享资料"],
       ["manual-benefits", "manual_benefits_open", "value_loop", "查看公考日练完整权益"],
     ].map(([key, triggerEvent, reason, title]) => ({ type: "paywall_policy", key: `paywall-${key}`, title, payload: { triggerEvent, reason, eyebrow: "公考日练会员", detail: "当前学习记录和操作进度均会保留，激活权益后可从原位置继续。", audience: "non_member", priority: 100, maxPerDay: 1, cooldownHours: triggerEvent === "manual_benefits_open" ? 0 : 24, enabled: true } })),
   ];
@@ -2034,7 +2050,7 @@ async function addTodayItem(userId: string, payload: Record<string, unknown>) {
     const questionId = Number(sourceId);
     if (!Number.isSafeInteger(questionId) || questionId <= 0) return json({ error: "申论题目编号无效" }, 400);
     const question = await db.prepare(`SELECT q.id, q.question_code, qbi.question_number, qb.id AS bank_id,
-      qb.name AS bank_name, qb.library_status,
+      qb.name AS bank_name, qb.library_status, qb.library_access_level,
       EXISTS(SELECT 1 FROM essay_reference_answers a JOIN essay_answer_sources s ON s.id = a.source_id
         WHERE a.question_id = q.id AND a.publication_status = 'published' AND s.status = 'active'
           AND (trim(a.source_url) = '' OR a.source_url LIKE 'https://%')
@@ -2047,9 +2063,12 @@ async function addTodayItem(userId: string, payload: Record<string, unknown>) {
       WHERE q.id = ? AND q.status = 'active' AND qb.library_enabled = 1 AND qb.library_status = 'published'
       ORDER BY qbi.sort_order LIMIT 1`).bind(questionId).first<{
         id: number; question_code: string; question_number: string; bank_id: number; bank_name: string;
-        library_status: string; available: number;
+        library_status: string; library_access_level: string; available: number;
       }>();
     if (!question || !Number(question.available)) return json({ error: "该题的参考答案暂不可用" }, 404);
+    if (question.library_access_level === "member" && !membershipIsActive(await userMembership(userId))) {
+      return json({ error: "该资料为会员专享，激活后即可加入今日计划", code: "PAYWALL_RESOURCE" }, 403);
+    }
     sourceParentId = String(question.bank_id);
     title = `${question.bank_name} · 第${question.question_number || question.question_code}题`;
     detail = "查看并对比多来源参考答案";
@@ -2642,10 +2661,22 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
         frequency_rank: number; frequency_occurrences: number; frequency_papers: number; importance_stars: number;
         score_rate: number | null; score_rate_attempts: number;
       }>(),
+    db.prepare(`SELECT
+        COALESCE(SUM(CASE WHEN duration_ms >= ? THEN 1 ELSE 0 END), 0) AS valid_answers,
+        COALESCE(SUM(CASE WHEN duration_ms < ? THEN 1 ELSE 0 END), 0) AS excluded_fast_answers,
+        COUNT(DISTINCT CASE WHEN duration_ms >= ? THEN module END) AS module_count,
+        COUNT(DISTINCT CASE WHEN duration_ms >= ? THEN date(answered_at, '+8 hours') END) AS active_days,
+        COALESCE(SUM(CASE WHEN duration_ms >= ? THEN is_correct ELSE 0 END), 0) AS correct,
+        COALESCE(AVG(CASE WHEN duration_ms >= ? THEN duration_ms END), 0) AS avg_duration_ms,
+        COALESCE(SUM(CASE WHEN duration_ms >= ? AND confidence IN ('hesitant','guessed') THEN 1 ELSE 0 END), 0) AS uncertain,
+        COALESCE(SUM(CASE WHEN duration_ms >= ? THEN overtime ELSE 0 END), 0) AS overtime,
+        COALESCE(SUM(CASE WHEN duration_ms >= ? AND wrong_reason IN ('方法没想到','审题错误') THEN 1 ELSE 0 END), 0) AS method_errors
+      FROM practice_attempts WHERE user_id = ? AND ${appliedAttempt}`)
+      .bind(...Array(9).fill(FORMAL_DIAGNOSIS_POLICY.minimumDurationMs), userId).first<Record<string, unknown>>(),
   ]);
   const [selectedBankRows, stats] = await Promise.all([selectedBanksPromise, statsPromise]);
   const selectedBanks = selectedBankRows.slice(0, 32);
-  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek, weakPointRows] = stats;
+  const [summary, modules, states, recent, todayStats, previousDailyStats, weeklyStats, previousWeeklyStats, todayHighFrequency, weeklyHighFrequency, masteredThisWeek, weakPointRows, formalDiagnosisStats] = stats;
   const stateMap = Object.fromEntries(states.results.map((row) => [row.state, Number(row.total)]));
   const total = Number(summary?.total ?? 0);
   const correct = Number(summary?.correct ?? 0);
@@ -2784,6 +2815,17 @@ async function loadStudyInsights(userId: string, selectedOverride?: string[] | P
       estimatedMinutes,
       taskText: `${tomorrowDueCount ? `先完成${tomorrowDueCount}道到期复习题` : "先完成到期复习检查"}${focusModule ? `，再完成${focusQuestionCount}道${focusModule.module}专项训练` : "，再从主攻题库完成新题训练"}，预计${estimatedMinutes}分钟。`,
     },
+    diagnosis: buildDiagnosisSummary({
+      validAnswers: Number(formalDiagnosisStats?.valid_answers ?? 0),
+      excludedFastAnswers: Number(formalDiagnosisStats?.excluded_fast_answers ?? 0),
+      moduleCount: Number(formalDiagnosisStats?.module_count ?? 0),
+      activeDays: Number(formalDiagnosisStats?.active_days ?? 0),
+      correct: Number(formalDiagnosisStats?.correct ?? 0),
+      avgDurationMs: Number(formalDiagnosisStats?.avg_duration_ms ?? 0),
+      uncertain: Number(formalDiagnosisStats?.uncertain ?? 0),
+      overtime: Number(formalDiagnosisStats?.overtime ?? 0),
+      methodErrors: Number(formalDiagnosisStats?.method_errors ?? 0),
+    }),
   };
 }
 
@@ -2884,7 +2926,7 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
   const rows = await getD1().prepare(`SELECT content_type, content_key, title, payload_json, access_level, version
     FROM content_items WHERE content_type <> 'job_position' AND status IN ('published', 'scheduled')
       AND (publish_at IS NULL OR datetime(publish_at) <= CURRENT_TIMESTAMP)
-      AND (? = 1 OR access_level = 'free')
+      AND (? = 1 OR access_level = 'free' OR content_type = 'resource_card')
     ORDER BY id ASC`).bind(membershipActive ? 1 : 0)
     .all<{ content_type: string; content_key: string; payload_json: string; access_level: "free" | "member" }>();
   const dayMap = new Map<string, PracticeDay>();
@@ -2939,13 +2981,15 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
       if (row.content_type === "essay_micro" && matchesTargets(envelope)) essayMicros.push(envelope);
       if (row.content_type === "drill_preset" && envelope.enabled !== false && matchesTargets(envelope)) drillPresets.push(envelope);
       if (row.content_type === "resource_card" && envelope.enabled !== false && matchesTargets(envelope)) {
-        const actionType = new Set(["tab", "essay_library", "quiz", "paywall"]).has(trimmed(envelope.actionType, 24))
+        const actionType = new Set(["tab", "essay_library", "resource_asset", "quiz", "paywall"]).has(trimmed(envelope.actionType, 24))
           ? trimmed(envelope.actionType, 24) : "tab";
         const actionTarget = actionType === "tab" && new Set(["today", "banks", "resources", "audio", "review", "report", "calendar", "me"]).has(trimmed(envelope.actionTarget, 40))
           ? trimmed(envelope.actionTarget, 40)
           : actionType === "essay_library" ? "essayLibrary"
+            : actionType === "resource_asset" && managedMediaAssetId(trimmed(envelope.actionTarget, 800))
+              ? mediaUrlForAsset(managedMediaAssetId(trimmed(envelope.actionTarget, 800)) as string)
             : actionType === "quiz" ? "director-thinking"
-              : actionType === "paywall" && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop"]).has(trimmed(envelope.actionTarget, 40))
+              : actionType === "paywall" && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop", "resource"]).has(trimmed(envelope.actionTarget, 40))
                 ? trimmed(envelope.actionTarget, 40) : "resources";
         resourceCards.push({
           id: row.content_key,
@@ -2990,7 +3034,7 @@ async function loadContent(membershipActive: boolean, profile?: LoadedExamProfil
         const triggerEvent = trimmed(envelope.triggerEvent, 48);
         const reason = trimmed(envelope.reason, 24);
         if (new Set(["free_daily_limit_hit", "second_bank_attempt", "essay_practice_attempt", "radar_position_save_attempt", "radar_position_compare_attempt", "audio_member_attempt", "manual_benefits_open"]).has(triggerEvent)
-          && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop"]).has(reason)) {
+          && new Set(["daily_limit", "second_bank", "essay", "radar", "value_loop", "resource"]).has(reason)) {
           paywallPolicies.push({
             id: row.content_key,
             triggerEvent,
@@ -3373,6 +3417,7 @@ async function bootstrap(request: Request) {
         today: { total: 0, correct: 0, repairedDue: 0, wrong: 0, hesitant: 0, guessed: 0, overtime: 0, avgSeconds: 0, accuracyDelta: null, avgSecondsDelta: null, highFrequencyPoints: [] },
         weekly: { total: 0, accuracy: 0, activeDays: 0, avgSeconds: 0, highFrequencyCoverage: 0, repeatErrorRate: null, accuracyDelta: null, avgSecondsDelta: null, repeatErrorRateDelta: null, masteredPoints: [], nextIssues: [] },
         tomorrowPlan: { dueCount: 0, focusModule: null, focusQuestionCount: 0, estimatedMinutes: 5, taskText: "请先完成备考组合设置，再开始今日训练。" },
+        diagnosis: { ready: false, confidence: "样本不足", validAnswers: 0, excludedFastAnswers: 0, moduleCount: 0, activeDays: 0, accuracy: 0, avgSeconds: 0, problemType: "样本积累中", nextRequirement: "再完成30道有效作答、覆盖4个模块和3个学习日" },
       },
       wrongAudioQuestions: [],
       dueEssayRewrites: [],
@@ -3381,7 +3426,7 @@ async function bootstrap(request: Request) {
       firstCompletedPractice: null,
       todayKey: chinaDateKey(),
       ledger: [],
-      inviteStats: { total: 0, rewarded: 0, pending: 0 },
+      inviteStats: { total: 0, rewarded: 0, pending: 0, invalid: 0 },
       inviteConfig: { rewardDays: 7, inviteeRewardDays: 3, monthlyCap: 30 },
     }, 200, identity.setCookie);
   }
@@ -3435,12 +3480,13 @@ async function bootstrap(request: Request) {
   const [user, state, ledger, inviteStats, inviteConfig, examProfile, questionBanks, studyInsights, reviewQueue, dailyQueue, wrongAudioQuestions, dueEssayRewrites, dailyCheckins, dailyPractice, content, dailyReadiness] = await Promise.all([
     userPromise,
     statePromise,
-    db.prepare(`SELECT delta_days, source_type, note, created_at
+    db.prepare(`SELECT delta_days, source_type, source_id, note, created_at
       FROM membership_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20`).bind(identity.userId).all(),
     db.prepare(`SELECT COUNT(*) AS total,
       SUM(CASE WHEN status = 'rewarded' THEN 1 ELSE 0 END) AS rewarded,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
-      FROM invite_relations WHERE inviter_id = ?`).bind(identity.userId).first<{ total: number; rewarded: number; pending: number }>(),
+      SUM(CASE WHEN status = 'pending' AND risk_status = 'clear' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN risk_status <> 'clear' THEN 1 ELSE 0 END) AS invalid
+      FROM invite_relations WHERE inviter_id = ?`).bind(identity.userId).first<{ total: number; rewarded: number; pending: number; invalid: number }>(),
     loadInviteConfig(),
     examProfilePromise,
     questionBanksPromise,
@@ -3507,7 +3553,7 @@ async function bootstrap(request: Request) {
     dueEssayRewrites,
     todayKey,
     ledger: ledger.results,
-    inviteStats: inviteStats ?? { total: 0, rewarded: 0, pending: 0 },
+    inviteStats: inviteStats ?? { total: 0, rewarded: 0, pending: 0, invalid: 0 },
     inviteConfig,
   }, 200, identity.setCookie);
 }
@@ -3570,8 +3616,25 @@ async function saveExamProfile(userId: string, payload: Record<string, unknown>)
   }
   const targets = Array.from(targetMap.values());
   if (!targets.length) return json({ error: "请至少选择一个报考目标" }, 400);
-  const initialBankCode = trimmed(payload.initialBankCode, 80);
+  let initialBankCode = trimmed(payload.initialBankCode, 80);
   let initialBank: { bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number } | null = null;
+  if (!initialBankCode && !currentProfile.onboarded) {
+    const candidates = await db.prepare(`SELECT qb.bank_code, qb.exam_type, qb.province, qb.exam_year, qb.subject,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved' THEN q.id END) AS question_count
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      WHERE qb.status = 'published' AND qb.subject IN ('行测','综合')
+      GROUP BY qb.id HAVING question_count >= 5
+      ORDER BY CASE WHEN qb.exam_type = 'national' THEN 0 ELSE 1 END, qb.exam_year DESC, qb.id ASC
+      LIMIT 200`).all<{ bank_code: string; exam_type: string; province: string | null; exam_year: number | null; subject: string; question_count: number }>();
+    initialBankCode = candidates.results.find((bank) => targets.some((target) => {
+      const typeMatches = bank.exam_type === "national" ? target.examType === "国考"
+        : bank.exam_type === "provincial" && target.examType === "省考" && normalizeProvince(bank.province) === normalizeProvince(target.province);
+      const year = Number(bank.exam_year ?? 0);
+      return typeMatches && (!year || (year <= target.examYear && year >= target.examYear - 4));
+    }))?.bank_code ?? "";
+  }
   if (initialBankCode) {
     initialBank = await db.prepare(`SELECT qb.bank_code, qb.exam_type, qb.province, qb.exam_year, qb.subject,
       COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.truth_verified = 1 AND q.review_status = 'approved' THEN q.id END) AS question_count
@@ -3809,10 +3872,16 @@ async function dbQuestionCandidates(userId: string, bankCodes: string[]) {
   });
 }
 
-async function getPracticeBatch(userId: string, payload: Record<string, unknown>) {
+async function getPracticeBatch(userId: string, payload: Record<string, unknown>, signedIn: boolean) {
   const db = getD1();
   const requested = Array.isArray(payload.bankCodes) ? payload.bankCodes.map(String) : [];
   const requestedKind = trimmed(payload.sessionKind, 40).toLowerCase().replace(/[^a-z0-9:_-]/g, "");
+  if (!signedIn && requestedKind !== "diagnostic") {
+    return json({
+      error: "初始作答快照已保留，请先登录后进入正式训练",
+      code: "VERIFIED_ACCOUNT_REQUIRED",
+    }, 403);
+  }
   const dailyRequest = requestedKind === "daily";
   const dateKey = chinaDateKey();
   if (dailyRequest) {
@@ -4018,6 +4087,11 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
     },
   }));
 
+  const targetDays = new Map(profile.targets.map((target) => {
+    if (!target.examDate) return [target.code, null] as const;
+    const days = Math.ceil((Date.parse(`${target.examDate}T23:59:59+08:00`) - Date.now()) / 86_400_000);
+    return [target.code, Number.isFinite(days) && days >= 0 ? days : null] as const;
+  }));
   const urgentTargets = new Set(profile.targets.filter((target) => {
     if (!target.examDate) return false;
     const days = Math.ceil((Date.parse(`${target.examDate}T23:59:59+08:00`) - Date.now()) / 86_400_000);
@@ -4136,15 +4210,32 @@ async function getPracticeBatch(userId: string, payload: Record<string, unknown>
   if (sessionSnapshot?.status === "completed" && sessionKind === "daily" && mode === "mixed") {
     await rewardInvite(userId);
   }
+  const moduleHistory = new Map<string, { attempts: number; correct: number }>();
+  for (const item of candidates) {
+    const attempts = Number(item.progress?.correct_count ?? 0) + Number(item.progress?.wrong_count ?? 0);
+    if (!attempts) continue;
+    const current = moduleHistory.get(item.question.module) ?? { attempts: 0, correct: 0 };
+    current.attempts += attempts;
+    current.correct += Number(item.progress?.correct_count ?? 0);
+    moduleHistory.set(item.question.module, current);
+  }
   const questions = sessionItems.map((item) => {
     const question = publicQuestion(item.question, item.progress);
+    const moduleStats = moduleHistory.get(item.question.module);
+    const moduleAccuracy = moduleStats?.attempts ? Math.round(moduleStats.correct * 100 / moduleStats.attempts) : null;
+    const targetCode = targetByBank.get(item.question.bankCode) ?? "";
+    const daysToExam = targetDays.get(targetCode) ?? null;
     const planReason = question.due
-      ? item.progress?.state === "weak" ? "错题复习到期" : "间隔复习到期"
+      ? item.progress?.state === "weak"
+        ? `错题第${Math.max(1, Number(item.progress?.review_stage ?? 0) + 1)}次复习已到期`
+        : "间隔复习节点已到期"
+      : moduleAccuracy !== null && (moduleStats?.attempts ?? 0) >= 3 && moduleAccuracy < 65
+        ? `${item.question.module}近阶段正确率${moduleAccuracy}%，安排强化`
       : item.question.bankCode === primaryBankCode
-        ? "主攻考试"
+        ? `主攻考试题库，维持本地区真题占比`
         : urgentBankCodes.has(item.question.bankCode)
-          ? "临近考试"
-          : "兼顾题库";
+          ? `距考试${daysToExam ?? strategy.urgentDays}天，提高本目标真题占比`
+          : question.scopeLabel === "跨库共通题" ? "多个报考目标的共同考点，优先训练" : "兼顾题库，保持多目标覆盖";
     const pending = pendingAttempts.get(item.question.id);
     const pendingStage = Math.max(0, Math.floor(Number(pending?.review_stage ?? 0)));
     return {
@@ -5424,13 +5515,15 @@ async function redeem(userId: string, payload: Record<string, unknown>) {
         WHERE ml.user_id = redemptions.user_id AND ml.source_type = 'redeem'
           AND ml.source_id = 'redeem:' || redemptions.code_id || ':' || redemptions.user_id
       )`).bind(row.id),
-    db.prepare(`INSERT OR IGNORE INTO redemptions (code_id, user_id, status)
-      SELECT c.id, ?, 'pending' FROM redemption_codes c
+    db.prepare(`INSERT OR IGNORE INTO redemptions
+      (code_id, user_id, status, membership_before_type, membership_before_end)
+      SELECT c.id, ?, 'pending', u.membership_type, u.membership_end
+      FROM redemption_codes c JOIN users u ON u.id = ?
       WHERE c.id = ? AND c.status = 'active'
         AND (c.valid_from IS NULL OR datetime(c.valid_from) <= CURRENT_TIMESTAMP)
         AND (c.valid_until IS NULL OR datetime(c.valid_until) >= CURRENT_TIMESTAMP)
         AND (SELECT COUNT(*) FROM redemptions r WHERE r.code_id = c.id) < c.max_uses`)
-      .bind(userId, row.id),
+      .bind(userId, userId, row.id),
     db.prepare(`INSERT OR IGNORE INTO membership_ledger
       (user_id, delta_days, source_type, source_id, note)
       SELECT ?, ?, 'redeem', ?, ? WHERE EXISTS (
@@ -5445,11 +5538,13 @@ async function redeem(userId: string, payload: Record<string, unknown>) {
             THEN membership_end ELSE CURRENT_TIMESTAMP END, ?)
           WHERE id = ? AND membership_type <> 'lifetime' AND changes() = 1`)
         .bind(`+${configuredDays} days`, userId),
-    db.prepare(`UPDATE redemptions SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+    db.prepare(`UPDATE redemptions SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+        membership_after_type = (SELECT membership_type FROM users WHERE id = ?),
+        membership_after_end = (SELECT membership_end FROM users WHERE id = ?)
       WHERE code_id = ? AND user_id = ? AND status = 'pending' AND EXISTS (
         SELECT 1 FROM membership_ledger ml
         WHERE ml.user_id = ? AND ml.source_type = 'redeem' AND ml.source_id = ?
-      )`).bind(row.id, userId, userId, sourceId),
+      )`).bind(userId, userId, row.id, userId, userId, sourceId),
     db.prepare(`UPDATE redemption_codes SET used_count = (
       SELECT COUNT(*) FROM redemptions WHERE code_id = ? AND status = 'completed'
     ) WHERE id = ?`).bind(row.id, row.id),
@@ -5549,11 +5644,12 @@ function publicOrder(row: CommerceOrderRow) {
 }
 
 async function getCommerceProducts(request: Request, userId: string) {
-  const [productsResult, membership] = await Promise.all([
+  const [productsResult, membership, launch] = await Promise.all([
     getD1().prepare(`SELECT id, name, description, price_cents, currency, grant_type,
       duration_days, public_promise, status FROM products
       WHERE status = 'active' ORDER BY sort_order ASC, created_at ASC`).all<CommerceProductRow>(),
     userMembership(userId),
+    loadLaunchConfiguration(),
   ]);
   const testMode = commerceTestMode(request);
   return json({
@@ -5562,6 +5658,9 @@ async function getCommerceProducts(request: Request, userId: string) {
     testMode,
     membershipActive: membershipIsActive(membership),
     membershipType: membership?.membership_type ?? "duration",
+    officialAccountName: launch.policy.officialAccountName,
+    purchaseUrl: validHttpsUrl(launch.policy.purchaseUrl) ? launch.policy.purchaseUrl : "",
+    purchaseInstructions: launch.policy.purchaseInstructions,
     notice: testMode
       ? "测试支付模式：只验证订单与权益链路，不会发生真实扣款。"
       : "当前采用公众号购买兑换码的方式开通会员；获得兑换码后可在本应用内激活。",
@@ -6052,6 +6151,11 @@ async function completeQuizAttempt(userId: string, payload: Record<string, unkno
     .bind(attempt.quiz_id).first<QuizTestRow>();
   await db.prepare("INSERT INTO analytics_events (user_id, event_name, event_data) VALUES (?, 'quiz_complete', ?)")
     .bind(userId, JSON.stringify({ quizId: attempt.quiz_id, attemptId, correctCount, resultKey: result.key })).run().catch(() => undefined);
+  const percentile = await db.prepare(`SELECT COUNT(*) AS total,
+    SUM(CASE WHEN correct_count <= ? THEN 1 ELSE 0 END) AS not_higher
+    FROM quiz_attempts WHERE quiz_id = ? AND status = 'completed'`)
+    .bind(correctCount, attempt.quiz_id).first<{ total: number; not_higher: number }>();
+  const beatPercent = Math.max(1, Math.min(99, Math.round(Number(percentile?.not_higher ?? 1) / Math.max(1, Number(percentile?.total ?? 1)) * 100)));
   const notableWrong = review.find((item) => !item.correct && item.selectedOption);
   return json({
     attemptId,
@@ -6059,6 +6163,7 @@ async function completeQuizAttempt(userId: string, payload: Record<string, unkno
     correctCount,
     total: questionIds.length,
     scorePercent: Math.round((correctCount / Math.max(1, questionIds.length)) * 100),
+    beatPercent,
     result,
     notableChoice: notableWrong ? `本次最离谱选择：${notableWrong.selectedOption}` : "本次高光：10道离谱选项，没有一个能动摇你。",
     review,
@@ -6276,7 +6381,7 @@ async function adminUpsertQuizResult(payload: Record<string, unknown>) {
 type EssayPaperRow = {
   id: number; bank_code: string; name: string; exam_type: string; province: string | null;
   exam_year: number | null; paper_type: string; source_url: string; resource_url: string;
-  library_status: string; updated_at: string;
+  library_access_level: string; library_status: string; updated_at: string;
 };
 
 type EssayMaterialRow = {
@@ -6327,12 +6432,14 @@ async function copyrightContactEmail() {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? value : "";
 }
 
-async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
+async function getEssayReferenceLibrary(userId: string, payload: Record<string, unknown>) {
   const db = getD1();
   const contactEmail = await copyrightContactEmail();
   if (payload.settingsOnly === true || String(payload.settingsOnly ?? "") === "true") {
     return json({ contactEmail });
   }
+  const membership = await userMembership(userId);
+  const memberAccess = membershipIsActive(membership);
   const paperIdProvided = payload.paperId !== undefined && payload.paperId !== null && String(payload.paperId).trim() !== "";
   const requestedPaperId = Number(payload.paperId);
   if (paperIdProvided && (!Number.isSafeInteger(requestedPaperId) || requestedPaperId <= 0)) {
@@ -6348,7 +6455,7 @@ async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
     const offset = (page - 1) * pageSize;
     const [catalog, totalRow] = await Promise.all([
       db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year,
-        qb.paper_type, qb.source_url, qb.resource_url, qb.updated_at,
+        qb.paper_type, qb.source_url, qb.resource_url, qb.library_access_level, qb.updated_at,
         (SELECT COUNT(*) FROM question_bank_items qbi JOIN questions q ON q.id = qbi.question_id
           WHERE qbi.bank_id = qb.id AND q.status = 'active') AS question_count,
         (SELECT COUNT(DISTINCT a.source_id) FROM question_bank_items qbi
@@ -6383,8 +6490,10 @@ async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
         region: row.province ?? "",
         examYear: Number(row.exam_year),
         paperType: row.paper_type,
-        sourceUrl: validOptionalHttpsUrl(row.source_url) ? row.source_url : "",
-        resourceUrl: validEssayResourceUrl(row.resource_url) ? row.resource_url : "",
+        sourceUrl: row.library_access_level === "member" && !memberAccess ? "" : validOptionalHttpsUrl(row.source_url) ? row.source_url : "",
+        resourceUrl: row.library_access_level === "member" && !memberAccess ? "" : validEssayResourceUrl(row.resource_url) ? row.resource_url : "",
+        accessLevel: row.library_access_level === "member" ? "member" : "free",
+        locked: row.library_access_level === "member" && !memberAccess,
         updatedAt: row.updated_at,
         questionCount: Number(row.question_count ?? 0),
         sourceCount: Number(row.source_count ?? 0),
@@ -6392,9 +6501,22 @@ async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
     });
   }
 
+  const requestedPaper = await db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.library_access_level
+    FROM question_banks qb WHERE ${filter.sql}
+    ORDER BY qb.exam_year DESC, qb.id DESC LIMIT 1`).bind(...filter.binds)
+    .first<{ id: number; bank_code: string; name: string; library_access_level: string }>();
+  if (!requestedPaper) return json({ error: "该试卷暂时不可用", code: "ESSAY_PAPER_NOT_FOUND" }, 404);
+  if (requestedPaper.library_access_level === "member" && !memberAccess) {
+    return json({
+      error: "该资料为会员专享，激活后即可查看完整内容",
+      code: "PAYWALL_RESOURCE",
+      paper: { id: String(requestedPaper.id), code: requestedPaper.bank_code, title: requestedPaper.name, accessLevel: "member", locked: true },
+    }, 403);
+  }
+
   const [paperResult, materialResult, questionResult, mappingResult, answerResult] = await Promise.all([
     db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.exam_type, qb.province, qb.exam_year,
-      qb.paper_type, qb.source_url, qb.resource_url, qb.library_status, qb.updated_at
+      qb.paper_type, qb.source_url, qb.resource_url, qb.library_access_level, qb.library_status, qb.updated_at
       FROM question_banks qb WHERE ${filter.sql}
       ORDER BY qb.exam_year DESC, qb.id DESC LIMIT 200`).bind(...filter.binds).all<EssayPaperRow>(),
     db.prepare(`SELECT m.id, m.bank_id, m.label, m.title, m.content, m.sort_order, m.status
@@ -6494,6 +6616,8 @@ async function getEssayReferenceLibrary(payload: Record<string, unknown>) {
       paperType: row.paper_type,
       sourceUrl: validOptionalHttpsUrl(row.source_url) ? row.source_url : "",
       resourceUrl: validEssayResourceUrl(row.resource_url) ? row.resource_url : "",
+      accessLevel: row.library_access_level === "member" ? "member" : "free",
+      locked: false,
       updatedAt: row.updated_at,
       materials: materialsByPaper.get(Number(row.id)) ?? [],
       questions: questionsByPaper.get(Number(row.id)) ?? [],
@@ -6506,7 +6630,7 @@ async function adminGetEssayReferenceLibrary(payload: Record<string, unknown>) {
   const db = getD1();
   const [papers, materials, questions, mappings, sources, answers, contactEmail] = await Promise.all([
     db.prepare(`SELECT id, bank_code, name, exam_type, province, exam_year, paper_type, source_url,
-      resource_url, library_status, updated_at FROM question_banks WHERE library_enabled = 1
+      resource_url, library_access_level, library_status, updated_at FROM question_banks WHERE library_enabled = 1
       ORDER BY exam_year DESC, id DESC LIMIT 500`).all(),
     db.prepare(`SELECT id, bank_id, label, title, content, sort_order, status, updated_at
       FROM essay_library_materials ORDER BY bank_id, sort_order, id`).all(),
@@ -6580,6 +6704,7 @@ async function adminUpsertEssayPaper(payload: Record<string, unknown>) {
   const paperType = trimmed(payload.paperType, 60);
   const sourceUrl = trimmed(payload.sourceUrl, 1000);
   const resourceUrl = trimmed(payload.resourceUrl, 1000);
+  const accessLevel = payload.accessLevel === "free" ? "free" : "member";
   const examYear = Math.floor(Number(payload.examYear));
   if (!code || !title || !examType || !Number.isInteger(examYear) || examYear < 2000 || examYear > 2200) {
     return json({ error: "请完整填写试卷编码、标题、考试类型和年份" }, 400);
@@ -6595,17 +6720,17 @@ async function adminUpsertEssayPaper(payload: Record<string, unknown>) {
   if (id > 0) {
     const updated = await db.prepare(`UPDATE question_banks SET bank_code = ?, name = ?, exam_type = ?, province = ?,
       exam_year = ?, subject = '申论', paper_type = ?, source_url = ?, resource_url = ?,
-      library_status = 'draft', status = 'draft', updated_at = CURRENT_TIMESTAMP
+      library_access_level = ?, library_status = 'draft', status = 'draft', updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND library_enabled = 1`)
-      .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl, id).run();
+      .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl, accessLevel, id).run();
     if (!updated.meta.changes) return json({ error: "申论资料库试卷不存在" }, 404);
     return json({ ok: true, id, code });
   }
   await db.prepare(`INSERT INTO question_banks
     (bank_code, name, exam_type, province, exam_year, subject, description, cover_color,
-      paper_type, source_url, resource_url, library_enabled, library_status, status)
-    VALUES (?, ?, ?, ?, ?, '申论', '', 'blue', ?, ?, ?, 1, 'draft', 'draft')`)
-    .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl).run();
+      paper_type, source_url, resource_url, library_enabled, library_access_level, library_status, status)
+    VALUES (?, ?, ?, ?, ?, '申论', '', 'blue', ?, ?, ?, 1, ?, 'draft', 'draft')`)
+    .bind(code, title, examType, region || null, examYear, paperType, sourceUrl, resourceUrl, accessLevel).run();
   const created = await db.prepare("SELECT id FROM question_banks WHERE bank_code = ?")
     .bind(code).first<{ id: number }>();
   return json({ ok: true, id: Number(created?.id), code }, 201);
@@ -7368,9 +7493,11 @@ async function adminList(payload: Record<string, unknown>) {
   if (!isAdmin(payload)) return json({ error: "管理员口令错误" }, 401);
   const db = getD1();
   const [codes, redemptions, content, mediaAssets, questionBanks, questionImports, eventCounts, activeUsers, rewardDays, monthlyCap] = await Promise.all([
-    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, max_uses, used_count, status, valid_until, created_at
+    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, created_by, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 100`).all(),
-    db.prepare(`SELECT r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
+    db.prepare(`SELECT r.redeemed_at, r.completed_at, r.status, r.user_id,
+      r.membership_before_type, r.membership_before_end, r.membership_after_type, r.membership_after_end,
+      c.code_preview, c.batch_name, c.channel, c.created_by, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 100`).all(),
     db.prepare(`SELECT ci.id, ci.content_type, ci.content_key, ci.title, ci.payload_json, ci.access_level, ci.status,
       ci.publish_at, ci.version, ci.updated_at,
@@ -7417,6 +7544,7 @@ async function adminCreateCodes(payload: Record<string, unknown>) {
   const maxUses = Math.max(1, Math.floor(Number(payload.maxUses ?? 1)));
   const batchName = String(payload.batchName ?? "新建批次").trim().slice(0, 40) || "新建批次";
   const channel = trimmed(payload.channel, 40) || "manual";
+  const createdBy = adminFromPayload(payload)?.username ?? "system";
   let validUntil: string | null = null;
   if (payload.validUntil) {
     const rawValue = String(payload.validUntil).trim();
@@ -7453,11 +7581,11 @@ async function adminCreateCodes(payload: Record<string, unknown>) {
     }))));
     try {
       await db.prepare(`INSERT INTO redemption_codes
-        (code_hash, code_preview, batch_name, grant_type, duration_days, channel, max_uses, valid_until)
+        (code_hash, code_preview, batch_name, grant_type, duration_days, channel, created_by, max_uses, valid_until)
         SELECT json_extract(generated.value, '$.codeHash'),
-          json_extract(generated.value, '$.codePreview'), ?, ?, ?, ?, ?, ?
+          json_extract(generated.value, '$.codePreview'), ?, ?, ?, ?, ?, ?, ?
         FROM json_each(?) AS generated`)
-        .bind(batchName, grantType, durationDays, channel, maxUses, validUntil, generatedJson).run();
+        .bind(batchName, grantType, durationDays, channel, createdBy, maxUses, validUntil, generatedJson).run();
       return json({ ok: true, grantType, durationDays: grantType === "lifetime" ? null : durationDays, codes: plainCodes });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -10899,7 +11027,7 @@ function launchScenarioMatrix(checks: LaunchCheck[]) {
 async function loadLaunchReadiness() {
   const db = getD1();
   const [configuration, schemaVersion, product, invalidCodes, workableBanks, brokenBanks, orphanOrders,
-    orphanTransactions, failedImports, pendingReports, frameworkConfig, copyrightEmail, health] = await Promise.all([
+    orphanTransactions, failedImports, pendingReports, frameworkConfig, copyrightEmail, health, firstQuestionSla, coreFlowSla] = await Promise.all([
     loadLaunchConfiguration(),
     db.prepare("SELECT value FROM configs WHERE key = 'runtime_schema_version'").first<{ value: string }>(),
     db.prepare(`SELECT id, price_cents, grant_type, duration_days, public_promise, status FROM products
@@ -10929,6 +11057,14 @@ async function loadLaunchReadiness() {
       COUNT(DISTINCT CASE WHEN event_name = 'practice_batch' AND created_at >= datetime('now','-7 days') THEN user_id END) AS practice_7d,
       COUNT(DISTINCT CASE WHEN event_name = 'redeem_success' AND created_at >= datetime('now','-30 days') THEN user_id END) AS redeemed_30d
       FROM analytics_events WHERE user_id <> 'system'`).first<Record<string, unknown>>(),
+    db.prepare(`SELECT COUNT(*) AS samples,
+      COALESCE(SUM(CASE WHEN CAST(json_extract(event_data,'$.durationMs') AS INTEGER) <= 60000 THEN 1 ELSE 0 END), 0) AS within_60s
+      FROM analytics_events WHERE event_name = 'core_flow_success'
+        AND created_at >= datetime('now','-7 days') AND json_extract(event_data,'$.durationMs') IS NOT NULL`).first<Record<string, unknown>>(),
+    db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN event_name = 'core_flow_start' THEN user_id || ':' || COALESCE(json_extract(event_data,'$.flowId'),'') END) AS started,
+      COUNT(DISTINCT CASE WHEN event_name = 'core_flow_success' THEN user_id || ':' || COALESCE(json_extract(event_data,'$.flowId'),'') END) AS succeeded
+      FROM analytics_events WHERE created_at >= datetime('now','-7 days')`).first<Record<string, unknown>>(),
   ]);
   const count = (value: { count: number } | null | undefined) => Number(value?.count ?? 0);
   const schemaReady = Number.parseInt(String(schemaVersion?.value ?? ""), 10) >= 20;
@@ -10939,8 +11075,16 @@ async function loadLaunchReadiness() {
     && configuration.policy.purchaseUrl);
   const copyrightReady = validPublicEmail(String(copyrightEmail?.value ?? "")) && Boolean(String(copyrightEmail?.value ?? ""));
   const frameworkCounts = new Map(frameworkConfig.results.map((row) => [row.content_type, Number(row.count)]));
+  const firstQuestionSamples = Number(firstQuestionSla?.samples ?? 0);
+  const firstQuestionWithin60s = Number(firstQuestionSla?.within_60s ?? 0);
+  const firstQuestionMedianPass = firstQuestionSamples > 0 && firstQuestionWithin60s >= Math.ceil(firstQuestionSamples / 2);
+  const coreFlowStarted = Number(coreFlowSla?.started ?? 0);
+  const coreFlowSucceeded = Number(coreFlowSla?.succeeded ?? 0);
+  const coreFlowSuccessRate = coreFlowStarted > 0 ? coreFlowSucceeded / coreFlowStarted * 100 : null;
   const mini = configuration.miniProgram;
   const checks: LaunchCheck[] = [
+    launchCheck({ id: "first-question-sla", category: "framework", target: "both", label: "首次进入第一题不超过60秒", state: firstQuestionSamples < 5 ? "warning" : firstQuestionMedianPass ? "pass" : "fail", blocking: true, detail: firstQuestionSamples < 5 ? `近7日仅${firstQuestionSamples}个完整样本，至少积累5个后判定。` : firstQuestionMedianPass ? `${firstQuestionWithin60s}/${firstQuestionSamples}个样本在60秒内，中位标准通过。` : `${firstQuestionWithin60s}/${firstQuestionSamples}个样本在60秒内，中位标准未通过。`, href: "/admin" }),
+    launchCheck({ id: "core-flow-sla", category: "framework", target: "both", label: "核心流程成功率不低于99.5%", state: coreFlowStarted < 20 ? "warning" : Number(coreFlowSuccessRate) >= 99.5 ? "pass" : "fail", blocking: true, detail: coreFlowStarted < 20 ? `近7日仅${coreFlowStarted}次启动，至少积累20次后判定。` : `${coreFlowSucceeded}/${coreFlowStarted}次成功，成功率${Number(coreFlowSuccessRate).toFixed(2)}%。`, href: "/admin" }),
     launchCheck({ id: "schema", category: "framework", target: "both", label: "数据库与安全会话", state: schemaReady ? "pass" : "fail", blocking: true, detail: schemaReady ? `运行时结构版本 ${schemaVersion?.value}，账号和会话表可用。` : "数据库结构版本未达到当前代码要求。", href: "/admin/system" }),
     launchCheck({ id: "product", category: "business", target: "both", label: "29.8元终身SKU", state: productReady ? "pass" : "fail", blocking: true, detail: productReady ? "现有终身商品保持29.8元，不修改已承诺权益。" : "终身商品价格、权益类型或状态不一致。", href: "/admin/growth" }),
     launchCheck({ id: "redemption-config", category: "business", target: "both", label: "兑换码权益配置", state: count(invalidCodes) === 0 ? "pass" : "fail", blocking: true, detail: count(invalidCodes) === 0 ? "在用兑换码仅发放7/30/365天或终身权益。" : `${count(invalidCodes)}个在用兑换码的权益配置异常。`, href: "/admin/growth" }),
@@ -11058,7 +11202,7 @@ async function adminDashboard(payload: Record<string, unknown>) {
   const db = getD1();
   const [users, activeUsers, publishedContent, pendingReview, banks, questionsCount, redemptions7d,
     failedImports, processingImports, emptyPublishedBanks, staleReview, scheduledSoon, pendingReports, sourceIncomplete, recent,
-    pendingQuestions, funnel7d, frameworkConfig] = await Promise.all([
+    pendingQuestions, funnel7d, frameworkConfig, firstQuestionDurations, coreFlowCounts] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     db.prepare("SELECT COUNT(DISTINCT user_id) AS count FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')").first<{ count: number }>(),
     db.prepare("SELECT COUNT(*) AS count FROM content_items WHERE status IN ('published','scheduled')").first<{ count: number }>(),
@@ -11095,17 +11239,37 @@ async function adminDashboard(payload: Record<string, unknown>) {
       FROM admin_audit_logs ORDER BY id DESC LIMIT 12`).all(),
     db.prepare("SELECT COUNT(*) AS count FROM questions WHERE review_status = 'pending'").first<{ count: number }>(),
     db.prepare(`SELECT
-      COUNT(DISTINCT CASE WHEN event_name = 'profile_save' THEN user_id END) AS goals,
+      COUNT(DISTINCT CASE WHEN event_name IN ('target_selected','profile_save') THEN user_id END) AS goals,
       COUNT(DISTINCT CASE WHEN event_name = 'bank_toggle' AND json_extract(event_data,'$.added') = 1 THEN user_id END) AS banks,
-      COUNT(DISTINCT CASE WHEN event_name = 'practice_batch' THEN user_id END) AS practice_started,
+      COUNT(DISTINCT CASE WHEN event_name = 'snapshot_start' THEN user_id END) AS snapshot_started,
+      COUNT(DISTINCT CASE WHEN event_name = 'snapshot_complete' THEN user_id END) AS snapshot_completed,
+      COUNT(DISTINCT CASE WHEN event_name = 'login_gate_view' THEN user_id END) AS login_gate_viewed,
+      COUNT(DISTINCT CASE WHEN event_name = 'formal_practice_start' THEN user_id END) AS formal_started,
       (SELECT COUNT(DISTINCT user_id) FROM practice_sessions WHERE status = 'completed' AND target_count >= 5
         AND answered_count >= target_count AND completed_at >= datetime('now','-7 days')) AS practice_completed,
+      COUNT(DISTINCT CASE WHEN event_name = 'daily_review_view' THEN user_id END) AS review_viewed,
+      COUNT(DISTINCT CASE WHEN event_name = 'next_day_return' THEN user_id END) AS next_day_returned,
       COUNT(DISTINCT CASE WHEN event_name = 'paywall_view' THEN user_id END) AS paywall_viewed,
-      COUNT(DISTINCT CASE WHEN event_name = 'redeem_success' THEN user_id END) AS redeemed
+      COUNT(DISTINCT CASE WHEN event_name = 'redeem_success' THEN user_id END) AS redeemed,
+      COUNT(DISTINCT CASE WHEN event_name = 'quiz_start' THEN user_id END) AS quiz_started,
+      COUNT(DISTINCT CASE WHEN event_name IN ('quiz_complete','quiz_result_generated') THEN user_id END) AS quiz_completed,
+      COUNT(DISTINCT CASE WHEN event_name = 'quiz_share' THEN user_id END) AS quiz_shared,
+      COUNT(DISTINCT CASE WHEN event_name = 'quiz_friend_open' THEN user_id END) AS quiz_friend_opened,
+      COUNT(DISTINCT CASE WHEN event_name = 'quiz_friend_start' THEN user_id END) AS quiz_friend_started,
+      COUNT(DISTINCT CASE WHEN event_name = 'quiz_to_daily' THEN user_id END) AS quiz_to_daily
       FROM analytics_events WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')`).first<Record<string, unknown>>(),
     db.prepare(`SELECT content_type, status, COUNT(*) AS count FROM content_items
       WHERE content_type IN ('resource_card','campaign_slot','paywall_policy')
       GROUP BY content_type, status`).all<{ content_type: string; status: string; count: number }>(),
+    db.prepare(`SELECT CAST(json_extract(event_data, '$.durationMs') AS INTEGER) AS duration_ms
+      FROM analytics_events WHERE event_name = 'core_flow_success'
+        AND created_at >= datetime('now','-7 days') AND json_extract(event_data, '$.durationMs') IS NOT NULL
+      ORDER BY duration_ms`).all<{ duration_ms: number }>(),
+    db.prepare(`SELECT
+      COUNT(DISTINCT CASE WHEN event_name = 'core_flow_start' THEN user_id || ':' || COALESCE(json_extract(event_data,'$.flowId'),'') END) AS started,
+      COUNT(DISTINCT CASE WHEN event_name = 'core_flow_success' THEN user_id || ':' || COALESCE(json_extract(event_data,'$.flowId'),'') END) AS succeeded,
+      COUNT(DISTINCT CASE WHEN event_name = 'core_flow_failure' THEN user_id || ':' || COALESCE(json_extract(event_data,'$.flowId'),'') END) AS failed
+      FROM analytics_events WHERE created_at >= datetime('now','-7 days')`).first<Record<string, unknown>>(),
   ]);
   const number = (value: { count: number } | null) => Number(value?.count ?? 0);
   const todos: Array<Record<string, unknown>> = [];
@@ -11130,6 +11294,10 @@ async function adminDashboard(payload: Record<string, unknown>) {
   }
   if (!configCounts.resource_card.published) anomalies.push({ id: "resource-config-empty", type: "framework", title: "资料页没有生效入口", description: "请发布至少一个资料入口，避免用户端出现空资料页", count: 0, href: "/admin/content?type=resource_card", severity: "warning" });
   if (!configCounts.paywall_policy.published) anomalies.push({ id: "paywall-policy-empty", type: "framework", title: "权益触发策略未生效", description: "权益门禁仍会使用内置安全文案，但无法按事件精细运营", count: 0, href: "/admin/content?type=paywall_policy", severity: "warning" });
+  const durationValues = firstQuestionDurations.results.map((row) => Number(row.duration_ms)).filter((value) => Number.isFinite(value) && value >= 0);
+  const medianFirstQuestionMs = durationValues.length ? durationValues[Math.floor((durationValues.length - 1) / 2)] : null;
+  const coreStarted = Number(coreFlowCounts?.started ?? 0);
+  const coreSucceeded = Number(coreFlowCounts?.succeeded ?? 0);
   return json({
     metrics: {
       users: number(users), activeUsers7d: number(activeUsers), publishedContent: number(publishedContent),
@@ -11138,8 +11306,23 @@ async function adminDashboard(payload: Record<string, unknown>) {
     pendingCount: number(pendingReview) + number(pendingQuestions) + number(processingImports) + number(scheduledSoon) + number(pendingReports) + number(sourceIncomplete),
     pendingCounts: { review: number(pendingReview), questions: number(pendingQuestions), imports: number(processingImports), scheduled: number(scheduledSoon), reports: number(pendingReports), sources: number(sourceIncomplete) },
     funnel7d: {
-      goals: Number(funnel7d?.goals ?? 0), banks: Number(funnel7d?.banks ?? 0), practiceStarted: Number(funnel7d?.practice_started ?? 0),
-      practiceCompleted: Number(funnel7d?.practice_completed ?? 0), paywallViewed: Number(funnel7d?.paywall_viewed ?? 0), redeemed: Number(funnel7d?.redeemed ?? 0),
+      goals: Number(funnel7d?.goals ?? 0), banks: Number(funnel7d?.banks ?? 0),
+      snapshotStarted: Number(funnel7d?.snapshot_started ?? 0), snapshotCompleted: Number(funnel7d?.snapshot_completed ?? 0),
+      loginGateViewed: Number(funnel7d?.login_gate_viewed ?? 0), formalStarted: Number(funnel7d?.formal_started ?? 0),
+      practiceCompleted: Number(funnel7d?.practice_completed ?? 0), reviewViewed: Number(funnel7d?.review_viewed ?? 0),
+      nextDayReturned: Number(funnel7d?.next_day_returned ?? 0), paywallViewed: Number(funnel7d?.paywall_viewed ?? 0),
+      redeemed: Number(funnel7d?.redeemed ?? 0), quizStarted: Number(funnel7d?.quiz_started ?? 0),
+      quizCompleted: Number(funnel7d?.quiz_completed ?? 0), quizShared: Number(funnel7d?.quiz_shared ?? 0),
+      quizFriendOpened: Number(funnel7d?.quiz_friend_opened ?? 0), quizFriendStarted: Number(funnel7d?.quiz_friend_started ?? 0),
+      quizToDaily: Number(funnel7d?.quiz_to_daily ?? 0),
+    },
+    coreFlow7d: {
+      started: coreStarted,
+      succeeded: coreSucceeded,
+      failed: Number(coreFlowCounts?.failed ?? 0),
+      successRate: coreStarted > 0 ? Math.round(coreSucceeded / coreStarted * 10000) / 100 : null,
+      medianFirstQuestionMs,
+      firstQuestionWithin60s: medianFirstQuestionMs === null ? null : medianFirstQuestionMs <= 60_000,
     },
     frameworkConfig: configCounts,
     todos,
@@ -11160,7 +11343,7 @@ async function adminListQuestions(payload: Record<string, unknown>) {
   if (payload.reviewStatus) { conditions.push("q.review_status = ?"); binds.push(trimmed(payload.reviewStatus, 30)); }
   if (Number(payload.bankId) > 0) { conditions.push("EXISTS (SELECT 1 FROM question_bank_items qi WHERE qi.question_id = q.id AND qi.bank_id = ?)"); binds.push(Math.floor(Number(payload.bankId))); }
   const where = conditions.join(" AND ");
-  const [questionBanks, questionImports, questions, total, summary, bankSummary, importSummary] = await Promise.all([
+  const [questionBanks, questionImports, questions, total, summary, bankSummary, importSummary, bankHealth] = await Promise.all([
     db.prepare(`SELECT b.id, b.bank_code, b.name, b.exam_type, b.province, b.exam_year, b.subject,
       b.description, b.cover_color, b.status, b.updated_at, COUNT(i.id) AS question_count,
       (SELECT COUNT(*) FROM question_imports qi WHERE qi.bank_id = b.id) AS import_count,
@@ -11205,6 +11388,27 @@ async function adminListQuestions(payload: Record<string, unknown>) {
       SUM(CASE WHEN status IN ('uploading','queued','processing','cancelling') THEN 1 ELSE 0 END) AS processing_imports,
       SUM(CASE WHEN status IN ('failed','completed_with_errors') THEN 1 ELSE 0 END) AS failed_imports
       FROM question_imports`).first(),
+    db.prepare(`SELECT qb.id, qb.bank_code, qb.name, qb.status, qb.exam_type, qb.province, qb.exam_year, qb.subject,
+      COUNT(DISTINCT qbi.question_id) AS total_questions,
+      COUNT(DISTINCT CASE WHEN ${QUESTION_BANK_PUBLISHABLE_ITEM_SQL} THEN q.id END) AS usable_questions,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.review_status = 'approved' THEN q.module END) AS module_count,
+      COUNT(DISTINCT CASE WHEN q.status = 'active' AND q.review_status = 'approved' THEN q.source_year END) AS year_count,
+      SUM(CASE WHEN q.id IS NOT NULL AND trim(COALESCE(q.explanation, '')) = '' THEN 1 ELSE 0 END) AS missing_explanation,
+      SUM(CASE WHEN q.id IS NOT NULL AND q.subject = '行测' AND trim(COALESCE(q.answer, '')) = '' THEN 1 ELSE 0 END) AS missing_answer,
+      SUM(CASE WHEN q.id IS NOT NULL AND (q.source_year IS NULL OR trim(COALESCE(q.source_region, '')) = ''
+        OR trim(COALESCE(q.source, '')) = '' OR trim(COALESCE(q.source_batch, '')) = ''
+        OR trim(COALESCE(q.frequency, '')) = '' OR q.importance_stars IS NULL OR q.score_rate IS NULL)
+        THEN 1 ELSE 0 END) AS missing_tags,
+      SUM(CASE WHEN q.id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM questions duplicate_q
+        WHERE duplicate_q.id <> q.id AND duplicate_q.status = 'active'
+          AND length(trim(duplicate_q.stem)) >= 12 AND trim(duplicate_q.stem) = trim(q.stem)
+      ) THEN 1 ELSE 0 END) AS duplicate_risk,
+      CASE WHEN qb.status = 'published' AND NOT ${QUESTION_BANK_CAN_PUBLISH_SQL} THEN 1 ELSE 0 END AS published_unavailable
+      FROM question_banks qb
+      LEFT JOIN question_bank_items qbi ON qbi.bank_id = qb.id
+      LEFT JOIN questions q ON q.id = qbi.question_id
+      GROUP BY qb.id ORDER BY published_unavailable DESC, usable_questions ASC, qb.id DESC`).all<Record<string, unknown>>(),
   ]);
   const rawSummary = (summary ?? {}) as Record<string, unknown>;
   const rawBankSummary = (bankSummary ?? {}) as Record<string, unknown>;
@@ -11212,7 +11416,24 @@ async function adminListQuestions(payload: Record<string, unknown>) {
   const importsProcessing = Number(rawImportSummary.processing_imports ?? 0);
   const importsFailed = Number(rawImportSummary.failed_imports ?? 0);
   const importedRows = Number(rawImportSummary.imported_rows ?? 0);
+  const healthRows = bankHealth.results.map((row) => {
+    const usable = Number(row.usable_questions ?? 0);
+    const totalQuestions = Number(row.total_questions ?? 0);
+    const issueCount = Number(row.missing_explanation ?? 0) + Number(row.missing_answer ?? 0)
+      + Number(row.missing_tags ?? 0) + Number(row.duplicate_risk ?? 0);
+    const moduleTarget = String(row.subject) === "行测" ? 5 : String(row.subject) === "综合" ? 6 : 1;
+    const moduleCoverage = Math.min(100, Math.round(Number(row.module_count ?? 0) / moduleTarget * 100));
+    return {
+      ...row,
+      total_questions: totalQuestions,
+      usable_questions: usable,
+      module_coverage: moduleCoverage,
+      issue_count: issueCount,
+      exhaustion_level: usable <= 0 ? "blocked" : usable < 30 ? "critical" : usable < 100 ? "warning" : "healthy",
+    };
+  });
   return json({ questionBanks: questionBanks.results, questionImports: questionImports.results, questions: questions.results,
+    bankHealth: healthRows,
     pagination: { page, pageSize, total: Number(total?.count ?? 0) },
     summary: {
       totalQuestions: Number(rawSummary.question_count ?? 0),
@@ -11226,6 +11447,8 @@ async function adminListQuestions(payload: Record<string, unknown>) {
       totalBanks: Number(rawBankSummary.total_banks ?? 0),
       publishedBanks: Number(rawBankSummary.published_banks ?? 0),
       emptyPublishedBanks: Number(rawBankSummary.empty_published_banks ?? 0),
+      unhealthyBanks: healthRows.filter((item) => item.exhaustion_level !== "healthy" || Number(item.issue_count) > 0).length,
+      publishedUnavailableBanks: healthRows.filter((item) => Number(item.published_unavailable) > 0).length,
       importsProcessing, importsFailed, processingImports: importsProcessing, failedImports: importsFailed, importedRows,
     } });
 }
@@ -11347,9 +11570,11 @@ async function adminListGrowth(payload: Record<string, unknown>) {
   if (!canAdmin(payload, "growth.read")) return adminForbidden("growth.read");
   const db = getD1();
   const [codes, redemptions, events, activeUsers, rewardDays, inviteeRewardDays, monthlyCap] = await Promise.all([
-    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, max_uses, used_count, status, valid_until, created_at
+    db.prepare(`SELECT id, code_preview, batch_name, grant_type, duration_days, channel, created_by, max_uses, used_count, status, valid_until, created_at
       FROM redemption_codes ORDER BY id DESC LIMIT 300`).all(),
-    db.prepare(`SELECT r.id, r.redeemed_at, r.user_id, c.code_preview, c.grant_type, c.duration_days
+    db.prepare(`SELECT r.id, r.redeemed_at, r.completed_at, r.status, r.user_id,
+      r.membership_before_type, r.membership_before_end, r.membership_after_type, r.membership_after_end,
+      c.code_preview, c.batch_name, c.channel, c.created_by, c.grant_type, c.duration_days
       FROM redemptions r JOIN redemption_codes c ON c.id = r.code_id ORDER BY r.id DESC LIMIT 300`).all(),
     db.prepare(`SELECT event_name, COUNT(*) AS count FROM analytics_events
       WHERE user_id <> 'system' AND created_at >= datetime('now','-7 days')
@@ -12150,7 +12375,7 @@ export async function POST(request: Request) {
     else if (action === "saveExamProfile") response = await saveExamProfile(identity.userId, payload);
     else if (action === "searchJobPositions") response = await searchJobPositions(identity.userId, payload);
     else if (action === "toggleQuestionBank") response = await toggleQuestionBank(identity.userId, payload);
-    else if (action === "getPracticeBatch") response = await getPracticeBatch(identity.userId, payload);
+    else if (action === "getPracticeBatch") response = await getPracticeBatch(identity.userId, payload, identity.signedIn);
     else if (action === "getEssayPracticeBatch") response = await getEssayPracticeBatch(identity.userId, payload);
     else if (action === "saveEssayAttempt") response = await saveEssayAttempt(identity.userId, payload);
     else if (action === "submitPracticeAnswer") response = await submitPracticeAnswer(identity.userId, payload, identity.signedIn);
@@ -12171,7 +12396,7 @@ export async function POST(request: Request) {
     else if (action === "submitQuizAnswer") response = await submitQuizAnswer(identity.userId, payload);
     else if (action === "completeQuizAttempt") response = await completeQuizAttempt(identity.userId, payload);
     else if (action === "recordQuizShare") response = await recordQuizShare(identity.userId, payload);
-    else if (action === "getEssayReferenceLibrary") response = await getEssayReferenceLibrary(payload);
+    else if (action === "getEssayReferenceLibrary") response = await getEssayReferenceLibrary(identity.userId, payload);
     else if (action === "getSupportInfo") response = await getSupportInfo();
     else if (action === "addTodayItem") response = await addTodayItem(identity.userId, payload);
     else if (action === "updateTodayItem") response = await updateTodayItem(identity.userId, payload);

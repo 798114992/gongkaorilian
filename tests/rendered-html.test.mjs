@@ -68,13 +68,14 @@ test("the learner flow includes goal onboarding, question banks and spaced revie
 });
 
 test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defaults and survives refreshes", async () => {
-  const [page, layout, app, route, content, schema] = await Promise.all([
+  const [page, layout, app, route, content, schema, dailyPolicy] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/DailyPracticeApp.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/app/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/data/content.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/app/daily-plan-policy.mjs", import.meta.url), "utf8"),
   ]);
 
   assert.match(`${page}\n${layout}`, /10–60\s*分钟/);
@@ -82,8 +83,9 @@ test("daily practice supports a 10-minute fallback plus 30, 45 or 60-minute defa
   assert.match(schema, /dailyMinutes:[\s\S]*?\.default\(30\)/);
 
   assert.match(app, /buildDailyPlan/);
+  assert.match(app, /dailyPlanContract/);
   for (const questionCount of [5, 10, 15, 20]) {
-    assert.match(app, new RegExp(`questionCount:\\s*${questionCount}\\b`));
+    assert.match(dailyPolicy, new RegExp(`questionCount:\\s*${questionCount}\\b`));
   }
   assert.match(app, /planOverrides/);
   assert.match(app, /10分钟精简/);
